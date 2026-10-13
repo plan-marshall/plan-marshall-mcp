@@ -61,7 +61,8 @@
       "effort": {
         "default": "level-4",
         "verification-feedback": "level-3"
-      }
+      },
+      "worktree_setup_commands": []
     },
     "phase-6-finalize": {
       "max_iterations": 3,
@@ -79,7 +80,10 @@
         "default:finalize-step-security-audit": {
           "lane": "off"
         },
-        "default:pre-submission-self-review": {
+        "default:functional-review": {
+          "lane": "standard"
+        },
+        "default:code-review": {
           "lane": "standard"
         },
         "default:architecture-refresh": {
@@ -162,7 +166,8 @@
   "orchestrator": {
     "auto_emit": false,
     "effort": {},
-    "parallelization_scope": 1
+    "parallelization_scope": 1,
+    "use_worktree": false
   },
   "build": {
     "queue": {
@@ -311,8 +316,8 @@
       "plugin_cache_keep_versions": 5,
       "plugin_cache_keep_days": 3
     },
-    "provisioned_version": "0.1.1753",
-    "config_seed_fingerprint": "3f6947eb"
+    "provisioned_version": "0.1.1916",
+    "config_seed_fingerprint": "a2efc4ac"
   },
   "merge_queue": {
     "bypass_app_id": 2753519
