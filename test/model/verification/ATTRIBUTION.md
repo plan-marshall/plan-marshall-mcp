@@ -1,13 +1,14 @@
 # Attribution
 
-Third-party datasets the corpus uses, with their licence and holders. None of them is stored in this
-repository or in a release: the loader (`load.py`) fetches each at the commit pinned in `sources/<source>.json`,
-checks it against its hashes, and generates the items into a cache; this repository holds only our part (the
-manifests and the overlays). Every generated item names in `provenance.origin` the source, its commit, and the
+Third-party datasets selected for the corpus, with their licence and holders. Planned use (work package
+`question-corpus-public-datasets`; the loader and the manifests do not exist yet): none of them is stored in this
+repository or in a release; the loader (`load.py`) is to fetch each at the commit pinned in
+`sources/<source>.json`, check it against its hashes, and generate the items into a cache, so that this repository
+holds only our part (the manifests and the overlays). Every generated item names in `provenance.origin` the source, its commit, and the
 row, and its licence as an SPDX id. A source is listed here before its manifest lands; its status says whether
 it is in use.
 
-All sources below allow commercial use, change, and redistribution under the conditions stated. A dataset's
+All sources below (Apache-2.0, MIT, CC BY 4.0) allow commercial use, change, and redistribution under the conditions stated. A dataset's
 licence covers what its authors hold; content they took from elsewhere keeps its own terms, named per source.
 
 ## HumanEvalComm
@@ -40,9 +41,11 @@ licence covers what its authors hold; content they took from elsewhere keeps its
 ## AgentAbstain
 
 - Status: selected 2026-10-14, no manifest yet.
-- Source: https://github.com/AntiQuality/agentabstain; paper "AgentAbstain: Do LLM Agents Know When Not to
-  Act?", https://arxiv.org/abs/2607.10059.
-- Licence: MIT, Copyright (c) 2026 The AgentAbstain Authors.
+- Source: https://huggingface.co/datasets/antiquality/agentabstain (file `tasks.jsonl`); paper "AgentAbstain: Do LLM
+  Agents Know When Not to Act?", https://arxiv.org/abs/2607.10059. The companion code at
+  https://github.com/AntiQuality/agentabstain (MIT, Copyright (c) 2026 The AgentAbstain Authors) is not used.
+- Licence: CC BY 4.0, as declared on the dataset card (https://creativecommons.org/licenses/by/4.0/); creators:
+  the AgentAbstain authors. Attribution: this section, and the source named in every generated item.
 - What our overlay adds: act-or-abstain pairs that can be stated without their sandbox, recast as
   escalate-or-proceed items.
 

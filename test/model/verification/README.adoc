@@ -231,7 +231,7 @@ In the evaluation this was done by hand for two levels per role (https://github.
 
 == Origin
 
-The corpus was started on 2026-10-04 with cases from real plans of `cuioss/API-Sheriff` and `cuioss/plan-marshall` (triage, re-planning), hand-made diffs against the real code of both repositories (reviews), closed decision tasks written on 2026-10-01, rule-following tasks written on 2026-10-03, and real review comments with written injections (screening). The confirmed references were checked against the answers of two models, warm and fresh; five were resolved from those answers and two gained accepted alternatives (see the items' `review.notes`). Public datasets the corpus uses are fetched at a pinned commit, never stored here; `ATTRIBUTION.md` lists each with its licence and holders.
+The corpus was started on 2026-10-04 with cases from real plans of `cuioss/API-Sheriff` and `cuioss/plan-marshall` (triage, re-planning), hand-made diffs against the real code of both repositories (reviews), closed decision tasks written on 2026-10-01, rule-following tasks written on 2026-10-03, and real review comments with written injections (screening). The confirmed references were checked against the answers of two models, warm and fresh; five were resolved from those answers and two gained accepted alternatives (see the items' `review.notes`). Public datasets are selected for the corpus and are to be fetched at a pinned commit, never stored here, once the loader of the work package `question-corpus-public-datasets` exists; `ATTRIBUTION.md` lists each with its licence and holders.
 
 === Provenance rules
 
