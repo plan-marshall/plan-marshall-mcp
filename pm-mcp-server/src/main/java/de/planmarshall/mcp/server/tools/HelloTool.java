@@ -10,7 +10,7 @@
 package de.planmarshall.mcp.server.tools;
 
 import de.cuioss.tools.logging.CuiLogger;
-import de.planmarshall.core.log.PmMcpLogMessages;
+import de.planmarshall.runtime.log.RuntimeLogMessages;
 import io.quarkiverse.mcp.server.Tool;
 import io.quarkiverse.mcp.server.ToolArg;
 
@@ -31,7 +31,7 @@ public class HelloTool {
      */
     @Tool(description = "Returns a greeting for the given name.")
     public String hello(@ToolArg(description = "The name to greet") String name) {
-        LOGGER.info(PmMcpLogMessages.INFO.HELLO_TOOL_INVOKED, name);
+        LOGGER.info(RuntimeLogMessages.INFO.HELLO_TOOL_INVOKED, name);
         return "Hello, " + name + "!";
     }
 }

@@ -15,9 +15,9 @@ import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import de.cuioss.tools.logging.CuiLogger;
-import de.planmarshall.core.log.PmMcpLogMessages;
 import de.planmarshall.mcp.server.runtime.RuntimeContext;
 import de.planmarshall.mcp.server.web.WebListener;
+import de.planmarshall.runtime.log.RuntimeLogMessages;
 import de.planmarshall.runtime.web.WebListenerConflictException;
 import de.planmarshall.runtime.web.WebState;
 import io.quarkus.runtime.Quarkus;
@@ -158,7 +158,7 @@ public class RuntimeApiResource {
     @POST
     @Path("runtime/stop")
     public Response stop() {
-        LOGGER.info(PmMcpLogMessages.INFO.RUNTIME_STOP_REQUESTED);
+        LOGGER.info(RuntimeLogMessages.INFO.RUNTIME_STOP_REQUESTED);
         vertx.setTimer(STOP_DELAY_MILLIS, _ -> Quarkus.asyncExit(0));
         return Response.accepted().build();
     }

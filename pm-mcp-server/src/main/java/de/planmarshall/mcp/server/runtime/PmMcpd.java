@@ -13,11 +13,14 @@ import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 
 
 import de.planmarshall.api.MachinePaths;
+import de.planmarshall.core.service.AuditSink;
+import de.planmarshall.runtime.start.AuditChainVerification;
 import de.planmarshall.runtime.start.NativeLibraryPath;
 import de.planmarshall.runtime.start.StartupSequence;
 import io.quarkus.runtime.Quarkus;
@@ -42,7 +45,26 @@ public final class PmMcpd {
     /** Quarkus configuration key of the domain socket path. */
     public static final String SOCKET_PROPERTY = "quarkus.http.domain-socket";
 
+    /**
+     * The audit sink while the runtime has no audit store: it refuses every record instead of dropping it, so the
+     * start sequence logs a record it could not hand over and goes on.
+     */
+    static final AuditSink NO_AUDIT_STORE = event -> {
+        throw new UncheckedIOException(new IOException("no audit store, record '" + event.event() + "' not appended"));
+    };
+
     private PmMcpd() {
+    }
+
+    /**
+     * The startup steps before the bind for the running user. The runtime has no audit trail yet: there is no chain
+     * to verify ({@link AuditChainVerification#NONE}) and no store to hand a record to ({@link #NO_AUDIT_STORE}).
+     *
+     * @param paths the machine paths of the runtime
+     * @return the startup sequence
+     */
+    public static StartupSequence startupSequence(MachinePaths paths) {
+        return new StartupSequence(paths, System.getProperty("user.name"), AuditChainVerification.NONE, NO_AUDIT_STORE);
     }
 
     /**
@@ -53,7 +75,7 @@ public final class PmMcpd {
         var paths = MachinePaths.current();
         StartupSequence.Outcome outcome;
         try {
-            outcome = new StartupSequence(paths, System.getProperty("user.name")).run(new SecureRandom());
+            outcome = startupSequence(paths).run(new SecureRandom());
         } catch (IOException e) {
             outcome = new StartupSequence.Outcome.Refused(e.toString());
         }

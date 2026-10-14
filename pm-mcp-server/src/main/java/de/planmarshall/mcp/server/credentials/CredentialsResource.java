@@ -13,11 +13,11 @@ import java.util.Map;
 
 
 import de.cuioss.tools.logging.CuiLogger;
-import de.planmarshall.core.log.PmMcpLogMessages;
 import de.planmarshall.runtime.credentials.CredentialAccount;
 import de.planmarshall.runtime.credentials.InvalidCredentialNameException;
 import de.planmarshall.runtime.credentials.SecretStore;
 import de.planmarshall.runtime.credentials.SecretStoreException;
+import de.planmarshall.runtime.log.RuntimeLogMessages;
 import io.quarkus.security.Authenticated;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -134,7 +134,7 @@ public class CredentialsResource {
      */
     @ServerExceptionMapper
     public RestResponse<Map<String, String>> storeFailed(SecretStoreException e) {
-        LOGGER.error(e, PmMcpLogMessages.ERROR.CREDENTIAL_STORE_FAILED, store.name(), e.getMessage());
+        LOGGER.error(e, RuntimeLogMessages.ERROR.CREDENTIAL_STORE_FAILED, store.name(), e.getMessage());
         int status = e.reason() == SecretStoreException.Reason.LOCKED ? LOCKED : 500;
         return RestResponse.ResponseBuilder.<Map<String, String>>create(status)
                 .entity(Map.of("error", e.reason().code())).build();

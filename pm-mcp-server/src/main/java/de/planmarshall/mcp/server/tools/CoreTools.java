@@ -17,7 +17,7 @@ import java.util.List;
 
 
 import de.cuioss.tools.logging.CuiLogger;
-import de.planmarshall.core.log.PmMcpLogMessages;
+import de.planmarshall.runtime.log.RuntimeLogMessages;
 import io.quarkiverse.mcp.server.ToolManager;
 import io.quarkiverse.mcp.server.ToolResponse;
 import io.quarkus.runtime.StartupEvent;
@@ -68,7 +68,7 @@ public class CoreTools {
         var registered = new ArrayList<String>();
         for (var name : NAMES) {
             if (toolManager.getTool(name) != null) {
-                LOGGER.warn(PmMcpLogMessages.WARN.CORE_TOOL_SHADOWED, name);
+                LOGGER.warn(RuntimeLogMessages.WARN.CORE_TOOL_SHADOWED, name);
                 continue;
             }
             var definition = load(name);
@@ -84,7 +84,7 @@ public class CoreTools {
                     .register();
             registered.add(name);
         }
-        LOGGER.info(PmMcpLogMessages.INFO.CORE_TOOLS_REGISTERED, registered);
+        LOGGER.info(RuntimeLogMessages.INFO.CORE_TOOLS_REGISTERED, registered);
     }
 
     /**

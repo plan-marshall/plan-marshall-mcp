@@ -184,13 +184,13 @@ class WebListenerBehaviourTest {
             listener.apply(false, false, port, "the closing request");
 
             LogAsserts.assertLogMessagePresentContaining(TestLogLevel.INFO,
-                    "PM_MCP-15: Web listener open requested on 127.0.0.1:0 (lan: false), cause: the first request");
+                    "PM_RUNTIME-7: Web listener open requested on 127.0.0.1:0 (lan: false), cause: the first request");
             LogAsserts.assertLogMessagePresentContaining(TestLogLevel.INFO,
-                    "PM_MCP-15: Web listener open requested on 127.0.0.1:" + port
+                    "PM_RUNTIME-7: Web listener open requested on 127.0.0.1:" + port
                             + " (lan: false), cause: the second request");
             LogAsserts.assertLogMessagePresentContaining(TestLogLevel.INFO,
-                    "PM_MCP-17: Web listener on port " + port + " closing, cause: the closing request");
-            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.INFO, "PM_MCP-12");
+                    "PM_RUNTIME-8: Web listener on port " + port + " closing, cause: the closing request");
+            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.INFO, "PM_RUNTIME-4");
         }
 
         @Test
@@ -209,7 +209,7 @@ class WebListenerBehaviourTest {
                 listener.apply(false, true, 0, "test");
             }
 
-            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.WARN, "PM_MCP-113: Web listener on port " + port
+            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.WARN, "PM_RUNTIME-103: Web listener on port " + port
                     + ": connection failed before a request (TLS handshake or connection setup): "
                     + "NotSslRecordException");
         }
@@ -263,7 +263,7 @@ class WebListenerBehaviourTest {
             assertEquals(1, asked.get());
             assertFalse(listener.state().open());
             assertEventuallyFree(candidate.get());
-            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.WARN, "PM_MCP-112");
+            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.WARN, "PM_RUNTIME-102");
         }
 
         @Test
