@@ -1,0 +1,86 @@
+= A worker's question and its continuation verified with real harnesses
+:nofooter:
+
+link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-loop-verification`
+
+[horizontal]
+Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
+Where:: pm-e2e, experiment code only in the one directory `pm-e2e/src/test/java/de/planmarshall/e2e/experiment/question/` on the package's branch, deleted before the merge, so that the package's final diff shows no file there; the results land in `plan-marshall-documentation`
+Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+
+== What
+
+A measurement in the manner of Milestone 0 Part A (link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#method[Evaluation Reference, Method]) of the loop a worker's question runs through: the server starts a harness with a task, the harness asks, the server carries the question to the operator or to a quorum, and the work goes on with the answer. Part A measured the consultation (E5), in which the asker waits for another role's answer; it did not measure a question for the operator or a quorum. For such a question the specification has three ways on (link:../../../plan-marshall-documentation/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#continuation[Model Work § Continuing after a Question]): the worker *holds* its task in `pm_wait` and continues in the same context; it ends with its session stored and a *resumed* session continues; or, as the fallback, the task ends `asked` and a new task carries the answer in `facts.answers`. Which harness can do which (`headless.resumability`), for how long, at what cost against starting again, and whether the answer acknowledgement detects a worker that stopped while it waited, is what this package measures. It runs before `ask` and the continuation are built, so that a result that proves the specification wrong corrects it before the code follows it, and its results set the shipped `headless.resumability` values and the `questions` values of the shipped roles.
+
+== Questions and Pass Criteria
+
+The criteria are fixed before the first measured run and not changed by it.
+
+[cols="1,4,4",options="header"]
+|===
+|Item |Question |Pass criterion
+
+|Q1
+|Does a worker ask through the link? On a fixture whose task cannot be decided without an answer (a contradictory interface contract in an envelope task; an underdetermined judgment in a task state that declares `ask`), the worker follows `ask:TASK-NNN` or `ask` with a question envelope that the server accepts: two to five options, exactly one recommended, confidence, rationale, decision kind.
+|At least 95 % of the asks accepted on the first submit or after one `invalid_link_args` refusal; no ask lost.
+
+|Q2
+|Does it ask only there? The worker never asks through its host's own question tool (`AskUserQuestion`, `question`, `ask_question`), never ends its turn with a question in prose, and does not guess on the fixtures of Q1. The control fixture holds the answer in its facts: the worker asks nothing. On each host, record what the host's own question tool does in a headless worker where it cannot be withheld (Antigravity runs with all host tools): it hangs, fails, or answers itself.
+|No host question tool call and no prose question in any run; asks on at least 95 % of the Q1 fixtures; no guessed decision on any Q1 fixture; no ask on the control.
+
+|Q3
+|Does it stop after asking where it does not continue? After the `asked` representation (`links: []`) a fresh worker ends with its `job-result`, and a warm worker calls `pm_wait`; neither changes the worktree after the ask.
+|Every run; time from the ask to the end or the next `pm_wait` recorded per host.
+
+|Q4
+|Does the continuing task apply the answer? The task after the question, served fresh and warm, by the same and by another harness, receives `facts.answers` with an answered option, an answer with a text, and an assumed default. It decides as the answer says, does not ask the answered question again, and continues the envelope from its remaining plan tasks without doing a submitted one again.
+|The decision follows the answer in at least 95 % of the runs; no answered question asked again; no submitted plan task done again.
+
+|Q5
+|Does a second question and the bound work? A fixture with two unknowns that come to light one after the other leads to a second, different ask and then to the submit. With the bound reached (the link no longer offered), the worker decides on its own judgment, states it in its submission, or reports the task infeasible.
+|A second ask on at least 90 % of the runs, never the same question twice; with the bound reached, every run ends in a submission that states the worker's judgment or an explicit infeasible report, with no lost task and no prose question.
+
+|Q6
+|Does another model answer? The vote tasks of a quorum (`adjudicate.decisions`) run on two harnesses with different models: each vote follows its links blind to the recommendation with a valid vote, and a decided set reaches the continuing task as `facts.answers` like an operator's answer. A task that consults (`consult:<role>`) and then asks keeps both apart: the consultation answer through its `pm_wait`, the question as a new task.
+|Every vote valid within the task protocol's re-offer budget; the decided answer applied as in Q4; consultation and question never mixed up.
+
+|Q7
+|Does the fallback survive time and restarts? A question that stays open for an hour without a continuation holds no worker and no model slot; a warm worker of the role is recycled idle meanwhile; after a stub restart with the record open, the answer still reaches the continuing task.
+|No worker or slot held while the record is open; the answer delivered exactly once after the restart.
+
+|R1
+|*Hold.* After its ask the worker holds `pm_wait`; the answer comes after one window, after two, and after 5, 15, 30, and 60 minutes. The same generation acknowledges the answer, applies it, and finishes the plan task from the context it had: it names a canary it read before the ask without reading it again and does not redo work done before the ask. On each host, including the hosts that cut a held call (Antigravity at 180 s, without progress reset).
+|Continued in the same generation in at least 95 % of the runs per measured duration; the longest duration that passes is the host's `max_hold_seconds`.
+
+|R2
+|*Resume.* The worker ends after its ask with its session stored; after 5 minutes, 1 hour, and 24 hours, and once after a stub restart, a generation started from the harness's resume command on the session id read from the structured result is offered the task with the answer, acknowledges it, applies it, and names the canary. A resume of a missing session and of one older than the limit fails at once and never hangs. OpenCode with its per-worker data home kept while suspended.
+|Continued from the session in at least 95 % of the runs per age; time to the acknowledgement recorded; the oldest age that passes is the host's `max_age_seconds`; no hung resume.
+
+|R3
+|*Answer acknowledgement as health check.* Faults while a worker holds: its process stopped (`SIGSTOP`) before the answer, its held call cut by the host, its model request left hanging after the answer, its process killed. And after a resume: the resumed process exits before its first call.
+|Every fault detected by the missing answer acknowledgement within the host's acknowledgement deadline (by silence where the acknowledgement is informational), never earlier; the task then resumed or offered again with `facts.answers` exactly once.
+
+|R4
+|*Cost.* For the same fixtures, the tokens and time of hold (its wake-ups), of resume (the re-read of the stored context), and of the fallback (a new task doing the work again), per harness and model, with small and large work before the ask.
+|No criterion: the figures set the shipped `questions.hold_seconds` and `resume_within_seconds` per role, and whether a role continues at all.
+|===
+
+== Method
+
+* *Stub and driver*: the Part A setup rebuilt for this package (experiment code only): a stub MCP server with `pm_wait`, `pm_state`, and `pm_do`, the task protocol with leases per generation, the links `ask`, `ask:TASK-NNN`, `consult:<role>`, the vote links of the quorum, the question records, and `facts.answers`; a driver that starts the workers headless through `pm-exec` in worker directories outside the repository, and answers each question on the operator's behalf (scripted, with the answer chosen per fixture) or by the quorum. Every figure comes from the stub's event log, the relay's host-side log, and the worker's output, never from what a model reports about itself.
+* *Hosts and models*: Claude Code with `claude-haiku-4-5` (an item it fails repeated with `claude-sonnet-5-5`), OpenCode with a data directory per worker, Antigravity as a smoke run (it is not worker-eligible yet); 20 runs per fixture and host, warm and fresh.
+* *Fixtures*: taken from archived `plan-marshall` plans where one asked a question, plus the seeded contradictions of Q1 and Q5 and the control of Q2; each with the answer the operator confirmed before the run.
+* *Probe of the profile verification*: R1 and R2 are run with the same probe task the stage `resumability` of `pm-operator profile verify` will use, so that the stage, once built, repeats this measurement on every machine and harness version (link:../../../plan-marshall-documentation/doc/specification/client-profiles/01-profile-schema.adoc#profile-verification[Client Profiles § Profile Verification]).
+* *Q7* runs on Claude Code only; the deterministic part of the loop (no slot held, delivery after a restart, hold, suspend and resume, the missing answer acknowledgement, and every fallback reason) also becomes a scenario of the fixture harness in link:worker-integration-tests.adoc[`worker-integration-tests`].
+
+== Trace
+
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+
+* Requirements: link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-12[PM-WF-12], link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-18[PM-WF-18], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-2[PM-WORK-2], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-4[PM-WORK-4]
+* Specification: link:../../../plan-marshall-documentation/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#question-records[Model Work § Question Records] (with the answer in the next task and the question bound); link:../../../plan-marshall-documentation/doc/specification/model-work/10-decision-quorum.adoc[§ Decision Quorum]; link:../../../plan-marshall-documentation/doc/specification/model-work/05-consultation.adoc[§ Consultation]; link:../../../plan-marshall-documentation/doc/specification/hypermedia-format/01-representation-and-link-forms.adoc#answers-facts[Hypermedia Format § `facts.answers`]; link:../../../plan-marshall-documentation/doc/specification/client-profiles/01-profile-schema.adoc#headless-resumability[Client Profiles § Resumability]; link:../../../plan-marshall-documentation/doc/specification/model-work/03-supervision-and-recycling.adoc#detection[Model Work § Detection] (the missing answer acknowledgement); link:../../../plan-marshall-documentation/doc/specification/client-profiles/02-placeholders-and-detection.adoc[Client Profiles § Placeholders] (`{{tool:ask_user}}` withheld from workers); link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#limits[Evaluation Reference, Limits]
+* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/model-work.adoc[Model Work]
+
+== Done When
+
+Every item has its result against its criterion, recorded as a row of the link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference] with its limits, and the limit _A worker's question was not measured_ removed there; a specification the results prove wrong is corrected in the same change, and a value they settle is written into its owning specification: `headless.resumability` per shipped profile, the `questions` values of the shipped roles, the question bound, a host that cannot withhold its question tool; the roadmap item is checked; the experiment code is deleted.

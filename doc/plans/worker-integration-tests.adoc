@@ -11,6 +11,7 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 == What
 
 * A fixture harness through `pm-exec` and the worker relay: the worker faults, recycling, the start-failure guard, consultation, fencing, and a runtime crash with a leased task.
+* The continuation after a question with the fixture harness: hold, suspend and resume, the answer acknowledgement and its missing case, and every fallback reason (link:question-loop-verification.adoc[`question-loop-verification`] measures the real harnesses).
 * The adversarial tests of a worker's confinement and binding.
 
 == Trace
