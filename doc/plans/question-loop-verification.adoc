@@ -5,7 +5,7 @@ link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-loop-verific
 
 [horizontal]
 Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
-Where:: pm-e2e (experiment code on the package's branch, deleted before the merge; the results land in `plan-marshall-documentation`)
+Where:: pm-e2e, experiment code only in the one directory `pm-e2e/src/test/java/de/planmarshall/e2e/experiment/question/` on the package's branch, deleted before the merge, so that the package's final diff shows no file there; the results land in `plan-marshall-documentation`
 Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
 
 == What
@@ -26,7 +26,7 @@ The criteria are fixed before the first measured run and not changed by it.
 
 |Q2
 |Does it ask only there? The worker never asks through its host's own question tool (`AskUserQuestion`, `question`, `ask_question`), never ends its turn with a question in prose, and does not guess on the fixtures of Q1. The control fixture holds the answer in its facts: the worker asks nothing. On each host, record what the host's own question tool does in a headless worker where it cannot be withheld (Antigravity runs with all host tools): it hangs, fails, or answers itself.
-|No host question tool call and no prose question in any run; asks on at least 95 % of the Q1 fixtures; no ask on the control.
+|No host question tool call and no prose question in any run; asks on at least 95 % of the Q1 fixtures; no guessed decision on any Q1 fixture; no ask on the control.
 
 |Q3
 |Does it stop after asking where it does not continue? After the `asked` representation (`links: []`) a fresh worker ends with its `job-result`, and a warm worker calls `pm_wait`; neither changes the worktree after the ask.
@@ -38,7 +38,7 @@ The criteria are fixed before the first measured run and not changed by it.
 
 |Q5
 |Does a second question and the bound work? A fixture with two unknowns that come to light one after the other leads to a second, different ask and then to the submit. With the bound reached (the link no longer offered), the worker decides on its own judgment, states it in its submission, or reports the task infeasible.
-|A second ask on at least 90 % of the runs, never the same question twice; with the bound reached, no lost task and no prose question.
+|A second ask on at least 90 % of the runs, never the same question twice; with the bound reached, every run ends in a submission that states the worker's judgment or an explicit infeasible report, with no lost task and no prose question.
 
 |Q6
 |Does another model answer? The vote tasks of a quorum (`adjudicate.decisions`) run on two harnesses with different models: each vote follows its links blind to the recommendation with a valid vote, and a decided set reaches the continuing task as `facts.answers` like an operator's answer. A task that consults (`consult:<role>`) and then asks keeps both apart: the consultation answer through its `pm_wait`, the question as a new task.
