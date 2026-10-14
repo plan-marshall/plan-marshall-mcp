@@ -2,7 +2,7 @@
 
 Third-party datasets selected for the corpus, with their licence and holders. Planned use (work package
 `question-corpus-public-datasets`; the loader and the manifests do not exist yet): none of them is stored in this
-repository or in a release; the loader (`load.py`) is to fetch each at the commit pinned in
+repository or in a release; the loader (Java, `pm-mcp-core`, work package `corpus-sources`) is to fetch each at the commit pinned in
 `sources/<source>.json`, check it against its hashes, and generate the items into a cache, so that this repository
 holds only our part (the manifests and the overlays). Every generated item names in `provenance.origin` the source, its commit, and the
 row, and its licence as an SPDX id. A source is listed here before its manifest lands; its status says whether
