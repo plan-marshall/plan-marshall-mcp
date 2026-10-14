@@ -1,0 +1,72 @@
+= The question corpus rebuilt on public datasets
+:nofooter:
+
+link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-corpus-public-datasets`
+
+[horizontal]
+Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
+Where:: `test/model/verification/` (new topic `question/`, the schema, `validate.py`, `ATTRIBUTION.md`, `LICENSES/`); worked as a plain Claude Code session, not through `plan-marshall`
+Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+
+== What
+
+The questions a model meets in `PM-MCP` are of three kinds, and each needs its own test material:
+
+* *Asking at all*: a worker that cannot proceed asks through its task's link instead of guessing, and does not ask when nothing is missing.
+* *Applying an answer*: the worker continues with the answer it got, and the result shows it.
+* *Deciding or escalating*: a role or a quorum decides a question alone only where it may; a question that needs the operator goes to the operator. And an answer in the operator's own words is mapped onto the decision correctly.
+
+The corpus has none of the first two and only written items for the third. The archive of real operator questions (`cuioss/plan-marshall-telemetry`, `verification/`) cannot fill them: those questions need the whole context of their plan, and they stay private. Public datasets under permissive licences can fill the first two completely and the third in part. This package rebuilds the question part of the corpus on them, with HumanEvalComm as its core, and records their attribution.
+
+== Sources (the best of the permissive datasets)
+
+Selected on 2026-10-14, each licence read from its dataset card or repository on that day:
+
+[cols="2,1,4,3",options="header"]
+|===
+|Dataset |Licence |What it brings |Used for
+
+|HumanEvalComm (v2), https://huggingface.co/datasets/jie-jw-wu/HumanEvalComm[`jie-jw-wu/HumanEvalComm`]; built on HumanEval (https://github.com/openai/human-eval[`openai/human-eval`], MIT)
+|Apache-2.0 (HumanEval content: MIT)
+|762 HumanEval problems made ambiguous (1a), inconsistent (1c), incomplete (1p), or two of these at once; the original problem holds the clarification, the HumanEval tests check the solution
+|the core: ask or proceed, the question's target, applying the answer (graded by tests), the question-loop tasks
+
+|BouncerBench, https://huggingface.co/datasets/uw-swag/input-bouncer[`uw-swag/input-bouncer`] and https://huggingface.co/datasets/uw-swag/bouncerbench-lite[`bouncerbench-lite`]; built on SWE-bench (https://github.com/SWE-bench/SWE-bench[MIT])
+|MIT (issue texts: their projects' terms)
+|real GitHub issues of SWE-bench repositories labelled too vague to fix or fixable
+|escalate or proceed at repository scale
+
+|AgentAbstain, https://github.com/AntiQuality/agentabstain[`AntiQuality/agentabstain`]
+|MIT
+|263 paired act-or-abstain agent tasks in executable sandboxes
+|a few general controls of the escalate decision (where a pair can be stated without its sandbox)
+|===
+
+Considered and not used: HiL-Bench (`ScaleAI/hil-bench`: no licence on the dataset or its repository, so no right to use; its design, a blocker registry with a resolution per blocker, is taken over as an idea only), Ambig-SWE (the repository `Ruan-WH/Ambig-SWE` carries MIT with data, but cannot be confirmed as the authors' release; it is added only once its origin is confirmed), Dialogue-SWEBench and the underspecified SWE-bench variant of "Ask or Assume?" (no data release found).
+
+*Licence terms that bind this package*: MIT and Apache-2.0 both allow commercial use, change, and redistribution. MIT requires the copyright and permission notice; Apache-2.0 requires the licence text, any `NOTICE`, and a statement of the changes made. A dataset licence covers what its authors hold: content they took from elsewhere keeps its own terms, which `ATTRIBUTION.md` names per source (HumanEval inside HumanEvalComm; the SWE-bench data and the GitHub issue texts inside BouncerBench).
+
+== Tasks
+
+. *Attribution first.* `test/model/verification/ATTRIBUTION.md` (created with this package's plan, one section per source) is completed for every source before its first item lands: the licence texts are added below `LICENSES/` (`Apache-2.0.txt`, `MIT-HumanEval.txt`, `MIT-BouncerBench.txt`, `MIT-SWE-bench.txt`, `MIT-AgentAbstain.txt`), each with the copyright line of its holder, and every item carries in `provenance.origin` the dataset, its revision (the Hugging Face commit or the repository commit), and the row it was taken from. The corpus README's _Origin_ names `ATTRIBUTION.md`.
+. *Schema*: a grading method `execution` (the answer is code; `target.tests` holds the tests, run without network in a confined job, pass when every test passes) and `provenance.kind: imported` with a required `origin.license` (SPDX id); `validate.py` checks both, and that every imported item's source has its section in `ATTRIBUTION.md`.
+. *`question/ask-or-proceed`* (role `worker`): per HumanEvalComm problem chosen, the modified description as a task and the closed choice `ask` or `proceed`; the original description of the same problem as its control (`proceed`). A stratified sample: 10 problems per category (1a, 1c, 1p, 2ac, 2ap, 2cp) and 20 controls, chosen so that one problem's variants never share a warm session (`group`, `contamination`). A rubric item checks that the question names what was changed (HumanEvalComm's measure of a good question).
+. *`question/apply-answer`* (role `worker`, grading `execution`): the same modified problems, with the clarification the original description gives as the answer, written as an operator's reply; the solution passes the HumanEval tests. This is the objective check of "the worker applied the answer" that no archive item can give.
+. *`question/escalate-or-proceed`* (role `worker` and the quorum roles): BouncerBench input-bouncer issues with their labels (too vague: escalate; fixable: proceed), a sample balanced over repositories and labels; and the AgentAbstain pairs that can be stated without their sandbox.
+. *`question/own-words`* (role `interpret`): written answers in own words to HumanEvalComm clarifications ("descending, but keep equal elements in input order"), with their correct mapping (option, option with condition, new option, delegation, unclear), `provenance.kind: written`, based on the imported problem.
+. *The question-loop tasks*: each `apply-answer` problem as a minimal repository (the function stub, the tests, a task that names the file), which the measurement link:question-loop-verification.adoc[`question-loop-verification`] uses for Q1 to Q5 and R3: asking is forced, the answer to deliver is given, and the tests show whether it was applied. R1, R2, and R4 (continuation against starting again) need real work before the ask and keep the scenarios from the private archive.
+. *The private archive set is re-cut*, in `cuioss/plan-marshall-telemetry` (`verification/`), not here: its question items become escalate-or-decide items (reference `escalate` where the record shows the decision needed the operator; the operator's actual choice kept in the notes, not as the target), because a decider without the plan's whole context cannot be graded on the operator's choice; its own-words and scenario files stay.
+. *Retire what the new topic replaces*: the written `decision/*` items that test only "ask or not" are compared with `question/*` and retired where covered (`review.status: retired`, never deleted).
+. *Contamination*: HumanEval is in the training data of most models, which may recall the original and proceed instead of asking. The run of the package measures the ask rate on the modified problems against the controls per model, and records it in the corpus README; a category whose ask rate does not differ from its controls is reported, not silently kept.
+
+== Trace
+
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here.
+
+* Requirements: link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-6[PM-WORK-6], link:../../../plan-marshall-documentation/doc/requirements/12-testing.adoc#PM-TEST-6[PM-TEST-6], link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-18[PM-WF-18]
+* Specification: link:../../../plan-marshall-documentation/doc/specification/model-work/01-roles-and-configuration.adoc#qualification-topics[Model Work § Corpus Topics of a Role]; link:../../../plan-marshall-documentation/doc/specification/model-work/10-decision-quorum.adoc#quorum-calibration[§ Quorum Calibration]; link:../../../plan-marshall-documentation/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#question-records[§ Question Records]
+* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/model-work.adoc[Model Work]
+
+== Done When
+
+`validate.py` passes with the new topic, the `execution` method, and an `ATTRIBUTION.md` section with licence text for every imported source; every imported item names its dataset revision and row; the ask rate per category against the controls is recorded; the private archive set is re-cut; `question-loop-verification` builds its loop tasks from `question/apply-answer`.

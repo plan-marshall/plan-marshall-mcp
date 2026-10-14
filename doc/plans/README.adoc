@@ -99,10 +99,16 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:job-runtime-wiring.adoc[`job-runtime-wiring`]; link:worker-surface-tools.adoc[`worker-surface-tools`]; link:../../../pm-mcp-core/doc/plans/supervision-scenarios.adoc[`pm-mcp-core` / `supervision-scenarios`]
 |Milestone 4
 
+|link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]
+|The question corpus rebuilt on public datasets
+|`open`
+|nothing
+|Milestone 4
+
 |link:question-loop-verification.adoc[`question-loop-verification`]
 |A worker's question and its continuation verified with real harnesses
 |`open`
-|nothing
+|link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]
 |Milestone 4
 
 |link:idle-memory-bound.adoc[`idle-memory-bound`]
