@@ -102,7 +102,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]
 |The question corpus rebuilt on public datasets
 |`open`
-|nothing
+|link:../../../pm-mcp-core/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
 |Milestone 4
 
 |link:question-loop-verification.adoc[`question-loop-verification`]
@@ -120,7 +120,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:qualification-corpus-in-the-build.adoc[`qualification-corpus-in-the-build`]
 |The qualification corpus shipped and validated
 |`open`
-|link:../../../pm-mcp-core/doc/plans/role-qualification.adoc[`pm-mcp-core` / `role-qualification`]; link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]
+|link:../../../pm-mcp-core/doc/plans/role-qualification.adoc[`pm-mcp-core` / `role-qualification`]; link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]; link:../../../pm-mcp-core/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
 |Milestone 4
 
 |===
