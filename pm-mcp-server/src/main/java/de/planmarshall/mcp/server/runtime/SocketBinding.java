@@ -19,7 +19,7 @@ import java.nio.file.StandardOpenOption;
 
 
 import de.cuioss.tools.logging.CuiLogger;
-import de.planmarshall.core.log.PmMcpLogMessages;
+import de.planmarshall.runtime.log.RuntimeLogMessages;
 import de.planmarshall.runtime.start.PosixModes;
 import de.planmarshall.runtime.start.StartupSequence;
 import io.quarkus.runtime.Quarkus;
@@ -58,9 +58,9 @@ public class SocketBinding {
         try {
             secure(socket);
             writeRecord();
-            LOGGER.info(PmMcpLogMessages.INFO.RUNTIME_READY, socket, context.pid());
+            LOGGER.info(RuntimeLogMessages.INFO.RUNTIME_READY, socket, context.pid());
         } catch (IOException e) {
-            LOGGER.error(e, PmMcpLogMessages.ERROR.SOCKET_NOT_SECURED, socket);
+            LOGGER.error(e, RuntimeLogMessages.ERROR.SOCKET_NOT_SECURED, socket);
             Quarkus.asyncExit(StartupSequence.EXIT_REFUSED);
         }
     }
@@ -74,7 +74,7 @@ public class SocketBinding {
     static void secure(Path socket) throws IOException {
         var mode = Files.getPosixFilePermissions(socket, LinkOption.NOFOLLOW_LINKS);
         if (!mode.equals(PosixModes.FILE)) {
-            LOGGER.warn(PmMcpLogMessages.WARN.SOCKET_MODE_RESTRICTED, socket, PosixModes.octal(mode));
+            LOGGER.warn(RuntimeLogMessages.WARN.SOCKET_MODE_RESTRICTED, socket, PosixModes.octal(mode));
             Files.setPosixFilePermissions(socket, PosixModes.FILE);
         }
         var after = Files.getPosixFilePermissions(socket, LinkOption.NOFOLLOW_LINKS);

@@ -71,7 +71,7 @@ class WebListenerPortSelectionTest {
                 assertNotEquals(occupied, state.port());
                 assertNotEquals(0, state.port());
                 assertEquals(2, asked.get());
-                LogAsserts.assertLogMessagePresentContaining(TestLogLevel.WARN, "PM_MCP-112");
+                LogAsserts.assertLogMessagePresentContaining(TestLogLevel.WARN, "PM_RUNTIME-102");
                 LogAsserts.assertLogMessagePresentContaining(TestLogLevel.WARN, String.valueOf(occupied));
             } finally {
                 listener.apply(false, false, 0, "test");

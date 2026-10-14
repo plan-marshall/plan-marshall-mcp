@@ -10,9 +10,9 @@
 package de.planmarshall.mcp.server.credentials;
 
 import de.cuioss.tools.logging.CuiLogger;
-import de.planmarshall.core.log.PmMcpLogMessages;
 import de.planmarshall.runtime.credentials.SecretStore;
 import de.planmarshall.runtime.credentials.SecretStoreSelector;
+import de.planmarshall.runtime.log.RuntimeLogMessages;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -32,8 +32,8 @@ class SecretStoreProducer {
     @Singleton
     SecretStore secretStore() {
         var selection = SecretStoreSelector.select();
-        selection.fallbackReason().ifPresent(reason -> LOGGER.warn(PmMcpLogMessages.WARN.KEYRING_UNAVAILABLE, reason));
-        LOGGER.info(PmMcpLogMessages.INFO.CREDENTIAL_STORE_SELECTED, selection.store().name(), selection.service());
+        selection.fallbackReason().ifPresent(reason -> LOGGER.warn(RuntimeLogMessages.WARN.KEYRING_UNAVAILABLE, reason));
+        LOGGER.info(RuntimeLogMessages.INFO.CREDENTIAL_STORE_SELECTED, selection.store().name(), selection.service());
         return selection.store();
     }
 

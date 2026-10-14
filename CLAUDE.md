@@ -114,8 +114,10 @@ Never hard-code build tool invocations; use the resolved canonical commands belo
 - `private static final CuiLogger LOGGER = new CuiLogger(X.class);` (cui-java-tools). No slf4j,
   log4j, `System.out`/`System.err`.
 - `%s` placeholders only; exception first.
-- INFO/WARN/ERROR messages as `LogRecord` constants in `PmMcpLogMessages` of `pm-core` in `pm-mcp-core` (package `de.planmarshall.core.log`, prefix `PM_MCP`,
-  ranges INFO 001-099, WARN 100-199, ERROR 200-299), each documented in `doc/LogMessages.adoc`.
+- INFO/WARN/ERROR messages as `LogRecord` constants. The records `pm-mcp-server` logs live in
+  `RuntimeLogMessages` of `pm-runtime` in `pm-mcp-core` (package `de.planmarshall.runtime.log`, prefix `PM_RUNTIME`,
+  ranges INFO 001-099, WARN 100-199, ERROR 200-299), each marked "Used by the assembly `pm-mcp-server`", until the
+  assembly takes them over (pm-mcp-core ADR 005); each record is documented in `doc/LogMessages.adoc`.
 
 ### Testing
 

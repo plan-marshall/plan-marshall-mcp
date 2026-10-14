@@ -192,7 +192,7 @@ class CredentialsResourceTest {
             assertEquals("{\"error\":\"credentials_file_invalid\"}", json(response.getEntity()));
             assertFalse(e.getMessage().contains(secret), e.getMessage());
             LogAsserts.assertNoLogMessagePresent(TestLogLevel.ERROR, secret);
-            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.ERROR, "PM_MCP-230");
+            LogAsserts.assertLogMessagePresentContaining(TestLogLevel.ERROR, "PM_RUNTIME-201");
         }
     }
 }

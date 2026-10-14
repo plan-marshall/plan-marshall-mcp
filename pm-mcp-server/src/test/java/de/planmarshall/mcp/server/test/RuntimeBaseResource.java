@@ -39,7 +39,7 @@ public class RuntimeBaseResource implements QuarkusTestResourceLifecycleManager 
         base = TestBases.create("pmq");
         var paths = new MachinePaths(base, MachinePaths.Os.current());
         try {
-            var outcome = new StartupSequence(paths, System.getProperty("user.name")).run(new SecureRandom());
+            var outcome = PmMcpd.startupSequence(paths).run(new SecureRandom());
             if (!(outcome instanceof StartupSequence.Outcome.Ready ready)) {
                 throw new IllegalStateException("startup refused: " + outcome);
             }

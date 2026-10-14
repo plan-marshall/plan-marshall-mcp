@@ -23,8 +23,8 @@ import java.util.concurrent.TimeoutException;
 
 
 import de.cuioss.tools.logging.CuiLogger;
-import de.planmarshall.core.log.PmMcpLogMessages;
 import de.planmarshall.mcp.server.runtime.RuntimeContext;
+import de.planmarshall.runtime.log.RuntimeLogMessages;
 import de.planmarshall.runtime.web.WebListenerConflictException;
 import de.planmarshall.runtime.web.WebState;
 import de.planmarshall.runtime.web.WebTls;
@@ -138,7 +138,7 @@ public class WebListener {
             state = new WebState(false, state.lan(), port, false);
             return state;
         }
-        LOGGER.info(PmMcpLogMessages.INFO.WEB_LISTENER_OPEN_REQUESTED, lan ? ALL_INTERFACES : LOOPBACK, port, lan,
+        LOGGER.info(RuntimeLogMessages.INFO.WEB_LISTENER_OPEN_REQUESTED, lan ? ALL_INTERFACES : LOOPBACK, port, lan,
                 cause);
         if (server != null) {
             if (state.lan() != lan || port != 0 && state.port() != port) {
@@ -175,7 +175,7 @@ public class WebListener {
         }
         server = port != 0 ? listenOn(host, port, hostNames, keyCert) : listenOnFreePort(host, hostNames, keyCert);
         var bound = server.actualPort();
-        LOGGER.info(PmMcpLogMessages.INFO.WEB_LISTENER_OPENED, host, bound, lan);
+        LOGGER.info(RuntimeLogMessages.INFO.WEB_LISTENER_OPENED, host, bound, lan);
         return bound;
     }
 
@@ -184,7 +184,7 @@ public class WebListener {
         try {
             return listen(host, port, hostNames, keyCert);
         } catch (ExecutionException | TimeoutException e) {
-            LOGGER.warn(PmMcpLogMessages.WARN.WEB_LISTENER_FAILED, port, e.getMessage());
+            LOGGER.warn(RuntimeLogMessages.WARN.WEB_LISTENER_FAILED, port, e.getMessage());
             throw new WebListenerConflictException("port %s cannot be bound".formatted(port), e);
         }
     }
@@ -202,10 +202,10 @@ public class WebListener {
                 return listen(host, candidate, hostNames, keyCert);
             } catch (ExecutionException e) {
                 // the candidate is occupied on a local address: rejected, the next one is tried
-                LOGGER.warn(PmMcpLogMessages.WARN.WEB_LISTENER_FAILED, candidate, e.getMessage());
+                LOGGER.warn(RuntimeLogMessages.WARN.WEB_LISTENER_FAILED, candidate, e.getMessage());
             } catch (TimeoutException e) {
                 // no answer of the bind is no conflict of this candidate: no further candidate is tried
-                LOGGER.warn(PmMcpLogMessages.WARN.WEB_LISTENER_FAILED, candidate, e.getMessage());
+                LOGGER.warn(RuntimeLogMessages.WARN.WEB_LISTENER_FAILED, candidate, e.getMessage());
                 throw new WebListenerConflictException("port %s cannot be bound".formatted(candidate), e);
             }
         }
@@ -235,7 +235,7 @@ public class WebListener {
                     connections.add(connection);
                     connection.closeHandler(_ -> connections.remove(connection));
                 })
-                .exceptionHandler(failure -> LOGGER.warn(PmMcpLogMessages.WARN.WEB_LISTENER_CONNECTION_FAILED, port,
+                .exceptionHandler(failure -> LOGGER.warn(RuntimeLogMessages.WARN.WEB_LISTENER_CONNECTION_FAILED, port,
                         describe(failure)))
                 .requestHandler(new WebRequestHandler(hosts, origins, VertxHttpRecorder.getRootHandler()));
         try {
@@ -265,15 +265,15 @@ public class WebListener {
         if (server == null) {
             return;
         }
-        LOGGER.info(PmMcpLogMessages.INFO.WEB_LISTENER_CLOSING, state.port(), cause);
+        LOGGER.info(RuntimeLogMessages.INFO.WEB_LISTENER_CLOSING, state.port(), cause);
         try {
             await(server.close());
         } catch (ExecutionException | TimeoutException e) {
-            LOGGER.warn(PmMcpLogMessages.WARN.WEB_LISTENER_FAILED, state.port(), e.getMessage());
+            LOGGER.warn(RuntimeLogMessages.WARN.WEB_LISTENER_FAILED, state.port(), e.getMessage());
         }
         server = null;
         connections.clear();
-        LOGGER.info(PmMcpLogMessages.INFO.WEB_LISTENER_CLOSED, state.port());
+        LOGGER.info(RuntimeLogMessages.INFO.WEB_LISTENER_CLOSED, state.port());
     }
 
     private <T> T await(Future<T> future) throws ExecutionException, TimeoutException {
