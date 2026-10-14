@@ -11,6 +11,7 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 == What
 
 * The model verification corpus is validated by the build and shipped with the release as the input of `pm-operator roles qualify`.
+* What ships is the corpus's own items, the source manifests, and the overlays; third-party datasets are fetched at their pinned commit by `pm-operator roles qualify` and never shipped, and a source that cannot be fetched leaves the qualification on a subset that its record names (link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]).
 
 == Trace
 
