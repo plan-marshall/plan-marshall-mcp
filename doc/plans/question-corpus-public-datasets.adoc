@@ -5,7 +5,7 @@ link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-corpus-publi
 
 [horizontal]
 Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
-Where:: `test/model/verification/` (`sources/`: the source manifests and the overlays; the schemas; `ATTRIBUTION.md`) and the corpus test of pm-mcp-server; the loader and the validator are Java code of link:../../../pm-mcp-core/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]; worked as a plain Claude Code session, not through `plan-marshall`
+Where:: `test/model/verification/` (`sources/`: the source manifests and the overlays; the schemas; `ATTRIBUTION.md`) and the corpus test of pm-mcp-server; the loader and the validator are Java code of link:../../../pm-mcp-core/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
 Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
 
 == What
