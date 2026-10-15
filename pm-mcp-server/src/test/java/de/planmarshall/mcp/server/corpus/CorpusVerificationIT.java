@@ -9,6 +9,7 @@
  */
 package de.planmarshall.mcp.server.corpus;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -29,10 +30,10 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 
 /**
  * The corpus run of the question verification corpus (question-corpus-public-datasets).
@@ -75,7 +76,7 @@ class CorpusVerificationIT {
         try (Stream<Path> stream = Files.list(sources)) {
             manifests = stream.filter(path -> path.toString().endsWith(".json")).sorted().toList();
         }
-        assertTrue(!manifests.isEmpty(), "no source manifests below " + sources);
+        assertFalse(manifests.isEmpty(), "no source manifests below " + sources);
 
         for (var manifestPath : manifests) {
             var name = manifestPath.getFileName().toString().replace(".json", "");
@@ -95,7 +96,7 @@ class CorpusVerificationIT {
 
             if (!pinResolves(repository, commit)) {
                 missing.add(name + " (unreachable at its pin)");
-                System.out.println("corpus source " + name + ": MISSING, its items are skipped");
+                /*~~(TODO: Use CuiLogger. Suppress: // cui-rewrite:disable CuiLoggerStandardsRecipe)~~>*/System.out.println("corpus source " + name + ": MISSING, its items are skipped");
                 continue;
             }
             var files = list(manifest, "files");
@@ -109,7 +110,7 @@ class CorpusVerificationIT {
             }
             if (ok) {
                 verified.add(name);
-                System.out.println("corpus source " + name + ": verified (" + files.size() + " files)");
+                /*~~(TODO: Use CuiLogger. Suppress: // cui-rewrite:disable CuiLoggerStandardsRecipe)~~>*/System.out.println("corpus source " + name + ": verified (" + files.size() + " files)");
             }
         }
 
@@ -130,9 +131,9 @@ class CorpusVerificationIT {
             fail("hash mismatch:\n" + String.join("\n", mismatches));
         }
         if (!missing.isEmpty()) {
-            System.out.println("CORPUS RUN PARTIAL: missing sources " + missing);
+            /*~~(TODO: Use CuiLogger. Suppress: // cui-rewrite:disable CuiLoggerStandardsRecipe)~~>*/System.out.println("CORPUS RUN PARTIAL: missing sources " + missing);
         } else {
-            System.out.println("CORPUS RUN COMPLETE: verified sources " + verified);
+            /*~~(TODO: Use CuiLogger. Suppress: // cui-rewrite:disable CuiLoggerStandardsRecipe)~~>*/System.out.println("CORPUS RUN COMPLETE: verified sources " + verified);
         }
     }
 
