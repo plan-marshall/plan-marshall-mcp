@@ -16,10 +16,10 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-3[PM-SEC-3], link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-6[PM-SEC-6], link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-2[PM-SEC-2], link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-8[PM-ARCH-8]
-* Specification: link:../../../plan-marshall-documentation/doc/specification/cli-and-security/02-credentials-and-operator.adoc#operator-channel-isolation[CLI & Security § Operator Channel Isolation]; link:../../../plan-marshall-documentation/doc/specification/cli-and-security/02-credentials-and-operator.adoc#_security_audit_trail_three_tier_identity_verification[§ Security Audit Trail]; link:../../../plan-marshall-documentation/doc/specification/runtime-model/04-sessions-and-workers.adoc#stalled-plans[Runtime Model § Stalled Plans]
+* Specification: link:../../../plan-marshall-documentation/doc/specification/cli-and-security/02-operator-channel.adoc#operator-channel-isolation[CLI & Security § Operator Channel Isolation]; link:../../../pm-mcp-core/doc/specification/credentials-and-enrolment/03-audit-and-outbound-https.adoc#_security_audit_trail_three_tier_identity_verification[§ Security Audit Trail]; link:../../../pm-mcp-core/doc/specification/runtime-lifecycle/02-plan-pause-and-stalled-plans.adoc#stalled-plans[Runtime Model § Stalled Plans]
 * Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/cli-and-security.adoc[CLI & Security]; link:../../../plan-marshall-documentation/doc/implementation-watch/runtime-model.adoc[Runtime Model]
 
 == Done When

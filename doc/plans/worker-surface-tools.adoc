@@ -15,11 +15,11 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/04-tools.adoc#PM-TOOL-1[PM-TOOL-1], link:../../../plan-marshall-documentation/doc/requirements/03-skills.adoc#PM-SKILL-4[PM-SKILL-4], link:../../../plan-marshall-documentation/doc/requirements/14-implementation.adoc#PM-IMPL-4[PM-IMPL-4]
 * Specification: link:../../../plan-marshall-documentation/doc/specification/mcp-tools/01-core-workflow-tools.adoc#pm-wait[MCP Tools § `pm_wait`]; link:../../../plan-marshall-documentation/doc/specification/mcp-tools/02-service-and-skill-tools.adoc[§ Service & Skill Tools]
-* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/mcp-tools.adoc[MCP Tools]; link:../../../plan-marshall-documentation/doc/implementation-watch/model-work.adoc[Model Work]
+* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/mcp-tools.adoc[MCP Tools]; link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]
 
 == Done When
 

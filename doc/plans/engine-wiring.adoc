@@ -15,11 +15,11 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/14-implementation.adoc#PM-IMPL-1[PM-IMPL-1], link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-4[PM-ARCH-4], link:../../../plan-marshall-documentation/doc/requirements/09-technology.adoc#PM-TECH-3[PM-TECH-3]
 * Specification: link:../../../plan-marshall-documentation/doc/specification/module-structure.adoc#dependency-rules[Module Structure § Dependency Rules]; link:../../../plan-marshall-documentation/doc/specification/module-structure.adoc#test-placement[§ Test Placement]
-* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/module-structure.adoc[Module Structure]; link:../../../plan-marshall-documentation/doc/implementation-watch/workflow-dsl.adoc[Workflow DSL]
+* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/module-structure.adoc[Module Structure]; link:../../../pm-mcp-core/doc/implementation-watch/workflow-dsl.adoc[Workflow DSL]
 
 == Done When
 

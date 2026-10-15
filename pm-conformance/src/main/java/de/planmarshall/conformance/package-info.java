@@ -14,7 +14,7 @@
  * de.planmarshall.conformance.Attribution} how a verdict was measured, {@link
  * de.planmarshall.conformance.EnforcementClass} the class of the rule under test.
  * <p>
- * Specification: {@code doc/specification/workflow-dsl/07-loop-back-diagrams-verification.adoc} (Behavioural
+ * Specification: {@code pm-mcp-core/doc/specification/workflow-dsl/07-loop-back-diagrams-verification.adoc} (Behavioural
  * Conformance Harness).
  */
 package de.planmarshall.conformance;

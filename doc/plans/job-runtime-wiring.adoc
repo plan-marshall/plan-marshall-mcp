@@ -15,11 +15,11 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-5[PM-WF-5], link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-4[PM-SEC-4], link:../../../plan-marshall-documentation/doc/requirements/04-tools.adoc#PM-TOOL-1[PM-TOOL-1]
-* Specification: link:../../../plan-marshall-documentation/doc/specification/model-work/04-worker-launch.adoc#job-token[Model Work § Job Token, Generation & Connection Binding]; link:../../../plan-marshall-documentation/doc/specification/mcp-tools/01-core-workflow-tools.adoc#job-bound-connections[MCP Tools § Worker Connections]; link:../../../plan-marshall-documentation/doc/specification/runtime-model/04-sessions-and-workers.adoc[Runtime Model § Sessions & Workers]
-* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/model-work.adoc[Model Work]; link:../../../plan-marshall-documentation/doc/implementation-watch/mcp-tools.adoc[MCP Tools]; link:../../../plan-marshall-documentation/doc/implementation-watch/runtime-model.adoc[Runtime Model]
+* Specification: link:../../../pm-mcp-core/doc/specification/model-work/04-worker-launch.adoc#job-token[Model Work § Job Token, Generation & Connection Binding]; link:../../../plan-marshall-documentation/doc/specification/mcp-tools/01-core-workflow-tools.adoc#job-bound-connections[MCP Tools § Worker Connections]; link:../../../plan-marshall-documentation/doc/specification/runtime-model/04-sessions-and-workers.adoc[Runtime Model § Sessions & Workers]
+* Watch: link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]; link:../../../plan-marshall-documentation/doc/implementation-watch/mcp-tools.adoc[MCP Tools]; link:../../../plan-marshall-documentation/doc/implementation-watch/runtime-model.adoc[Runtime Model]
 
 == Done When
 
