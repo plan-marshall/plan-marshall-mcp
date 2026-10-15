@@ -249,5 +249,41 @@
                 </plugins>
             </build>
         </profile>
+        <!-- The corpus run (question-corpus-public-datasets): network-requiring, never part of verify
+              or a required check. Runs only CorpusVerificationIT of the failsafe suite: the loader of
+              pm-mcp-core/corpus-sources over the manifests and overlays into the build cache, then the Java
+              validator over our items and the generated items. A source that cannot be fetched or does not
+              verify is reported by name, its items skipped, and the run reported partial rather than failing;
+              a hash mismatch fails it. The regular build (verify, -Pintegration-tests, -Pcoverage, the CI jobs)
+              never names this profile, so none of them fetches anything or runs the corpus test. Never
+              activate this profile by default or from another profile. -->
+        <profile>
+            <id>corpus</id>
+            <properties>
+                <skipITs>false</skipITs>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <skipITs>${skipITs}</skipITs>
+                            <includes>
+                                <include>**/CorpusVerificationIT.java</include>
+                            </includes>
+                            <systemPropertyVariables>
+                                <!-- The root of the repository, for CorpusVerificationIT -->
+                                <pm.root>${maven.multiModuleProjectDirectory}</pm.root>
+                                <!-- The version the corpus run reports with its revision -->
+                                <pm.version>${project.version}</pm.version>
+                                <!-- The build cache the loader generates the items into -->
+                                <pm.corpus.cache>${project.build.directory}/corpus-cache</pm.corpus.cache>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
     </profiles>
 </project>
