@@ -11,7 +11,7 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 == What
 
 * `pm-mcp-server`: no TCP or UDP listener, the refusal without the runtime token, restart recovery.
-* `pm-e2e`, in the release layout: the relay rules at the process level, the relay restart in its generation, `hello` from a second connection, the operator checks and the runtime-free verbs against the real daemon, and one relay-to-daemon round trip.
+* `pm-e2e`, in the release layout: the relay rules at the process level, a worker relay restarted in its generation, the operator checks and the runtime-free verbs against the real daemon, and one relay-to-daemon round trip.
 
 == Trace
 

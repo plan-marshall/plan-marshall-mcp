@@ -63,12 +63,6 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:operator-channel-api.adoc[`operator-channel-api`]; link:../../../pm-mcp-core/doc/plans/enrolment-store.adoc[`pm-mcp-core` / `enrolment-store`]; link:../../../pm-mcp-core/doc/plans/project-machine-store.adoc[`pm-mcp-core` / `project-machine-store`]; link:../../../pm-mcp-clients/doc/plans/operator-enrolment-verbs.adoc[`pm-mcp-clients` / `operator-enrolment-verbs`]
 |Milestone 3
 
-|link:enter-api.adoc[`enter-api`]
-|Scope entry on the API
-|`open`
-|link:../../../pm-mcp-core/doc/plans/session-log-and-generations.adoc[`pm-mcp-core` / `session-log-and-generations`]; link:../../../pm-mcp-core/doc/plans/project-machine-store.adoc[`pm-mcp-core` / `project-machine-store`]; link:../../../pm-mcp-clients/doc/plans/enter-command.adoc[`pm-mcp-clients` / `enter-command`]
-|Milestone 3
-
 |link:default-units-and-drift-tests.adoc[`default-units-and-drift-tests`]
 |Default workflow units and the drift tests
 |`blocked`
