@@ -23,4 +23,4 @@ Requirements, specification sections, and watch documents stay in `plan-marshall
 
 == Done When
 
-McpAssured tests of the worker surface; only a worker's relay with a valid job token reaches it; a wait is held through its window with progress frames where the profile says so.
+McpAssured tests of the worker surface; only a worker's relay with a valid job token reaches it, a guard shared by every worker tool (`pm_skill` and `pm_skill_file` among them), and a request with the runtime token or a device secret is refused (negative tests); a wait is held through its window with progress frames where the profile says so.
