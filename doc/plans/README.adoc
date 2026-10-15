@@ -36,13 +36,13 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:lifecycle-wiring.adoc[`lifecycle-wiring`]
 |Wiring of locks and lifecycle
 |`open`
-|link:../../../pm-mcp-core/doc/plans/lock-manager-and-leases.adoc[`pm-mcp-core` / `lock-manager-and-leases`]; link:../../../pm-mcp-core/doc/plans/runtime-lifecycle.adoc[`pm-mcp-core` / `runtime-lifecycle`]
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/lock-manager-and-leases.adoc[`pm-mcp-core` / `lock-manager-and-leases`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/runtime-lifecycle.adoc[`pm-mcp-core` / `runtime-lifecycle`]
 |Milestone 2
 
 |link:operator-channel-api.adoc[`operator-channel-api`]
 |Operator channel on the API
 |`open`
-|link:../../../pm-mcp-clients/doc/plans/api-contract.adoc[`pm-mcp-clients` / `api-contract`]; link:../../../pm-mcp-core/doc/plans/audit-trail.adoc[`pm-mcp-core` / `audit-trail`]; link:../../../pm-mcp-core/doc/plans/workspace-confinement.adoc[`pm-mcp-core` / `workspace-confinement`]; link:../../../pm-mcp-core/doc/plans/service-unit.adoc[`pm-mcp-core` / `service-unit`]; link:../../../pm-mcp-core/doc/plans/stalled-scope-detection.adoc[`pm-mcp-core` / `stalled-scope-detection`]
+|link:../../../pm-mcp-clients/doc/plans/api-contract.adoc[`pm-mcp-clients` / `api-contract`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/audit-trail.adoc[`pm-mcp-core` / `audit-trail`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workspace-confinement.adoc[`pm-mcp-core` / `workspace-confinement`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/service-unit.adoc[`pm-mcp-core` / `service-unit`]; link:../../../pm-mcp-core/doc/plans/stalled-scope-detection.adoc[`pm-mcp-core` / `stalled-scope-detection`]
 |Milestone 2
 
 |link:integration-layers.adoc[`integration-layers`]
@@ -54,19 +54,19 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:engine-wiring.adoc[`engine-wiring`]
 |The engine served by the daemon
 |`open`
-|link:../../../pm-mcp-core/doc/plans/workflow-engine.adoc[`pm-mcp-core` / `workflow-engine`]; link:../../../pm-mcp-core/doc/plans/plan-instance.adoc[`pm-mcp-core` / `plan-instance`]; link:../../../pm-mcp-core/doc/plans/operator-and-question-stores.adoc[`pm-mcp-core` / `operator-and-question-stores`]
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workflow-engine.adoc[`pm-mcp-core` / `workflow-engine`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/plan-instance.adoc[`pm-mcp-core` / `plan-instance`]; link:../../../pm-mcp-core/doc/plans/operator-and-question-stores.adoc[`pm-mcp-core` / `operator-and-question-stores`]
 |Milestone 3
 
 |link:enrolment-and-integrity-api.adoc[`enrolment-and-integrity-api`]
 |Enrolment and store integrity on the API
 |`open`
-|link:operator-channel-api.adoc[`operator-channel-api`]; link:../../../pm-mcp-core/doc/plans/enrolment-store.adoc[`pm-mcp-core` / `enrolment-store`]; link:../../../pm-mcp-core/doc/plans/project-machine-store.adoc[`pm-mcp-core` / `project-machine-store`]; link:../../../pm-mcp-clients/doc/plans/operator-enrolment-verbs.adoc[`pm-mcp-clients` / `operator-enrolment-verbs`]
+|link:operator-channel-api.adoc[`operator-channel-api`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/enrolment-store.adoc[`pm-mcp-core` / `enrolment-store`]; link:../../../pm-mcp-core/doc/plans/project-machine-store.adoc[`pm-mcp-core` / `project-machine-store`]; link:../../../pm-mcp-clients/doc/plans/operator-enrolment-verbs.adoc[`pm-mcp-clients` / `operator-enrolment-verbs`]
 |Milestone 3
 
 |link:default-units-and-drift-tests.adoc[`default-units-and-drift-tests`]
 |Default workflow units and the drift tests
 |`blocked`
-|link:../../../pm-mcp-core/doc/plans/project-units-and-invariants.adoc[`pm-mcp-core` / `project-units-and-invariants`]; link:../../../pm-mcp-core/doc/plans/diagram-generator.adoc[`pm-mcp-core` / `diagram-generator`]; link:engine-wiring.adoc[`engine-wiring`]; `plan-marshall-mcp` switched to private (roadmap Milestone 7, an operator decision): the default workflow units are model-facing content and are not committed before (no work package)
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/project-units-and-invariants.adoc[`pm-mcp-core` / `project-units-and-invariants`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/diagram-generator.adoc[`pm-mcp-core` / `diagram-generator`]; link:engine-wiring.adoc[`engine-wiring`]; `plan-marshall-mcp` switched to private (roadmap Milestone 7, an operator decision): the default workflow units are model-facing content and are not committed before (no work package)
 |Milestone 3
 
 |link:job-runtime-wiring.adoc[`job-runtime-wiring`]
@@ -96,7 +96,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]
 |The question corpus rebuilt on public datasets
 |`open`
-|link:../../../pm-mcp-core/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
 |Milestone 4
 
 |link:question-loop-verification.adoc[`question-loop-verification`]
@@ -114,7 +114,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:qualification-corpus-in-the-build.adoc[`qualification-corpus-in-the-build`]
 |The qualification corpus shipped and validated
 |`open`
-|link:../../../pm-mcp-core/doc/plans/role-qualification.adoc[`pm-mcp-core` / `role-qualification`]; link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]; link:../../../pm-mcp-core/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
+|link:../../../pm-mcp-core/doc/plans/role-qualification.adoc[`pm-mcp-core` / `role-qualification`]; link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
 |Milestone 4
 
 |===

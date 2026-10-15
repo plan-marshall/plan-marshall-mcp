@@ -16,11 +16,11 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/12-testing.adoc#PM-TEST-4[PM-TEST-4], link:../../../plan-marshall-documentation/doc/requirements/12-testing.adoc#PM-TEST-5[PM-TEST-5], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-3[PM-WORK-3]
-* Specification: link:../../../plan-marshall-documentation/doc/specification/model-work/03-supervision-and-recycling.adoc[Model Work § Supervision & Recycling]; link:../../../plan-marshall-documentation/doc/specification/mcp-tools/04-errors-and-testing.adoc[MCP Tools § Errors & Protocol Testing]; link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc[Evaluation Reference]
-* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/model-work.adoc[Model Work]; link:../../../plan-marshall-documentation/doc/implementation-watch/job-runtime.adoc[Job Runtime]; link:../../../plan-marshall-documentation/doc/implementation-watch/mcp-tools.adoc[MCP Tools]
+* Specification: link:../../../pm-mcp-core/doc/specification/model-work/03-supervision-and-recycling.adoc[Model Work § Supervision & Recycling]; link:../../../plan-marshall-documentation/doc/specification/mcp-tools/04-errors-and-testing.adoc[MCP Tools § Errors & Protocol Testing]; link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc[Evaluation Reference]
+* Watch: link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]; link:../../../pm-mcp-core/doc/implementation-watch/job-runtime.adoc[Job Runtime]; link:../../../plan-marshall-documentation/doc/implementation-watch/mcp-tools.adoc[MCP Tools]
 
 == Done When
 

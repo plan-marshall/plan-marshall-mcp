@@ -12,6 +12,11 @@ most of which is not implemented yet. The documents live in the repository `plan
 `doc/requirements/`), technical specifications in `doc/Specification.adoc` (documents in `doc/specification/`), delivery staging in
 `doc/roadmap.adoc`, defect archetypes and fixtures to guard during implementation in
 `doc/ImplementationWatch.adoc` (documents in `doc/implementation-watch/`, one per specification that has watch items, plus `cross-cutting.adoc`).
+The specifications of the engine, with their watch documents and the traceability of the requirements it implements,
+live beside its code in `plan-marshall/pm-mcp-core` (`doc/Specification.adoc`, `doc/specification/`,
+`doc/ImplementationWatch.adoc`, `doc/implementation-watch/`, `doc/Traceability.adoc`; check it out beside this
+repository as well): the workflow language, the state catalogue, the store schemas, model work, the phase workflows,
+the timeouts and the identifiers among them.
 
 Current state: roadmap Milestone 0 is complete; Milestone 1 is next. Part A established the harness as worker
 (concept `doc/concepts/harness-as-worker/`, index `doc/Concepts.adoc`). Part B built each verified technique in
@@ -117,7 +122,7 @@ Never hard-code build tool invocations; use the resolved canonical commands belo
 - INFO/WARN/ERROR messages as `LogRecord` constants. The records `pm-mcp-server` logs live in
   `RuntimeLogMessages` of `pm-runtime` in `pm-mcp-core` (package `de.planmarshall.runtime.log`, prefix `PM_RUNTIME`,
   ranges INFO 001-099, WARN 100-199, ERROR 200-299), each marked "Used by the assembly `pm-mcp-server`", until the
-  assembly takes them over (pm-mcp-core ADR 005); each record is documented in `doc/LogMessages.adoc`.
+  assembly takes them over (pm-mcp-core ADR 005); each record is documented in `doc/LogMessages.adoc` of `pm-mcp-core`.
 
 ### Testing
 

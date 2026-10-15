@@ -10,16 +10,16 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == What
 
-* The model verification corpus is validated by the build and shipped with the release as the input of `pm-operator roles qualify`. The validation is the Java validator of link:../../../pm-mcp-core/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`], run by a JUnit test of pm-mcp-server in the regular build over the corpus's own items, the manifests, and the overlays; `test/model/verification/validate.py` is retired with it, and the corpus README says so.
+* The model verification corpus is validated by the build and shipped with the release as the input of `pm-operator roles qualify`. The validation is the Java validator of link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`], run by a JUnit test of pm-mcp-server in the regular build over the corpus's own items, the manifests, and the overlays; `test/model/verification/validate.py` is retired with it, and the corpus README says so.
 * What ships is the corpus's own items, the source manifests, and the overlays; third-party datasets are fetched at their pinned commit by `pm-operator roles qualify` and never shipped, and a source that cannot be fetched leaves the qualification on a subset that its record names (link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]).
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-6[PM-WORK-6], link:../../../plan-marshall-documentation/doc/requirements/12-testing.adoc#PM-TEST-6[PM-TEST-6]
-* Specification: link:../../../plan-marshall-documentation/doc/specification/model-work/01-roles-and-configuration.adoc#qualification[Model Work § Role Qualification]; link:../../../plan-marshall-documentation/doc/specification/model-work/11-decision-records.adoc[§ Decision Records]
-* Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/model-work.adoc[Model Work]
+* Specification: link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc#qualification[Model Work § Role Qualification]; link:../../../pm-mcp-core/doc/specification/model-work/11-decision-records.adoc[§ Decision Records]
+* Watch: link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]
 
 == Done When
 

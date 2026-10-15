@@ -10,7 +10,7 @@
 /**
  * The operator channel of the local adapter and its audit.
  * <p>
- * Specification: {@code doc/specification/cli-and-security/02-credentials-and-operator.adoc} (Operator Channel
+ * Specification: {@code doc/specification/cli-and-security/02-operator-channel.adoc} (Operator Channel
  * Isolation).
  */
 package de.planmarshall.mcp.server.operator;
