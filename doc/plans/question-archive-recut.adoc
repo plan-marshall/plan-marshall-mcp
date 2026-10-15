@@ -1,0 +1,26 @@
+= The private archive questions re-cut to escalate or decide
+:nofooter:
+
+link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-archive-recut`
+
+[horizontal]
+Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
+Where:: the private repository `cuioss/plan-marshall-telemetry`, directory `verification/` (its pull request #1, branch `verification/question-items`, is the base); nothing in this repository changes but the index row
+Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+
+== What
+
+`cuioss/plan-marshall-telemetry` holds verification items taken from real operator questions of archived plans: 44 items below `verification/corpus/decision/question/`, 15 below `verification/corpus/decision/own-words/`, and 18 scenarios below `verification/question-loop/scenarios/`. Their question items grade a decider on the operator's actual choice. A decider without the plan's whole context cannot be graded on that choice; what it can be graded on is whether the question needed the operator at all. The data stays private: nothing of it enters a public repository.
+
+* *Question items become escalate-or-decide items*: `input.choices` `escalate` and `decide`; the reference `escalate` where the record shows the decision needed the operator (a product behaviour, a scope, an answer against the asker's recommendation, a fact only the operator had), `decide` where the facts in the item settle it; the operator's actual choice kept in `review.notes`, never as the target. An item whose record does not show which applies is set `review.status: contested` with the reason.
+* *Unchanged*: the own-words items (they grade the interpretation of words that were given, which needs no plan context) and the scenario files of the question loop.
+* *Checked*: every item against the corpus rules of `CorpusValidator` of `pm-mcp-core` (the schema, the canary, the transient-name ban), run over a copy of the corpus with the items placed in it, as the README of `verification/` describes.
+
+== Trace
+
+* Requirements: link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-6[PM-WORK-6]
+* Specification: link:../../../pm-mcp-core/doc/specification/model-work/10-decision-quorum.adoc#quorum-calibration[Model Work § Quorum Calibration]
+
+== Done When
+
+Every question item of `verification/corpus/decision/question/` is an escalate-or-decide item or `contested` with its reason; the operator's choice is in its notes; the validator reports no violation; pull request #1 of `cuioss/plan-marshall-telemetry` carries the change and is merged on the operator's word.
