@@ -1,0 +1,21 @@
+{
+  "$schema": "../../schema/source-manifest.schema.json",
+  "schema_version": 1,
+  "repository": "https://huggingface.co/datasets/antiquality/agentabstain",
+  "commit": "842228426c2a703347396501af61c7890972c7ee",
+  "files": [
+    {
+      "path": "tasks.jsonl",
+      "sha256": "165f021e7bb8b3a1ba103cef291eb522ff219769e8e7727f1a669364a225fb63",
+      "size": 1168761,
+      "lfs": false
+    }
+  ],
+  "license": {
+    "spdx": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "holders": [
+    "the AgentAbstain authors"
+  ]
+}

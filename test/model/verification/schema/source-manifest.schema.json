@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/plan-marshall/plan-marshall-mcp/test/model/verification/schema/source-manifest.schema.json",
+  "title": "PM-MCP public source manifest",
+  "description": "One manifest per public dataset source: its repository, the pinned commit, every file used with its SHA-256 (LFS files by pointer object id and size), its licence SPDX id with text URL, its holders, and third-party content it carries. Fetched datasets are never stored; the manifest is what the loader fetches and checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "commit",
+    "files",
+    "license",
+    "holders"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^https://(github\\.com/[^/]+/[^/]+|huggingface\\.co/datasets/[^/]+/[^/]+)$",
+      "description": "dataset repository URL: github.com owner/repo or huggingface.co/datasets owner/dataset"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$",
+      "description": "pinned commit the loader fetches; a source is updated only by a reviewed change of this pin"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "description": "every file of the source the corpus uses",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "repository-relative file path (for example HumanEvalComm_v2.csv, input-bouncer/test.csv, tasks.jsonl)"
+          },
+          "repository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^https://(github\\.com/[^/]+/[^/]+|huggingface\\.co/datasets/[^/]+/[^/]+)$",
+            "description": "override when the file lives in a different repository than the manifest top-level repository (for example bouncerbench-lite inside the bouncerbench manifest); absent inherits the top-level repository"
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{7,40}$",
+            "description": "override when the file is pinned at a different commit than the manifest top-level commit; absent inherits the top-level commit"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of the file; for a Git LFS file the pointer object id"
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "file size in bytes; for a Git LFS file the pointer size"
+          },
+          "lfs": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "true when the file is a Git LFS object fetched from the repository LFS endpoint"
+          }
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spdx",
+        "url"
+      ],
+      "properties": {
+        "spdx": {
+          "type": "string",
+          "description": "SPDX license id of the dataset (for example Apache-2.0, MIT, CC-BY-4.0)"
+        },
+        "url": {
+          "type": "string",
+          "description": "URL of the license text (for example https://www.apache.org/licenses/LICENSE-2.0)"
+        }
+      }
+    },
+    "holders": {
+      "type": "array",
+      "minItems": 1,
+      "description": "copyright or dataset holders (for example the HumanEvalComm authors)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "third_party": {
+      "type": "array",
+      "description": "content the source itself took from elsewhere, which keeps its own terms",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "spdx"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "what the third-party content is (for example HumanEval problems inside HumanEvalComm)"
+          },
+          "spdx": {
+            "type": "string",
+            "description": "SPDX license id of the third-party content"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL of the third-party source or its license text"
+          },
+          "holders": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "description": "holders of the third-party content",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

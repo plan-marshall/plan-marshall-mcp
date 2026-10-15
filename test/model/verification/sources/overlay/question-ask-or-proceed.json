@@ -1,0 +1,47 @@
+{
+  "$schema": "../../../schema/overlay.schema.json",
+  "schema_version": 1,
+  "topic": "question/ask-or-proceed",
+  "source": "https://huggingface.co/datasets/jie-jw-wu/HumanEvalComm",
+  "entries": [
+    {
+      "row": "HumanEval-7/1a",
+      "framing": "Modified task text with an ambiguous requirement; the worker chooses ask or proceed. The reference asks, and the rubric checks the question names what was changed.",
+      "rubric": [
+        {
+          "id": "names-change",
+          "description": "the question names what was changed between the modified and the original description"
+        }
+      ],
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "sampled for ask-or-proceed 1a; written without repeating the source text"
+      }
+    },
+    {
+      "row": "HumanEval-12/1c",
+      "framing": "Modified task text with an inconsistent requirement; the worker chooses ask or proceed. The reference asks, and the rubric checks the question names what was changed.",
+      "rubric": [
+        {
+          "id": "names-change",
+          "description": "the question names what was changed between the modified and the original description"
+        }
+      ],
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "sampled for ask-or-proceed 1c; written without repeating the source text"
+      }
+    },
+    {
+      "row": "HumanEval-7/orig-control",
+      "framing": "Original task text of the same problem as its control; nothing is missing, so the worker proceeds.",
+      "is_control": true,
+      "review": {
+        "status": "draft",
+        "notes": "control for the 1a sample above; proceed is the reference"
+      }
+    }
+  ]
+}

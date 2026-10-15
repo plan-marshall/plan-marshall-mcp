@@ -1,0 +1,34 @@
+{
+  "$schema": "../../../schema/overlay.schema.json",
+  "schema_version": 1,
+  "topic": "question/sequences",
+  "source": "https://huggingface.co/datasets/jie-jw-wu/HumanEvalComm",
+  "entries": [
+    {
+      "row": "HumanEval-41/2ap",
+      "framing": "Two-flaw problem whose overlay reply sequence answers only the first asked flaw, so the second flaw forces a second, different question.",
+      "reply_sequence": [
+        "Restates the question options without settling the first flaw.",
+        "Answers only the first asked flaw; the second flaw stays open."
+      ],
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "sequence fixture for the second-question tasks; carries its reply sequence in the overlay"
+      }
+    },
+    {
+      "row": "question-bound-fixture",
+      "framing": "Question-bound fixture whose scripted replies only restate the question options and settle nothing, until the bound is reached.",
+      "reply_sequence": [
+        "Restates the options and settles nothing.",
+        "Restates the options again and settles nothing."
+      ],
+      "is_control": true,
+      "review": {
+        "status": "draft",
+        "notes": "bound fixture; the worker must decide on its own judgment or report infeasible after the bound"
+      }
+    }
+  ]
+}

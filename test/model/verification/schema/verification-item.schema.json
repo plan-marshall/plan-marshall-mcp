@@ -164,9 +164,10 @@
             "exact_choice",
             "label",
             "rubric_items",
-            "rubric_properties"
+            "rubric_properties",
+            "execution"
           ],
-          "description": "exact_choice and label compare the answer with target.answer; rubric_items scores the share of target.items found (a control scores 1 only when empty); rubric_properties scores the share of target.items met"
+          "description": "exact_choice and label compare the answer with target.answer; rubric_items scores the share of target.items found (a control scores 1 only when empty); rubric_properties scores the share of target.items met; execution runs the answer code without network in a confined job and passes when every test passes"
         },
         "judge": {
           "type": "string",
@@ -193,8 +194,10 @@
             "extracted",
             "hand-made",
             "fetched",
-            "written"
-          ]
+            "written",
+            "imported"
+          ],
+          "description": "imported items are generated from a pinned public source; their origin names the source repository, its commit, the row, and the SPDX license id"
         },
         "created": {
           "type": "string",
@@ -209,12 +212,13 @@
           "properties": {
             "repository": {
               "type": "string",
-              "pattern": "^https://github\\.com/[^/]+/[^/]+$"
+              "pattern": "^https://(github\\.com/[^/]+/[^/]+|huggingface\\.co/datasets/[^/]+/[^/]+)$",
+              "description": "github.com owner/repo or huggingface.co/datasets owner/dataset"
             },
             "commit": {
               "type": "string",
               "pattern": "^[0-9a-f]{7,40}$",
-              "description": "the commit the case concerns"
+              "description": "the commit the case concerns; for imported items the pinned source commit"
             },
             "pull_request": {
               "type": "integer"
@@ -236,6 +240,14 @@
             "record": {
               "type": "string",
               "description": "citation of a non-public record the case was taken from (a plan's log entry), with the plan's name; the record itself is not retained"
+            },
+            "row": {
+              "type": "string",
+              "description": "source row identifier for imported items (for example HumanEvalComm task_id with variant, or the BouncerBench instance id)"
+            },
+            "license": {
+              "type": "string",
+              "description": "SPDX license id of the source for imported items (for example Apache-2.0, MIT, CC-BY-4.0); required when provenance.kind is imported"
             }
           }
         },
@@ -250,7 +262,8 @@
             "properties": {
               "repository": {
                 "type": "string",
-                "pattern": "^https://github\\.com/[^/]+/[^/]+$"
+                "pattern": "^https://(github\\.com/[^/]+/[^/]+|huggingface\\.co/datasets/[^/]+/[^/]+)$",
+                "description": "github.com owner/repo or huggingface.co/datasets owner/dataset"
               },
               "commit": {
                 "type": "string",

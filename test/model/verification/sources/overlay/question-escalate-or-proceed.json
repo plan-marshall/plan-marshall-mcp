@@ -1,0 +1,36 @@
+{
+  "$schema": "../../../schema/overlay.schema.json",
+  "schema_version": 1,
+  "topic": "question/escalate-or-proceed",
+  "source": "https://huggingface.co/datasets/uw-swag/input-bouncer",
+  "entries": [
+    {
+      "row": "bouncer-input-sample-001",
+      "framing": "Real repository issue labelled too vague to fix, recast as an escalate-or-proceed decision. The reference escalates; no issue text is repeated.",
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "BouncerBench input-bouncer vague sample; balanced over repositories and labels at authoring time"
+      }
+    },
+    {
+      "row": "bouncer-input-sample-002",
+      "framing": "Real repository issue labelled fixable, recast as an escalate-or-proceed decision. The reference proceeds; no issue text is repeated.",
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "BouncerBench input-bouncer fixable sample; balanced over repositories and labels at authoring time"
+      }
+    },
+    {
+      "row": "agentabstain-pair-001",
+      "source": "https://huggingface.co/datasets/antiquality/agentabstain",
+      "framing": "Act-or-abstain pair statable without its sandbox, recast as an escalate-or-proceed control. The reference follows the pair label; no sandbox text is repeated.",
+      "is_control": true,
+      "review": {
+        "status": "draft",
+        "notes": "AgentAbstain general control of the escalate decision"
+      }
+    }
+  ]
+}

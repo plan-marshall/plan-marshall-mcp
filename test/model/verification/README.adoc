@@ -54,9 +54,32 @@ The id of an item is its path below this directory without `.json` (`triage/buil
 |`decision/*` |worker (generic) |24 |closed decisions of a running plan: remediation, triage, scope, build classification, commit type, gate; they also grade the quorum roles `quorum-a` and `quorum-b` and calibrate every quorum declaration of the adjudication unit on the items of its decision kind (tag `decision-kind:<kind>`, link:../../../../pm-mcp-core/doc/specification/model-work/10-decision-quorum.adoc#quorum-calibration[Model Work Specification, Quorum Calibration])
 |`skills/commit-typing` |worker (generic) |20 |decisions whose answer follows a project rule that exists only in a role skill; the item names the skill in its tags
 |`screening/untrusted-text` |screener |45 |real review comments (clean) and injected instructions (suspicious)
+|`question/ask-or-proceed` |worker |80 |ambiguous, inconsistent, or incomplete tasks recast as ask-or-proceed decisions (10 per category 1a/1c/1p/2ac/2ap/2cp, 20 proceed controls); one problem's variants share a `group` and never share a warm session (`contamination`)
+|`question/apply-answer` |worker |6 |the same modified problems with the clarification as the operator reply, graded by `execution`: the solution passes the HumanEval tests
+|`question/escalate-or-proceed` |worker, quorum-a, quorum-b |8 |BouncerBench issues with their labels (too vague: escalate; fixable: proceed), balanced over repositories and labels, plus AgentAbstain pairs statable without their sandbox as controls
+|`question/own-words` |interpret |4 |written answers in own words with their mapping (option, option with condition, new option, delegation), `provenance.kind: written`
+|`question/sequences` |worker |3 |two-flaw problems whose reply sequence answers only the first asked flaw, plus the question-bound fixture whose replies settle nothing until the bound
 |===
 
 The `role` field of an item, not its path, decides which role it grades: a role's qualification grades it on the items whose `role` names it plus the generic items (`role: worker`) for every `writer` and `read_only` role; items with `role: self-review` are comparison items and grade no role. Items with `review.status` `draft` or `confirmed` count; `contested` and `retired` items do not (link:../../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc#qualification-topics[Model Work Specification, Corpus Topics of a Role]).
+
+=== Ask rate of the question sample
+
+HumanEval is in the training data of most models, which may recall the original and proceed instead of asking. The run of the package therefore measures the ask rate on the modified problems against the controls per model. The sample as authored:
+
+[cols="1,1,1,2", options="header"]
+|===
+|Category |Modified |Controls |Reference
+
+|1a |10 |shared pool of 20 |ask
+|1c |10 |shared pool of 20 |ask
+|1p |10 |shared pool of 20 |ask
+|2ac |10 |shared pool of 20 |ask
+|2ap |10 |shared pool of 20 |ask
+|2cp |10 |shared pool of 20 |ask
+|===
+
+No model has been run against this sample yet: the measured per-model, per-category ask rates against the controls are recorded here once the first measurement run lands. A category whose ask rate does not differ from its controls is reported, not silently kept. One problem's variants never share a warm session (`group`, `contamination`), so the control comparison stays clean.
 
 === The item
 
@@ -85,13 +108,13 @@ An item is a JSON object in the format of `schema/verification-item.schema.json`
 |for open answers: the rubric items (seeded defects with location and the questions they belong to, or the essential properties of a revised plan); a control expects an empty answer
 
 |`grading.method`
-|`exact_choice` or `label` (the answer equals the reference or an accepted alternative), `rubric_items` (the share of `target.items` found; a control scores 1 only when empty), `rubric_properties` (the share of the properties met); `grading.judge` names the judge of a rubric
+|`exact_choice` or `label` (the answer equals the reference or an accepted alternative), `rubric_items` (the share of `target.items` found; a control scores 1 only when empty), `rubric_properties` (the share of the properties met), `execution` (the answer is code; the tests run without network in a confined job, pass when every test passes); `grading.judge` names the judge of a rubric
 
 |`input.context`
 |corpus files the answering role must have besides question and facts, below `context/` (for example the project rule the `skills/commit-typing` items test)
 
 |`provenance`
-|`kind` (extracted, hand-made, fetched, written), `created`, and only lasting anchors: `origin` (repository, commit, pull request, branch, path, line, a lasting URL, and a citation of a non-public record such as a plan's log entry), `based_on` (the repository, commit, and path of the real code a hand-made case was written against), and `history`, dated sentences that stay meaningful when every tool and plan of the time is gone
+|`kind` (extracted, hand-made, fetched, written, imported), `created`, and only lasting anchors: `origin` (repository, commit, pull request, branch, path, line, a lasting URL, a citation of a non-public record such as a plan's log entry, and for imported items the source row and the SPDX licence id), `based_on` (the repository, commit, and path of the real code a hand-made case was written against), and `history`, dated sentences that stay meaningful when every tool and plan of the time is gone
 
 |`review`
 |`status` (`draft`, `confirmed`, `contested`, `retired`), by whom, when, with notes; draft and confirmed items count towards a role's agreement level, contested and retired items do not

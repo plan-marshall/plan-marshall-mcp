@@ -1,0 +1,32 @@
+{
+  "$schema": "../../schema/source-manifest.schema.json",
+  "schema_version": 1,
+  "repository": "https://huggingface.co/datasets/jie-jw-wu/HumanEvalComm",
+  "commit": "603f72e1f8e18ecbcf910f6d988d749fd1728126",
+  "files": [
+    {
+      "path": "HumanEvalComm_v2.csv",
+      "sha256": "4db43adb9e89e4148c2b6da23b7ad18176f903fd45cdb92dd2877da3abff38d8",
+      "size": 596872,
+      "lfs": false
+    }
+  ],
+  "license": {
+    "spdx": "Apache-2.0",
+    "url": "https://www.apache.org/licenses/LICENSE-2.0"
+  },
+  "holders": [
+    "Jie JW Wu",
+    "Fatemeh H. Fard"
+  ],
+  "third_party": [
+    {
+      "name": "HumanEval problems, solutions and tests",
+      "spdx": "MIT",
+      "url": "https://github.com/openai/human-eval",
+      "holders": [
+        "Copyright (c) OpenAI"
+      ]
+    }
+  ]
+}

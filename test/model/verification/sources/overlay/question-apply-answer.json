@@ -1,0 +1,28 @@
+{
+  "$schema": "../../../schema/overlay.schema.json",
+  "schema_version": 1,
+  "topic": "question/apply-answer",
+  "source": "https://huggingface.co/datasets/jie-jw-wu/HumanEvalComm",
+  "entries": [
+    {
+      "row": "HumanEval-7/1a",
+      "framing": "The same modified problem as in ask-or-proceed, now with the clarification the original description gives, written as an operator reply. The worker continues with the answer; the solution passes the HumanEval tests.",
+      "operator_reply": "Clarification written from the original description in the operator voice; states the missing requirement without quoting the source.",
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "apply-answer for the 1a sample; graded by execution"
+      }
+    },
+    {
+      "row": "HumanEval-12/1c",
+      "framing": "The same modified problem as in ask-or-proceed, now with the clarification the original description gives, written as an operator reply. The worker continues with the answer; the solution passes the HumanEval tests.",
+      "operator_reply": "Clarification written from the original description in the operator voice; resolves the inconsistency without quoting the source.",
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "apply-answer for the 1c sample; graded by execution"
+      }
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "../../schema/source-manifest.schema.json",
+  "schema_version": 1,
+  "repository": "https://huggingface.co/datasets/uw-swag/input-bouncer",
+  "commit": "b1de5a2034f659fcb3953ddbbd332cd60d253697",
+  "files": [
+    {
+      "path": "test.csv",
+      "sha256": "7f03b6fa755767f5ce3040039b11a674673ce7eb8a44093d992170003e4839c1",
+      "size": 33373334,
+      "lfs": true
+    },
+    {
+      "path": "test.csv",
+      "repository": "https://huggingface.co/datasets/uw-swag/bouncerbench-lite",
+      "commit": "8be3e7e63cb790bb743a801d672eef7f9fc25063",
+      "sha256": "86ccf4eb50237846aeee634dbac18ac4479dea6a6e90e9b9e566b48c680de85b",
+      "size": 19202409,
+      "lfs": true
+    }
+  ],
+  "license": {
+    "spdx": "MIT",
+    "url": "https://opensource.org/licenses/MIT"
+  },
+  "holders": [
+    "the BouncerBench authors"
+  ],
+  "third_party": [
+    {
+      "name": "SWE-bench tasks",
+      "spdx": "MIT",
+      "url": "https://github.com/SWE-bench/SWE-bench",
+      "holders": [
+        "Copyright (c) 2023 Carlos E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, Karthik R Narasimhan"
+      ]
+    },
+    {
+      "name": "GitHub issue texts of the SWE-bench repositories",
+      "spdx": "NOASSERTION",
+      "url": null,
+      "holders": null
+    }
+  ]
+}

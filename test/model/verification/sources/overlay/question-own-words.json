@@ -1,0 +1,28 @@
+{
+  "$schema": "../../../schema/overlay.schema.json",
+  "schema_version": 1,
+  "topic": "question/own-words",
+  "source": "https://huggingface.co/datasets/jie-jw-wu/HumanEvalComm",
+  "entries": [
+    {
+      "row": "HumanEval-21/1p",
+      "framing": "Written answer in own words to a HumanEvalComm clarification; the mapping target is one of option, option with condition, new option, delegation, or unclear.",
+      "own_words_answer": "Restates the requirement in own words and maps onto the matching option without quoting the source.",
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "own-words sample; provenance.kind written, based on the imported problem"
+      }
+    },
+    {
+      "row": "HumanEval-33/1a",
+      "framing": "Written answer in own words to a HumanEvalComm clarification with a conditional reading; the mapping target is option with condition.",
+      "own_words_answer": "States the condition in own words and maps onto option with condition without quoting the source.",
+      "is_control": false,
+      "review": {
+        "status": "draft",
+        "notes": "own-words conditional sample; provenance.kind written"
+      }
+    }
+  ]
+}
