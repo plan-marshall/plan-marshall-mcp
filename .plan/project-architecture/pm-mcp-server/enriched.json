@@ -1,0 +1,114 @@
+{
+  "best_practices": [],
+  "generation": {
+    "by": "architecture",
+    "tree_sha": "48eda2e269448299b7f55d17ce6a34d131db99b3774a620fa2c1e2be6c46582f"
+  },
+  "insights": [],
+  "internal_dependencies": [],
+  "key_dependencies": [],
+  "key_dependencies_reasoning": "",
+  "key_packages": {
+    "pm-mcp-server/src/main/java/de/planmarshall/mcp/server/runtime": {
+      "description": "Daemon start-up: PmMcpd entry point, the Unix-socket binding, the native transport selection and the runtime context shared by the assembly."
+    },
+    "pm-mcp-server/src/main/java/de/planmarshall/mcp/server/security": {
+      "description": "Token authentication and request identity: the authentication mechanism, the identity providers and the registries of job tokens and device secrets (empty until the job runtime exists)."
+    },
+    "pm-mcp-server/src/main/java/de/planmarshall/mcp/server/tools": {
+      "description": "The MCP tool surface: the core tools (stubs for now), the hello tool, closed input schema generation and flat schema validation, and the sessionless initialize handling."
+    },
+    "pm-mcp-server/src/main/java/de/planmarshall/mcp/server/web": {
+      "description": "The optional web listener beside the Unix socket and its request handler."
+    }
+  },
+  "purpose": "deployment",
+  "purpose_reasoning": "packaging produces the native binary pm-mcpd (native profiles); the module is an assembly, not a reusable library",
+  "responsibility": "Quarkus assembly of the always-on daemon pm-mcpd: it wires the engine and runtime modules of pm-mcp-core into the MCP server on a Unix socket, the token identity and request security, the local runtime API, the credentials resource and the optional web listener. It holds wiring only; logic that needs no framework type belongs in pm-mcp-core.",
+  "responsibility_reasoning": "pom description 'Daemon assembly, Quarkus native binary pm-mcpd'; packages runtime, tools, security, web, api and credentials; AssemblyHoldsWiringOnlyTest and the CLAUDE.md module rules",
+  "skills_by_profile": {
+    "implementation": {
+      "defaults": [
+        {
+          "description": "Core Java standards for patterns, modern features and performance",
+          "skill": "pm-dev-java:java-core"
+        },
+        {
+          "description": "Language-agnostic code quality principles and the code-review spine",
+          "skill": "plan-marshall:ref-code-quality"
+        },
+        {
+          "description": "JSpecify null safety annotations",
+          "skill": "pm-dev-java:java-null-safety"
+        },
+        {
+          "description": "Lombok patterns for reducing boilerplate",
+          "skill": "pm-dev-java:java-lombok"
+        },
+        {
+          "description": "Quarkus CDI standards with testing and native image support",
+          "skill": "pm-dev-java:java-quarkus"
+        },
+        {
+          "description": "Core CDI patterns: constructor injection, scopes, producers, events",
+          "skill": "pm-dev-java:java-cdi"
+        },
+        {
+          "description": "Java maintenance standards: prioritization and refactoring triggers",
+          "skill": "pm-dev-java:java-maintenance"
+        }
+      ]
+    },
+    "module_testing": {
+      "defaults": [
+        {
+          "description": "Core Java standards for patterns, modern features and performance",
+          "skill": "pm-dev-java:java-core"
+        },
+        {
+          "description": "Language-agnostic code quality principles and the code-review spine",
+          "skill": "plan-marshall:ref-code-quality"
+        },
+        {
+          "description": "Quarkus CDI standards with testing and native image support",
+          "skill": "pm-dev-java:java-quarkus"
+        },
+        {
+          "description": "JUnit 5 core testing patterns with AAA structure",
+          "skill": "pm-dev-java:junit-core"
+        },
+        {
+          "description": "Language-agnostic testing methodology",
+          "skill": "plan-marshall:persona-module-tester"
+        },
+        {
+          "description": "Maven integration testing with Failsafe and IT naming",
+          "skill": "pm-dev-java:junit-integration"
+        }
+      ]
+    },
+    "quality": {
+      "defaults": [
+        {
+          "description": "Core Java standards for patterns, modern features and performance",
+          "skill": "pm-dev-java:java-core"
+        },
+        {
+          "description": "Language-agnostic code quality principles and the code-review spine",
+          "skill": "plan-marshall:ref-code-quality"
+        },
+        {
+          "description": "Quarkus CDI standards with testing and native image support",
+          "skill": "pm-dev-java:java-quarkus"
+        },
+        {
+          "description": "JavaDoc documentation standards",
+          "skill": "pm-dev-java:javadoc"
+        }
+      ]
+    }
+  },
+  "skills_by_profile_reasoning": "Quarkus CDI assembly in Java 25 with Lombok and null safety per CLAUDE.md; JUnit 5 unit tests and failsafe ITs; the java domain profiles configured for the project",
+  "tips": [],
+  "type": "module"
+}

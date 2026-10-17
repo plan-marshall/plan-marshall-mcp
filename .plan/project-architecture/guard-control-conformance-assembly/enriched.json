@@ -1,0 +1,20 @@
+{
+  "best_practices": [],
+  "generation": {
+    "by": "architecture",
+    "tree_sha": "4538856abf69c84a586032ea66f5ebfe79bee7e59a9029f4590f4f2832e72f56"
+  },
+  "insights": [],
+  "internal_dependencies": [],
+  "key_dependencies": [],
+  "key_dependencies_reasoning": "",
+  "key_packages": {},
+  "purpose": "integration-tests",
+  "purpose_reasoning": "exists only to be built by a test as a negative control",
+  "responsibility": "Fixture project, a pom template below src/guard-controls that BuildGuardsIT writes to target/guard-controls to prove that the enforcer executions of the root POM keep pm-conformance away from the classes of pm-mcp-server. It is not part of the product build.",
+  "responsibility_reasoning": "pom-only module below src/guard-controls/conformance-assembly with no sources; CLAUDE.md states the guard-control fixtures are templates the test writes with the version of the build",
+  "skills_by_profile": {},
+  "skills_by_profile_reasoning": "",
+  "tips": [],
+  "type": "module"
+}
