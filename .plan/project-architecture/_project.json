@@ -13,18 +13,18 @@
         "tree_sha": "e12d0486aa884e89ba2af8684e790e060e72468481915c35be6b99404fab9d1b"
       }
     },
-    "plan-marshall-mcp": {
-      "description": "The PM-MCP server itself: a Quarkus application exposing the MCP tool surface over Streamable HTTP at /mcp (port 8080), with readiness health on management port 9000 and a shell-free --health-probe entry point used as the container HEALTHCHECK. Packaged as a JVM container image via src/main/docker/Dockerfile.jvm.",
+    "guard-control-conformance-assembly": {
+      "description": "",
       "generation": {
         "by": "architecture",
-        "tree_sha": "468c793dfb100b5f609cbb007efbcd2175d65c9d1f8bbc0aca1c39b083888be9"
+        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
       }
     },
-    "plan-marshall-mcp-integration-tests": {
-      "description": "Container-level integration tests: builds the image via docker compose, starts it with the scripts/ helpers, and runs *IT tests with RestAssured against ports 18080/19000 (MCP endpoint, health, container HEALTHCHECK). Never published.",
+    "guard-control-e2e-assembly-classes": {
+      "description": "",
       "generation": {
         "by": "architecture",
-        "tree_sha": "eec5be4a61dbc84ace57a76bb75b04364e6846c03b10eb748da12f203bb351d9"
+        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
       }
     },
     "plan-marshall-mcp-parent": {
@@ -32,6 +32,27 @@
       "generation": {
         "by": "architecture",
         "tree_sha": "e12d0486aa884e89ba2af8684e790e060e72468481915c35be6b99404fab9d1b"
+      }
+    },
+    "pm-conformance": {
+      "description": "",
+      "generation": {
+        "by": "architecture",
+        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+      }
+    },
+    "pm-e2e": {
+      "description": "",
+      "generation": {
+        "by": "architecture",
+        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+      }
+    },
+    "pm-mcp-server": {
+      "description": "",
+      "generation": {
+        "by": "architecture",
+        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
       }
     }
   },
