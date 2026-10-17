@@ -2,19 +2,48 @@
   "best_practices": [],
   "generation": {
     "by": "architecture",
-    "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+    "tree_sha": "945ad62bfffe6e6712cc4cca5f8583325c8ac16d6c857344c3f7573cdea13824"
   },
   "insights": [],
   "internal_dependencies": [],
   "key_dependencies": [],
   "key_dependencies_reasoning": "",
-  "key_packages": {},
-  "purpose": "",
-  "purpose_reasoning": "",
-  "responsibility": "",
-  "responsibility_reasoning": "",
-  "skills_by_profile": {},
-  "skills_by_profile_reasoning": "",
+  "key_packages": {
+    "pm-e2e/src/test/java/de/planmarshall/e2e": {
+      "description": "Release-shape end-to-end tests: the release layout, the STDIO relay harness, a job chain over the native binaries and the shared verification-results writer."
+    }
+  },
+  "purpose": "integration-tests",
+  "purpose_reasoning": "no main sources; every class is a test or test support, run with the integration-tests profile",
+  "responsibility": "Release-shape end-to-end tests over the four native binaries (pm-mcpd, pm-mcp, pm-operator, pm-exec): the release layout, the STDIO relay harness and a job chain run as processes. It holds tests only and takes the client binaries from a checkout of pm-mcp-clients.",
+  "responsibility_reasoning": "pom description 'Release-shape end-to-end tests over the four native binaries'; sources empty, tests ReleaseLayoutIT, StdioHarnessIT, JobChainIT; CLAUDE.md build notes on the native layout",
+  "skills_by_profile": {
+    "module_testing": {
+      "defaults": [
+        {
+          "description": "Core Java standards for patterns, modern features and performance",
+          "skill": "pm-dev-java:java-core"
+        },
+        {
+          "description": "Language-agnostic code quality principles and the code-review spine",
+          "skill": "plan-marshall:ref-code-quality"
+        },
+        {
+          "description": "JUnit 5 core testing patterns with AAA structure",
+          "skill": "pm-dev-java:junit-core"
+        },
+        {
+          "description": "Language-agnostic testing methodology",
+          "skill": "plan-marshall:persona-module-tester"
+        },
+        {
+          "description": "Maven integration testing with Failsafe and IT naming",
+          "skill": "pm-dev-java:junit-integration"
+        }
+      ]
+    }
+  },
+  "skills_by_profile_reasoning": "Test-only module of JUnit 5 integration tests run as failsafe ITs against native binaries; no main sources, so only the module_testing profile applies",
   "tips": [],
   "type": "module"
 }

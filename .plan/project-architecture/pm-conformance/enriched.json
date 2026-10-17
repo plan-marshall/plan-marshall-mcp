@@ -2,19 +2,84 @@
   "best_practices": [],
   "generation": {
     "by": "architecture",
-    "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+    "tree_sha": "e98dda0f131eebf0a86ef21d95fade14f5d030ad24d8dfb7b3e7f4fa1d113bbb"
   },
   "insights": [],
   "internal_dependencies": [],
   "key_dependencies": [],
   "key_dependencies_reasoning": "",
-  "key_packages": {},
-  "purpose": "",
-  "purpose_reasoning": "",
-  "responsibility": "",
-  "responsibility_reasoning": "",
-  "skills_by_profile": {},
-  "skills_by_profile_reasoning": "",
+  "key_packages": {
+    "pm-conformance/src/main/java/de/planmarshall/conformance": {
+      "description": "The vocabulary of the conformance harness: the verdict (held, violated, indeterminate), the enforcement class of a rule and the attribution of an observation."
+    }
+  },
+  "purpose": "library",
+  "purpose_reasoning": "jar with main sources the harness code builds on; not an assembly and not a test-only module",
+  "responsibility": "Behavioural conformance harness that drives live models over scenarios outside the regular build; it holds the vocabulary of verdicts, enforcement classes and attribution. It is a module of the build only with the profile conformance of the root POM, never part of verify, the integration tests or a required check.",
+  "responsibility_reasoning": "pom description 'Behavioural conformance harness, outside the regular build'; classes Verdict, EnforcementClass, Attribution; ConformanceVocabularyTest; CLAUDE.md rule that the module is built with the conformance profile only",
+  "skills_by_profile": {
+    "implementation": {
+      "defaults": [
+        {
+          "description": "Core Java standards for patterns, modern features and performance",
+          "skill": "pm-dev-java:java-core"
+        },
+        {
+          "description": "Language-agnostic code quality principles and the code-review spine",
+          "skill": "plan-marshall:ref-code-quality"
+        },
+        {
+          "description": "JSpecify null safety annotations",
+          "skill": "pm-dev-java:java-null-safety"
+        },
+        {
+          "description": "Lombok patterns for reducing boilerplate",
+          "skill": "pm-dev-java:java-lombok"
+        },
+        {
+          "description": "Java maintenance standards: prioritization and refactoring triggers",
+          "skill": "pm-dev-java:java-maintenance"
+        }
+      ]
+    },
+    "module_testing": {
+      "defaults": [
+        {
+          "description": "Core Java standards for patterns, modern features and performance",
+          "skill": "pm-dev-java:java-core"
+        },
+        {
+          "description": "Language-agnostic code quality principles and the code-review spine",
+          "skill": "plan-marshall:ref-code-quality"
+        },
+        {
+          "description": "JUnit 5 core testing patterns with AAA structure",
+          "skill": "pm-dev-java:junit-core"
+        },
+        {
+          "description": "Language-agnostic testing methodology",
+          "skill": "plan-marshall:persona-module-tester"
+        }
+      ]
+    },
+    "quality": {
+      "defaults": [
+        {
+          "description": "Core Java standards for patterns, modern features and performance",
+          "skill": "pm-dev-java:java-core"
+        },
+        {
+          "description": "Language-agnostic code quality principles and the code-review spine",
+          "skill": "plan-marshall:ref-code-quality"
+        },
+        {
+          "description": "JavaDoc documentation standards",
+          "skill": "pm-dev-java:javadoc"
+        }
+      ]
+    }
+  },
+  "skills_by_profile_reasoning": "Plain Java library with small vocabulary types and a JUnit 5 unit test; no CDI or Quarkus, so the framework skills are left out",
   "tips": [],
   "type": "module"
 }

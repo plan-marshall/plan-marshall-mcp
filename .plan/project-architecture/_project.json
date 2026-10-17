@@ -14,17 +14,17 @@
       }
     },
     "guard-control-conformance-assembly": {
-      "description": "",
+      "description": "Fixture project, a pom template below src/guard-controls that BuildGuardsIT writes to target/guard-controls to prove that the enforcer executions of the root POM keep pm-conformance away from the classes of pm-mcp-server. It is not part of the product build.",
       "generation": {
         "by": "architecture",
-        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+        "tree_sha": "4538856abf69c84a586032ea66f5ebfe79bee7e59a9029f4590f4f2832e72f56"
       }
     },
     "guard-control-e2e-assembly-classes": {
-      "description": "",
+      "description": "Fixture project, a pom template below src/guard-controls that BuildGuardsIT writes to target/guard-controls to prove that the enforcer executions of the root POM keep pm-e2e away from the classes of pm-mcp-server. It is not part of the product build.",
       "generation": {
         "by": "architecture",
-        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+        "tree_sha": "1dfd14272087518046641983acbfa1ce6cb95825ba9187c2b0183d5e7f155ed0"
       }
     },
     "plan-marshall-mcp-parent": {
@@ -35,24 +35,24 @@
       }
     },
     "pm-conformance": {
-      "description": "",
+      "description": "Behavioural conformance harness that drives live models over scenarios outside the regular build; it holds the vocabulary of verdicts, enforcement classes and attribution. It is a module of the build only with the profile conformance of the root POM, never part of verify, the integration tests or a required check.",
       "generation": {
         "by": "architecture",
-        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+        "tree_sha": "e98dda0f131eebf0a86ef21d95fade14f5d030ad24d8dfb7b3e7f4fa1d113bbb"
       }
     },
     "pm-e2e": {
-      "description": "",
+      "description": "Release-shape end-to-end tests over the four native binaries (pm-mcpd, pm-mcp, pm-operator, pm-exec): the release layout, the STDIO relay harness and a job chain run as processes. It holds tests only and takes the client binaries from a checkout of pm-mcp-clients.",
       "generation": {
         "by": "architecture",
-        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+        "tree_sha": "945ad62bfffe6e6712cc4cca5f8583325c8ac16d6c857344c3f7573cdea13824"
       }
     },
     "pm-mcp-server": {
-      "description": "",
+      "description": "Quarkus assembly of the always-on daemon pm-mcpd: it wires the engine and runtime modules of pm-mcp-core into the MCP server on a Unix socket, the token identity and request security, the local runtime API, the credentials resource and the optional web listener. It holds wiring only; logic that needs no framework type belongs in pm-mcp-core.",
       "generation": {
         "by": "architecture",
-        "tree_sha": "42908f361ddc3eda479cbd6c8b1ab165c825d559af662fefdb00c9744e8f1720"
+        "tree_sha": "48eda2e269448299b7f55d17ce6a34d131db99b3774a620fa2c1e2be6c46582f"
       }
     }
   },
