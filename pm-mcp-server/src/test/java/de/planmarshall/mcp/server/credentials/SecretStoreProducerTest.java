@@ -9,11 +9,13 @@
  */
 package de.planmarshall.mcp.server.credentials;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.List;
 
-
+import de.planmarshall.runtime.credentials.CredentialAccount;
+import de.planmarshall.runtime.credentials.CredentialStoreChoice;
 import de.planmarshall.runtime.credentials.SecretStore;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -21,8 +23,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * The one {@link SecretStore} bean is selected when the application starts. No test here writes
- * through the HTTP resource: on macOS that would reach the login keychain under the real service name.
+ * The one {@link SecretStore} bean serves the store the operator recorded and resolves it at every call; before a
+ * store is recorded every operation is refused with {@code onboarding_incomplete}. No test here writes through the
+ * HTTP resource: on macOS that would reach the login keychain under the real service name.
  */
 @QuarkusTest
 @DisplayName("SecretStoreProducer in the application")
@@ -31,9 +34,23 @@ class SecretStoreProducerTest {
     @Inject
     SecretStore store;
 
+    @Inject
+    CredentialStoreChoice choice;
+
     @Test
-    @DisplayName("one SecretStore bean is selected at start")
-    void storeBean() {
-        assertTrue(List.of(SecretStore.KEYCHAIN, SecretStore.SECRET_SERVICE, SecretStore.FILE).contains(store.name()));
+    @DisplayName("no store is recorded before the onboarding's store step")
+    void noStoreRecorded() {
+        assertTrue(choice.recorded().isEmpty());
+    }
+
+    @Test
+    @DisplayName("the store refuses with onboarding_incomplete before a store is recorded")
+    void refusesBeforeTheChoice() {
+        var name = assertThrows(CredentialStoreChoice.Refusal.class, store::name);
+        assertEquals(CredentialStoreChoice.Refusal.Reason.ONBOARDING_INCOMPLETE, name.reason());
+
+        var put = assertThrows(CredentialStoreChoice.Refusal.class,
+                () -> store.put(CredentialAccount.global("github"), "secret"));
+        assertEquals(CredentialStoreChoice.Refusal.Reason.ONBOARDING_INCOMPLETE, put.reason());
     }
 }

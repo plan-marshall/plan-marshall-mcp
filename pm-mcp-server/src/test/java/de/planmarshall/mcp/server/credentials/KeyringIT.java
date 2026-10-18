@@ -25,12 +25,16 @@ import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import de.planmarshall.api.MachinePaths;
+import de.planmarshall.core.service.AuditSink;
 import de.planmarshall.mcp.server.test.DaemonProcess;
 import de.planmarshall.mcp.server.test.TestRuntime;
 import de.planmarshall.mcp.server.test.UdsHttp;
+import de.planmarshall.runtime.credentials.CredentialStoreChoice;
 import de.planmarshall.runtime.credentials.SecretStore;
 import de.planmarshall.runtime.credentials.ServiceName;
 import de.planmarshall.runtime.credentials.VerificationResults;
+import de.planmarshall.runtime.lock.FileLockManager;
 import de.planmarshall.runtime.test.TestBases;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,10 +43,11 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Gates 4 and 5 from the packaged daemon (runner JAR or native {@code pm-mcpd}, started as a process with its own
- * short {@code PM_MCP_BASE}, so the entries live under an instance-qualified service name): a put, status,
- * replace and delete of one credential through the credential resource of the local API, served by the backend
- * the daemon selected at start. The status read runs the backend's read of the secret and answers
- * {@code present} or {@code not_found} with the backend; no answer contains the secret. Records {@code target/verification-results/gate4-keychain-<mode>.json} (macOS) or
+ * short {@code PM_MCP_BASE}, so the entries live under an instance-qualified service name): the test records
+ * {@code credentials.store} for the instance as the machine onboarding's credential-store aspect does, then a put,
+ * status, replace and delete of one credential through the credential resource of the local API, served by the store
+ * the machine recorded. The status read runs the store's read of the secret and answers
+ * {@code present} or {@code not_found} with the store; no answer contains the secret. Records {@code target/verification-results/gate4-keychain-<mode>.json} (macOS) or
  * {@code gate5-secret-service-<mode>.json} (Linux); the times include the request over the socket.
  */
 @DisplayName("OS keyring from the packaged daemon")
@@ -50,6 +55,10 @@ class KeyringIT {
 
     private static final String KEY = "pm-mcp-keyring-it";
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** The store recording under test appends no audit record; the audit log is not this test's subject. */
+    private static final AuditSink NO_AUDIT = event -> {
+    };
 
     private Path base;
 
@@ -61,6 +70,24 @@ class KeyringIT {
     @AfterEach
     void cleanUp() {
         TestBases.delete(base);
+    }
+
+    /**
+     * Records {@code credentials.store} for this instance, as the credential-store aspect of the machine's
+     * onboarding does before the runtime starts: the OS store where it is available (the Keychain on macOS, the
+     * Secret Service on Linux), else the file store, since the integration host need not have a session keyring.
+     * The recorded store is what the daemon serves, so a returned store of {@code file} on Linux says that the
+     * Secret Service path was not exercised.
+     *
+     * @param base the machine root
+     * @return the store that was recorded
+     */
+    private static CredentialStoreChoice.Store recordStore(Path base) throws IOException {
+        var paths = new MachinePaths(base, MachinePaths.Os.current());
+        var available = !SecretStore.FILE.equals(CredentialStoreChoice.of(paths).integrityKeyStore().name());
+        var store = available ? CredentialStoreChoice.Store.OS : CredentialStoreChoice.Store.FILE;
+        CredentialStoreChoice.of(paths).record(new FileLockManager(NO_AUDIT), System.getProperty("user.name"), store);
+        return store;
     }
 
     private static UdsHttp.Response send(DaemonProcess daemon, String method, String body) throws IOException {
@@ -85,9 +112,10 @@ class KeyringIT {
     }
 
     @Test
-    @DisplayName("put, status, replace and delete through the selected backend, no answer with the secret")
+    @DisplayName("put, status, replace and delete through the recorded backend, no answer with the secret")
     void roundTrip() throws Exception {
         var macos = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("mac");
+        var recorded = recordStore(base);
         var secret = UUID.randomUUID().toString();
         var values = new LinkedHashMap<String, Object>();
         values.put("mode", DaemonProcess.isNative() ? "native" : "jvm");
@@ -139,6 +167,7 @@ class KeyringIT {
                 assertFalse(daemon.output().contains(secret), "the daemon output contains the secret");
                 assertTrue(daemon.output().contains("service name '" + ServiceName.DEFAULT + "/"), daemon.output());
                 if (macos) {
+                    assertEquals(CredentialStoreChoice.Store.OS, recorded, daemon.output());
                     assertEquals(SecretStore.KEYCHAIN, store, daemon.output());
                 }
             } finally {
