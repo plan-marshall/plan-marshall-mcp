@@ -18,6 +18,10 @@ live beside its code in `plan-marshall/pm-mcp-core` (`doc/Specification.adoc`, `
 repository as well): the workflow language, the state catalogue, the store schemas, model work, the phase workflows,
 the timeouts and the identifiers among them.
 
+Read `../plan-marshall-documentation/doc/developer/project-setup.adoc` before starting work. It is the reference for the
+repositories and their checkouts, building, work packages, and the way of a change from a branch to `main`; this file
+holds only what is specific to this repository.
+
 Current state: roadmap Milestone 0 is complete; Milestone 1 is next. Part A established the harness as worker
 (concept `doc/concepts/harness-as-worker/`, index `doc/Concepts.adoc`). Part B built each verified technique in
 its target module, minimal and real: the always-on daemon `pm-mcpd` (`pm-mcp-server`), reached through the
@@ -67,7 +71,7 @@ Never hard-code build tool invocations; use the resolved canonical commands belo
   the client JARs from the registry.
 - Conformance harness: `./mvnw verify -Pconformance`. `pm-conformance` is a module of the build with the profile
   `conformance` only: `verify`, `-Pintegration-tests`, `-Pcoverage` and the checks of a pull request never build or run
-  it; the nightly workflow compiles it and runs nothing of it. Never
+  it. Never
   add it to the modules of the root POM, and never activate the profile by default or from another profile.
 - The enforcer executions of the root POM keep `pm-e2e` and `pm-conformance` away from the classes of
   `pm-mcp-server`; `BuildGuardsIT` of `pm-mcp-server` proves each with a fixture project below `src/guard-controls`, a template that
@@ -178,20 +182,13 @@ commits, pull request at finalize), and its row in the index is set to `done` wi
 
 ## Git Workflow
 
-The repository lives in the `plan-marshall` organisation (`plan-marshall/plan-marshall-mcp`). `main` is protected by rulesets and merges go through the merge queue. Direct pushes to `main` are never allowed. Always use this workflow:
+The way from a branch to `main` is in `../plan-marshall-documentation/doc/developer/project-setup.adoc` (_From a Branch
+to `main`_). The hard rules:
 
-1. Create a feature branch: `git checkout -b <branch-name>`
-2. Commit changes: `git add <files> && git commit -m "<message>"`
-3. Push the branch: `git push -u origin <branch-name>`
-4. Create a PR: `gh pr create --repo plan-marshall/plan-marshall-mcp --head <branch-name> --base main --title "<title>" --body "<body>"`
-5. Wait for CI + review bots (waits until checks complete): `gh pr checks --watch`
-6. **Handle review comments**: fetch them with `gh api repos/plan-marshall/plan-marshall-mcp/pulls/<pr-number>/comments`. For each one:
-   - If it's clearly valid and fixable: fix it, commit, push, then reply explaining the fix and resolve the comment
-   - If you disagree or it's out of scope: reply explaining why, then resolve the comment
-   - If you're uncertain (not 100% confident): **ask the user** before acting
-   - Every comment MUST get a reply (the reason for fixing or not fixing) and MUST be resolved
-7. Do **NOT** enable auto-merge unless explicitly instructed. Wait for user approval.
-8. Return to main: `git checkout main && git pull`
+- `main` is protected by rulesets and the merge queue; nobody pushes to `main`.
+- Do not merge without the user's word. Do not enable auto-merge unless explicitly instructed.
+- Commits end with `Co-Authored-By: plan-marshall <noreply@cuioss.de>`.
+- Review comments: if you are uncertain whether a comment is valid, ask the user before acting.
 
 **Publishing only to the organisation's registry:** plan-marshall-mcp is proprietary. Its artifacts go to the GitHub
 Packages registry of the organisation `plan-marshall` and nowhere else, never to Maven Central or another public
@@ -205,11 +202,8 @@ re-enable any of these, never weaken the guards of the parent, and never add a d
 organisation's registry, without the user's explicit decision.
 
 CI: reusable workflows from `cuioss/cuioss-organization`, pinned by full SHA with a version comment;
-configuration in `.github/project.yml`. Releases of `cuioss-organization` and of the cui parent open
-their update PRs here through the App `plan-marshall-release-bot` (labelled `skip-bot-review`, merged by
-auto-merge). SonarCloud analyses the project in the organisation `plan-marshall`; CodeRabbit is
-configured by `.coderabbit.yaml`. The required checks are those of the
-ruleset `main-branch-protection`, which is their only authoritative list: read them with
+configuration in `.github/project.yml`. CodeRabbit is configured by `.coderabbit.yaml`. The required checks are those of
+the ruleset `main-branch-protection`, which is their only authoritative list: read them with
 `gh api repos/plan-marshall/plan-marshall-mcp/rulesets` and the ruleset's id.
 
 ## IDE Detection
