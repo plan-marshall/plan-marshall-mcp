@@ -96,7 +96,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`]
 |The question corpus rebuilt on public datasets
 |`open`
-|link:../../../pm-mcp-core/doc/plans/corpus-overlay-extensions.adoc[`pm-mcp-core` / `corpus-overlay-extensions`]; link:../../../pm-mcp-core/doc/plans/corpus-group-contamination.adoc[`pm-mcp-core` / `corpus-group-contamination`]
+|nothing
 |Milestone 4
 
 |link:question-corpus-ask-rate.adoc[`question-corpus-ask-rate`]
