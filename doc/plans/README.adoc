@@ -66,7 +66,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:default-units-and-drift-tests.adoc[`default-units-and-drift-tests`]
 |Default workflow units and the drift tests
 |`blocked`
-|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/project-units-and-invariants.adoc[`pm-mcp-core` / `project-units-and-invariants`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/diagram-generator.adoc[`pm-mcp-core` / `diagram-generator`]; link:engine-wiring.adoc[`engine-wiring`]; `plan-marshall-mcp` switched to private (roadmap Milestone 7, an operator decision): the default workflow units are model-facing content and are not committed before (no work package)
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/project-units-and-invariants.adoc[`pm-mcp-core` / `project-units-and-invariants`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/diagram-generator.adoc[`pm-mcp-core` / `diagram-generator`]; link:engine-wiring.adoc[`engine-wiring`]
 |Milestone 3
 
 |link:job-runtime-wiring.adoc[`job-runtime-wiring`]
