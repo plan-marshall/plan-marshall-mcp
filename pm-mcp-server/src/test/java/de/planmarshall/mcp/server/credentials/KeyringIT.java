@@ -82,7 +82,7 @@ class KeyringIT {
      * @param base the machine root
      * @return the store that was recorded
      */
-    private static CredentialStoreChoice.Store recordStore(Path base) throws IOException {
+    private static CredentialStoreChoice.Store recordStore(Path base) {
         var paths = new MachinePaths(base, MachinePaths.Os.current());
         var available = !SecretStore.FILE.equals(CredentialStoreChoice.of(paths).integrityKeyStore().name());
         var store = available ? CredentialStoreChoice.Store.OS : CredentialStoreChoice.Store.FILE;

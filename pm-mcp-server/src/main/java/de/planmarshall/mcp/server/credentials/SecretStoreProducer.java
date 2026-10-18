@@ -49,7 +49,7 @@ class SecretStoreProducer {
 
     /** @param choice the recorded choice the store serves */
     @Produces
-    @Singleton
+    @ApplicationScoped
     SecretStore secretStore(CredentialStoreChoice choice) {
         return new RecordedStore(choice);
     }
