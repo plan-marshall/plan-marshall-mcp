@@ -84,9 +84,10 @@ class KeyringIT {
      */
     private static CredentialStoreChoice.Store recordStore(Path base) {
         var paths = new MachinePaths(base, MachinePaths.Os.current());
-        var available = !SecretStore.FILE.equals(CredentialStoreChoice.of(paths).integrityKeyStore().name());
+        var choice = CredentialStoreChoice.of(paths);
+        var available = !SecretStore.FILE.equals(choice.integrityKeyStore().name());
         var store = available ? CredentialStoreChoice.Store.OS : CredentialStoreChoice.Store.FILE;
-        CredentialStoreChoice.of(paths).record(new FileLockManager(NO_AUDIT), System.getProperty("user.name"), store);
+        choice.record(new FileLockManager(NO_AUDIT), System.getProperty("user.name"), store);
         return store;
     }
 

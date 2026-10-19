@@ -14,6 +14,7 @@ import java.util.Map;
 
 import de.cuioss.tools.logging.CuiLogger;
 import de.planmarshall.runtime.credentials.CredentialAccount;
+import de.planmarshall.runtime.credentials.CredentialStoreChoice;
 import de.planmarshall.runtime.credentials.InvalidCredentialNameException;
 import de.planmarshall.runtime.credentials.SecretStore;
 import de.planmarshall.runtime.credentials.SecretStoreException;
@@ -36,7 +37,8 @@ import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
  * the serving backend ({@code 200} in both cases: an absent entry is a status, not a refusal),
  * {@code DELETE} removes it ({@code 204}). A key outside {@code [a-zA-Z0-9._-]} is refused with
  * {@code 400}; a backend failure answers {@code 500} (or {@code 423} for a locked keyring) with the
- * error code.
+ * error code. Before the onboarding recorded the credential store, every request is refused with
+ * {@code 409 onboarding_incomplete} ({@link CredentialStoreChoice#activeStore()}).
  * <p>
  * No answer of this resource contains a secret: a secret enters the runtime through {@code PUT}
  * and never leaves it through the API, because the runtime token that authenticates a request is
@@ -126,6 +128,15 @@ public class CredentialsResource {
     @ServerExceptionMapper
     public RestResponse<Map<String, String>> invalidName(InvalidCredentialNameException e) {
         return RestResponse.status(RestResponse.Status.BAD_REQUEST, Map.of("error", "invalid_credential_key"));
+    }
+
+    /**
+     * @param e the credential store refused before the onboarding's store step
+     * @return {@code 409} with {@code onboarding_incomplete}
+     */
+    @ServerExceptionMapper
+    public RestResponse<Map<String, String>> storeNotChosen(CredentialStoreChoice.Refusal e) {
+        return RestResponse.status(RestResponse.Status.CONFLICT, Map.of("error", e.reason().code()));
     }
 
     /**
