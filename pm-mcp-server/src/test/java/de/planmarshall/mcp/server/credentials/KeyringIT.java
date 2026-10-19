@@ -84,9 +84,10 @@ class KeyringIT {
      */
     private static CredentialStoreChoice.Store recordStore(Path base) {
         var paths = new MachinePaths(base, MachinePaths.Os.current());
-        var available = !SecretStore.FILE.equals(CredentialStoreChoice.of(paths).integrityKeyStore().name());
+        var choice = CredentialStoreChoice.of(paths);
+        var available = !SecretStore.FILE.equals(choice.integrityKeyStore().name());
         var store = available ? CredentialStoreChoice.Store.OS : CredentialStoreChoice.Store.FILE;
-        CredentialStoreChoice.of(paths).record(new FileLockManager(NO_AUDIT), System.getProperty("user.name"), store);
+        choice.record(new FileLockManager(NO_AUDIT), System.getProperty("user.name"), store);
         return store;
     }
 
@@ -109,6 +110,18 @@ class KeyringIT {
 
     private static String status(UdsHttp.Response response) throws IOException {
         return JSON.readTree(response.body()).path("status").asText();
+    }
+
+    @Test
+    @DisplayName("a credential before the store is recorded is refused with 409 onboarding_incomplete")
+    void refusesBeforeStoreChoice() throws Exception {
+        try (var daemon = DaemonProcess.startReady(base)) {
+            var response = credential(daemon, "GET", null);
+
+            assertEquals(409, response.status(), response.body() + daemon.output());
+            assertEquals("onboarding_incomplete", JSON.readTree(response.body()).path("error").asText(),
+                    response.body());
+        }
     }
 
     @Test

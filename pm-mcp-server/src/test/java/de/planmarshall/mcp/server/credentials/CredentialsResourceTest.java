@@ -26,7 +26,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import de.cuioss.test.juli.LogAsserts;
 import de.cuioss.test.juli.TestLogLevel;
 import de.cuioss.test.juli.junit5.EnableTestLogger;
+import de.planmarshall.api.MachinePaths;
 import de.planmarshall.runtime.credentials.CredentialAccount;
+import de.planmarshall.runtime.credentials.CredentialStoreChoice;
 import de.planmarshall.runtime.credentials.FakeSecretService;
 import de.planmarshall.runtime.credentials.FileSecretStore;
 import de.planmarshall.runtime.credentials.InvalidCredentialNameException;
@@ -149,6 +151,18 @@ class CredentialsResourceTest {
         assertEquals(Map.of("error", "credential_store_locked"), locked.getEntity());
         assertEquals(500, invalid.getStatus());
         assertEquals(Map.of("error", "credentials_file_invalid"), invalid.getEntity());
+    }
+
+    @Test
+    @DisplayName("a credential before the store is chosen maps to 409 onboarding_incomplete")
+    void storeNotChosen() {
+        var choice = CredentialStoreChoice.of(new MachinePaths(base, MachinePaths.Os.current()));
+        var refusal = assertThrows(CredentialStoreChoice.Refusal.class, choice::activeStore);
+
+        var response = resource.storeNotChosen(refusal);
+
+        assertEquals(409, response.getStatus());
+        assertEquals(Map.of("error", "onboarding_incomplete"), response.getEntity());
     }
 
     @Nested
