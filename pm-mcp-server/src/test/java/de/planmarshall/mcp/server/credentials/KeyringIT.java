@@ -113,6 +113,18 @@ class KeyringIT {
     }
 
     @Test
+    @DisplayName("a credential before the store is recorded is refused with 409 onboarding_incomplete")
+    void refusesBeforeStoreChoice() throws Exception {
+        try (var daemon = DaemonProcess.startReady(base)) {
+            var response = credential(daemon, "GET", null);
+
+            assertEquals(409, response.status(), response.body() + daemon.output());
+            assertEquals("onboarding_incomplete", JSON.readTree(response.body()).path("error").asText(),
+                    response.body());
+        }
+    }
+
+    @Test
     @DisplayName("put, status, replace and delete through the recorded backend, no answer with the secret")
     void roundTrip() throws Exception {
         var macos = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("mac");
