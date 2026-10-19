@@ -53,6 +53,9 @@ public class CredentialsResource {
     private static final CuiLogger LOGGER = new CuiLogger(CredentialsResource.class);
     private static final int LOCKED = 423;
 
+    /** Key of the error code in every refusal body. */
+    private static final String ERROR_KEY = "error";
+
     /**
      * The request body of {@code PUT}.
      *
@@ -127,7 +130,7 @@ public class CredentialsResource {
      */
     @ServerExceptionMapper
     public RestResponse<Map<String, String>> invalidName(InvalidCredentialNameException e) {
-        return RestResponse.status(RestResponse.Status.BAD_REQUEST, Map.of("error", "invalid_credential_key"));
+        return RestResponse.status(RestResponse.Status.BAD_REQUEST, Map.of(ERROR_KEY, "invalid_credential_key"));
     }
 
     /**
@@ -136,7 +139,7 @@ public class CredentialsResource {
      */
     @ServerExceptionMapper
     public RestResponse<Map<String, String>> storeNotChosen(CredentialStoreChoice.Refusal e) {
-        return RestResponse.status(RestResponse.Status.CONFLICT, Map.of("error", e.reason().code()));
+        return RestResponse.status(RestResponse.Status.CONFLICT, Map.of(ERROR_KEY, e.reason().code()));
     }
 
     /**
@@ -148,6 +151,6 @@ public class CredentialsResource {
         LOGGER.error(e, RuntimeLogMessages.ERROR.CREDENTIAL_STORE_FAILED, store.name(), e.getMessage());
         int status = e.reason() == SecretStoreException.Reason.LOCKED ? LOCKED : 500;
         return RestResponse.ResponseBuilder.<Map<String, String>>create(status)
-                .entity(Map.of("error", e.reason().code())).build();
+                .entity(Map.of(ERROR_KEY, e.reason().code())).build();
     }
 }
