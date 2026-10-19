@@ -49,12 +49,16 @@ class BuildGuardsIT {
     void fixtureFails(String fixture, String execution, @TempDir Path temp) throws Exception {
         var root = Path.of(System.getProperty("pm.root"));
         var pom = materialise(root, fixture);
+        // The repository's maven.config names the global settings relative to the repository root, because
+        // m2e cannot expand ${session.rootDirectory}. The materialised fixture would resolve that relative
+        // path against its own directory, so the root settings are named explicitly; the command line wins
+        // over maven.config.
         // The output goes to a file: reading the pipe to its end would wait for a build that hangs, and the
         // time limit below would never apply.
         var log = temp.resolve("fixture.log");
-        var builder = new ProcessBuilder(root.resolve("mvnw").toString(), "-B", "--no-transfer-progress", "-f",
-                pom.toString(), "validate").directory(pom.getParent().toFile()).redirectErrorStream(true)
-                .redirectOutput(log.toFile());
+        var builder = new ProcessBuilder(root.resolve("mvnw").toString(), "-B", "--no-transfer-progress",
+                "-gs", root.resolve(".mvn/settings.xml").toString(), "-f", pom.toString(), "validate")
+                .directory(pom.getParent().toFile()).redirectErrorStream(true).redirectOutput(log.toFile());
 
         var process = builder.start();
         if (!process.waitFor(5, TimeUnit.MINUTES)) {
