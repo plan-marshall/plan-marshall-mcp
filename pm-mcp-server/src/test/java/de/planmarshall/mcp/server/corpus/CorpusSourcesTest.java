@@ -102,8 +102,8 @@ class CorpusSourcesTest {
     @DisplayName("the import covers every source")
     void importIsComplete() {
         var missed = result.missed().stream()
-                .map(source -> "%s: %s (%s) %s".formatted(source.name(), source.reason().wireName(), source.file(),
-                        source.detail()))
+                .map(source -> "%s: %s%s: %s".formatted(source.name(), source.reason().wireName(),
+                        source.file() == null ? "" : " in " + source.file(), source.detail()))
                 .collect(Collectors.joining("\n"));
 
         assertEquals(ImportResult.Verdict.COMPLETE, result.verdict(), "missed sources:\n" + missed);
@@ -191,11 +191,17 @@ class CorpusSourcesTest {
         return manifests;
     }
 
+    /**
+     * @return the overlays of the sources that have one; a missing overlay misses its source in the import and is a
+     *         violation of the validator, both reported by the tests above
+     */
     private static List<SourceOverlay> overlays(List<Path> directories) throws IOException {
         var overlays = new ArrayList<SourceOverlay>();
         for (var directory : directories) {
             var file = directory.resolve(CorpusImport.OVERLAY);
-            overlays.add(SourceOverlayCodec.read(file, Files.readAllBytes(file)));
+            if (Files.isRegularFile(file)) {
+                overlays.add(SourceOverlayCodec.read(file, Files.readAllBytes(file)));
+            }
         }
         return overlays;
     }
