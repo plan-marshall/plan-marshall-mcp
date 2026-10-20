@@ -298,7 +298,7 @@ Tokens are the mean per session of the input, output and cache tokens the harnes
 |`opencode-go/minimax-m3.1-flash-free` |`2cp` |68 % |2 % |+66 [+41, +90] |9 |32792 |stays
 |===
 
-Differences and intervals are in percentage points; each rate rests on 50 sessions less the `no_submit` ones. Every category differs for every one of the three models, so none is contested and all 120 items count. The controls were almost never asked about (at most 14 % for `2ac`), while the variants of `1a`, where only the description was made ambiguous, were asked about least: they discriminate the models most.
+Differences and intervals are in percentage points; each rate rests on the submitted sessions of its own arm, that is on 50 sessions less the `no_submit` ones of that arm. The `no_submit` column counts the variant arm only: no control session ended without a `submit` for any of the three models, so every control rate rests on all 50 sessions. Every category differs for every one of the three models, so none is contested and all 120 items count. The controls were almost never asked about (at most 14 % for `2ac`), while the variants of `1a`, where only the description was made ambiguous, were asked about least: they discriminate the models most.
 
 === Provenance rules
 
