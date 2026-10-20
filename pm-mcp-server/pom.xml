@@ -15,6 +15,9 @@
         <maven.jar.plugin.automatic.module.name>de.planmarshall.mcp.server</maven.jar.plugin.automatic.module.name>
         <!-- Enabled by the integration-tests profile -->
         <skipITs>true</skipITs>
+        <!-- The JUnit tags the test run leaves out: the corpus test fetches the public datasets of the model
+             verification corpus and runs with the profile corpus only -->
+        <pm.surefire.excludedGroups>corpus</pm.surefire.excludedGroups>
     </properties>
     <dependencies>
         <dependency>
@@ -137,6 +140,13 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludedGroups>${pm.surefire.excludedGroups}</excludedGroups>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
     <profiles>
@@ -243,6 +253,33 @@
                                 <pm.root>${maven.multiModuleProjectDirectory}</pm.root>
                                 <!-- The version the guard fixtures take as the version of their parent -->
                                 <pm.version>${project.version}</pm.version>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- The corpus test (PM-WORK-6): imports the sources of the model verification corpus from huggingface.co at
+             their pinned commits and validates the corpus with the generated items. It runs with this profile only and
+             runs nothing else: verify, -Pcoverage, -Pintegration-tests, -Psonar and the checks of a pull request leave
+             the tag corpus out. Never activate this profile by default or from another profile. -->
+        <profile>
+            <id>corpus</id>
+            <properties>
+                <pm.surefire.excludedGroups />
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <groups>corpus</groups>
+                            <systemPropertyVariables>
+                                <!-- The root of the repository, which holds the corpus test/model/verification -->
+                                <pm.root>${maven.multiModuleProjectDirectory}</pm.root>
+                                <!-- The cache root the import writes the generated items below, outside the corpus -->
+                                <pm.corpus.cache>${project.build.directory}/corpus-cache</pm.corpus.cache>
                             </systemPropertyVariables>
                         </configuration>
                     </plugin>
