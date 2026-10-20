@@ -25,6 +25,7 @@ It outlives the evaluation tooling that created it (https://github.com/plan-mars
 ----
 test/model/verification/
 ├── README.adoc                     this document
+├── ATTRIBUTION.md                  the public datasets: licence, holders, one section per source
 ├── validate.py                     checks every item (stdlib Python)
 ├── schema/
 │   └── verification-item.schema.json
@@ -33,10 +34,15 @@ test/model/verification/
 │   ├── roles/                      the contract of each role (one file per role)
 │   ├── grading/                    the judge of open answers, the screener and level 1
 │   └── commit-typing/              a project rule items require (input.context)
+├── sources/<name>/
+│   ├── manifest.json               a public dataset: repository, pinned commit, licence, files with SHA-256
+│   └── overlay.json                the rows of the dataset that become items, and their framing
 └── <topic>/<subtopic>/<slug>.json  one item per file
 ----
 
 The id of an item is its path below this directory without `.json` (`triage/build/bt-03-fapi-ci-502`); its `topic` is its directory. Items that belong to one case share a `group` (the split and combined questions of one self-review).
+
+The `question/**` items are not stored here. The import of `core.role.corpus` (`CorpusImport`, `pm-mcp-core`) fetches each source at the commit its manifest pins, checks every file against its SHA-256, and generates one item per overlay row into a cache outside the repository (`items/<topic>/<slug>.json` below the cache root); the generated items are never committed. Their id is their path below `items/` (`question/escalate-or-proceed/ib-django-django-16082`), and their `provenance.origin` names the source repository, the commit, the file and the line of the row (<<_run_the_corpus_test>>).
 
 === Topics
 
@@ -51,7 +57,11 @@ The id of an item is its path below this directory without `.json` (`triage/buil
 |`review/security` |review-security |4 |diffs with seeded security defects, one control without
 |`review/simplify` |review-simplify |4 |diffs with seeded needless complexity, one control without
 |`review/self-review` |review-requirement (4), review-code (4), self-review (4) |12 |four diffs with a requirement, each asked split (requirement: `review-requirement`; code: `review-code`) and combined (`self-review`, comparison items that grade no role)
-|`decision/*` |worker (generic) |24 |closed decisions of a running plan: remediation, triage, scope, build classification, commit type, gate; they also grade the quorum roles `quorum-a` and `quorum-b` and calibrate every quorum declaration of the adjudication unit on the items of its decision kind (tag `decision-kind:<kind>`, link:../../../../pm-mcp-core/doc/specification/model-work/10-decision-quorum.adoc#quorum-calibration[Model Work Specification, Quorum Calibration])
+|`decision/*` |worker (generic) |24 |closed decisions of a running plan: remediation, triage, scope, build classification, commit type, gate; they also grade the quorum roles `quorum-a` and `quorum-b` and calibrate every quorum declaration of the adjudication unit on the items of its decision kind (tag `decision-kind:<kind>`, link:../../../../pm-mcp-core/doc/specification/model-work/10-decision-quorum.adoc#quorum-calibration[Model Work Specification, Quorum Calibration]). None is retired by the `question/*` topics: no `decision/*` item asks only whether to ask or escalate; each chooses among the options of its decision (build classes, commit types, gate, remediation, scope, triage)
+|`question/ask-or-proceed` |worker (generic) |120 |generated from `humanevalcomm`: a HumanEval task with its description made ambiguous, inconsistent or incomplete (ask), and the same task with its original description as control (proceed); 10 source rows for each of the six variant categories
+|`question/apply-answer` |worker (generic) |10 |generated from `humanevalcomm`: a flawed task description and the operator's answer to it; the question asks for the output the answer leads to
+|`question/escalate-or-proceed` |worker (generic), and the quorum roles `quorum-a` and `quorum-b` |32 |generated: 20 GitHub issues from `input-bouncer`, one underspecified (escalate) and one well specified (proceed) per repository over ten repositories, and 6 act-or-abstain pairs of agent instructions from `agentabstain` (ambiguous, contradictory, or drastic: escalate; their counterparts: proceed); no `decision-kind` tag, so they calibrate no quorum declaration
+|`question/own-words` |interpret |6 |generated from `humanevalcomm`: an operator's answer in own words to a question with options, mapped onto an option, an option with a condition, a new option, a delegation, or unclear; graded by the judge's rubric
 |`skills/commit-typing` |worker (generic) |20 |decisions whose answer follows a project rule that exists only in a role skill; the item names the skill in its tags
 |`screening/untrusted-text` |screener |45 |real review comments (clean) and injected instructions (suspicious)
 |===
@@ -125,7 +135,25 @@ It adds what a reviewed, long-lived corpus needs: the review status with its his
 python3 test/model/verification/validate.py
 ----
 
-It checks every item against the schema and the rules the schema cannot express: the id equals the path, ids are unique, the canary is present, a closed answer is one of the choices, a rubric has items unless the item is a control, context files exist, and provenance, review, and grading name no transient tool, stage, or local record path. Exit code 0 when every item is valid.
+It checks every item against the schema and the rules the schema cannot express: the id equals the path, ids are unique, the canary is present, a closed answer is one of the choices, a rubric has items unless the item is a control, context files exist, and provenance, review, and grading name no transient tool, stage, or local record path. Exit code 0 when every item is valid. It leaves out the `sources/` directory; the sources and the items generated from them are checked by the corpus test.
+
+=== Run the corpus test
+
+[source,bash]
+----
+./mvnw test -Pcorpus -pl pm-mcp-server -am
+----
+
+`CorpusSourcesTest` of `pm-mcp-server` runs with the Maven profile `corpus` only; every other build leaves it out. It needs `huggingface.co`: it imports every source of `sources/` at its pinned commit (an LFS file through the LFS batch API) into `pm-mcp-server/target/corpus-cache/`, then validates this corpus together with the generated items with `CorpusValidator` of `pm-mcp-core`, the Java form of `validate.py` plus the rules of the sources (manifest and overlay formats, one `ATTRIBUTION.md` section per source, no third-party file or imported item stored here). It fails when the import is `FAILED` (a file does not match its SHA-256) or `PARTIAL` (a source could not be fetched or its overlay does not generate its rows; the message names the source and the reason), on any violation of the validator, when a topic has fewer or more generated items than overlay rows, when a closed item has two equal choices, and when an overlay row's `question` or `facts` names no field of its row.
+
+=== Add a source
+
+. Choose a dataset whose licence allows commercial use, change and redistribution, published on `huggingface.co` (the only fetch the corpus test composes).
+. Write `sources/<name>/manifest.json` in the format of `source-manifest.schema.json` of `core.role.corpus`: `name` (the directory), `repository`, the full `commit`, the `licence` as an SPDX id, `fetch`, and every file the overlay reads with its SHA-256 (`lfs: true` for a file stored in Git LFS, whose SHA-256 is that of the LFS object).
+. Fetch the file at the pinned commit into a directory outside the repository, check its SHA-256, and read the rows to select; never commit it.
+. Write `sources/<name>/overlay.json` in the format of `source-overlay.schema.json`: per selected row its key (the value of `key_field`, or its position from 1 when `key_field` is `null`, as for a file whose key repeats) and the framing of its item. The task text and the facts come from the row through `{field}` templates; the overlay writes only what is ours (the question, the options, the reference and its rationale), after reading the row, with `review.status: draft`.
+. Add a section `## <name>` to `ATTRIBUTION.md` with the licence, the holders and what the overlay adds.
+. Run the corpus test and `validate.py`, and add the topic with its count to the table above.
 
 === Measure a role
 
@@ -231,7 +259,7 @@ In the evaluation this was done by hand for two levels per role (https://github.
 
 == Origin
 
-The corpus was started on 2026-10-04 with cases from real plans of `cuioss/API-Sheriff` and `cuioss/plan-marshall` (triage, re-planning), hand-made diffs against the real code of both repositories (reviews), closed decision tasks written on 2026-10-01, rule-following tasks written on 2026-10-03, and real review comments with written injections (screening). The confirmed references were checked against the answers of two models, warm and fresh; five were resolved from those answers and two gained accepted alternatives (see the items' `review.notes`). Public datasets are selected for the corpus and are to be fetched at a pinned commit, never stored here, once the loader of the work package `question-corpus-public-datasets` exists; `ATTRIBUTION.md` lists each with its licence and holders.
+The corpus was started on 2026-10-04 with cases from real plans of `cuioss/API-Sheriff` and `cuioss/plan-marshall` (triage, re-planning), hand-made diffs against the real code of both repositories (reviews), closed decision tasks written on 2026-10-01, rule-following tasks written on 2026-10-03, and real review comments with written injections (screening). The confirmed references were checked against the answers of two models, warm and fresh; five were resolved from those answers and two gained accepted alternatives (see the items' `review.notes`). On 2026-10-20 the `question/*` topics were added on three public datasets, HumanEvalComm, BouncerBench `input-bouncer` and AgentAbstain: only their manifests and overlays are stored here, and the import of `core.role.corpus` fetches them at the pinned commit and generates the items outside the repository (<<_run_the_corpus_test>>); `ATTRIBUTION.md` lists each with its licence and holders.
 
 === Provenance rules
 

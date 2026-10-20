@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "name": "input-bouncer",
+  "repository": "https://huggingface.co/datasets/uw-swag/input-bouncer",
+  "commit": "b1de5a2034f659fcb3953ddbbd332cd60d253697",
+  "licence": "MIT",
+  "fetch": "huggingface",
+  "files": [
+    {
+      "path": "test.csv",
+      "sha256": "7f03b6fa755767f5ce3040039b11a674673ce7eb8a44093d992170003e4839c1",
+      "lfs": true
+    }
+  ]
+}

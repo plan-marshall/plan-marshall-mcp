@@ -9,6 +9,9 @@ minimum, maximum) and against the corpus rules the schema cannot express: the id
 are unique, the canary is the corpus canary, a closed answer is one of the choices, a rubric item set is
 present unless the item is a control, context files exist, and provenance, review, and grading name no
 transient tool, stage, or local record path.
+
+Not items, and so not checked: the schema/ and context/ directories at any depth, and the root sources/ directory,
+which holds the manifests and overlays of the fetched sources.
 """
 import json
 import pathlib
@@ -86,7 +89,8 @@ def rules(item, relative, errors):
 def main():
     failures, seen = 0, set()
     files = sorted(path for path in ROOT.rglob("*.json")
-                   if not {"schema", "context"} & set(path.relative_to(ROOT).parts))
+                   if not {"schema", "context"} & set(path.relative_to(ROOT).parts)
+                   and path.relative_to(ROOT).parts[0] != "sources")
     for path in files:
         relative = str(path.relative_to(ROOT).with_suffix(""))
         errors = []

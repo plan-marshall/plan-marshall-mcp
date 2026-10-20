@@ -209,7 +209,8 @@
           "properties": {
             "repository": {
               "type": "string",
-              "pattern": "^https://github\\.com/[^/]+/[^/]+$"
+              "pattern": "^https://[^/?#@\\s]+(/[^?#\\s]*)?$",
+              "description": "the repository the case comes from: an absolute https URI without user, query or fragment, on any host"
             },
             "commit": {
               "type": "string",
@@ -250,7 +251,8 @@
             "properties": {
               "repository": {
                 "type": "string",
-                "pattern": "^https://github\\.com/[^/]+/[^/]+$"
+                "pattern": "^https://[^/?#@\\s]+(/[^?#\\s]*)?$",
+                "description": "the repository of the real code: an absolute https URI without user, query or fragment, on any host"
               },
               "commit": {
                 "type": "string",

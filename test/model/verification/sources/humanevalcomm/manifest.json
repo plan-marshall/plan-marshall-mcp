@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "name": "humanevalcomm",
+  "repository": "https://huggingface.co/datasets/jie-jw-wu/HumanEvalComm",
+  "commit": "603f72e1f8e18ecbcf910f6d988d749fd1728126",
+  "licence": "Apache-2.0",
+  "fetch": "huggingface",
+  "files": [
+    {
+      "path": "HumanEvalComm_v2.csv",
+      "sha256": "4db43adb9e89e4148c2b6da23b7ad18176f903fd45cdb92dd2877da3abff38d8",
+      "lfs": false
+    }
+  ]
+}
