@@ -150,7 +150,7 @@ It checks every item against the schema and the rules the schema cannot express:
 
 . Choose a dataset whose licence allows commercial use, change and redistribution, published on `huggingface.co` (the only fetch the corpus test composes).
 . Write `sources/<name>/manifest.json` in the format of `source-manifest.schema.json` of `core.role.corpus`: `name` (the directory), `repository`, the full `commit`, the `licence` as an SPDX id, `fetch`, and every file the overlay reads with its SHA-256 (`lfs: true` for a file stored in Git LFS, whose SHA-256 is that of the LFS object).
-. Fetch the file at the pinned commit into a directory outside the repository, check its SHA-256, and read the rows to select; never commit it.
+. Fetch the file at the pinned commit into a directory outside the repository, check its SHA-256, and read the rows to select; never commit it, and never quote a row in a commit message or in a pull request body, which the squash merge turns into the commit message.
 . Write `sources/<name>/overlay.json` in the format of `source-overlay.schema.json`: per selected row its key (the value of `key_field`, or its position from 1 when `key_field` is `null`, as for a file whose key repeats) and the framing of its item. The task text and the facts come from the row through `{field}` templates; the overlay writes only what is ours (the question, the options, the reference and its rationale), after reading the row, with `review.status: draft`.
 . Add a section `## <name>` to `ATTRIBUTION.md` with the licence, the holders and what the overlay adds.
 . Run the corpus test and `validate.py`, and add the topic with its count to the table above.

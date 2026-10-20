@@ -10,7 +10,7 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == What
 
-HumanEval is in the training data of most models. A model that recalls the original problem may proceed on a modified one instead of asking, and then `question/ask-or-proceed` measures recall, not asking. This package measures, per model, how often it asks on the modified variants of link:question-corpus-public-datasets.adoc[`question-corpus-public-datasets`] against how often it asks on their controls, and decides per category whether the category stays in the corpus.
+HumanEval is in the training data of most models. A model that recalls the original problem may proceed on a modified one instead of asking, and then `question/ask-or-proceed` measures recall, not asking. This package measures, per model, how often it asks on the modified variants of link:https://github.com/plan-marshall/plan-marshall-mcp/blob/5481521/doc/plans/question-corpus-public-datasets.adoc[`question-corpus-public-datasets`] against how often it asks on their controls, and decides per category whether the category stays in the corpus.
 
 * *Run*: the generated items of `question/ask-or-proceed` (the corpus test's import, never a copy) offered fresh to each model, one item per session, through the task protocol's single submit with the item's choices; Claude Code with `claude-haiku-4-5` and `claude-sonnet-5-5`, OpenCode with the model the shipped default assignment names for `worker`; 5 runs per item and model.
 * *Measured*: per model and category the ask rate on the modified variants, on the controls, and the difference with its 95 % interval; the tokens per item.
