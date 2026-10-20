@@ -95,7 +95,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 
 |link:question-corpus-ask-rate.adoc[`question-corpus-ask-rate`]
 |The ask rate of the question corpus measured
-|`open`
+|`done`
 |nothing
 |Milestone 4
 
