@@ -93,7 +93,7 @@
           "lane": "minimal"
         },
         "plan-marshall:automatic-review": {
-          "required_bots": "cuioss-review-bot,coderabbit",
+          "required_bots": "coderabbit",
           "optional_bots": "sourcery",
           "review_bot_buffer_seconds": 180,
           "review_completion_poll_timeout_seconds": 600,
