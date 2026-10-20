@@ -1,0 +1,709 @@
+{
+  "format_version": 1,
+  "source": "input-bouncer",
+  "file": "test.csv",
+  "key_field": "instance_id",
+  "created": "2026-10-20",
+  "rows": [
+    {
+      "key": "astropy__astropy-14379",
+      "id": "ib-astropy-astropy-14379",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "astropy__astropy-14379 (space between value and unit): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue asks for a keyword argument that adds a space in Angle.to_string, then asks whether the default should change instead, as Quantity already prints a space. Neither approach is more sensible than the other, so the worker escalates to learn which one is wanted.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "django__django-13915",
+      "id": "ib-django-django-13915",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "django__django-13915 (drop support for Python 3.6 and 3.7): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue names the Python versions to drop and points to the release policy, but not what dropping them involves in the code: removed compatibility branches, changed metadata, warnings or dependencies. The worker cannot tell what a complete change is and escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "matplotlib__matplotlib-25027",
+      "id": "ib-matplotlib-matplotlib-25027",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "matplotlib__matplotlib-25027 (RGB(A) support in pcolor): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue asks for RGB(A) support in pcolor only by reference to other issues and a downstream project, and says the details were not looked into. Neither the behaviour nor the outcome is stated, so the worker escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "psf__requests-1776",
+      "id": "ib-psf-requests-1776",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "psf__requests-1776 (request cookies persisted to the session): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue points to one line that persists request cookies to the session and adds that removing it breaks the test of an earlier fix. What a change must keep from that fix is not stated, so the worker escalates before choosing between the two behaviours.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "pydata__xarray-5580",
+      "id": "ib-pydata-xarray-5580",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "pydata__xarray-5580 (default of display_max_rows): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue asks to raise the default of display_max_rows but offers 100, 1000 or 10000, or removing the limit, without settling on one. The value is the whole change, so the worker escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "pylint-dev__pylint-6412",
+      "id": "ib-pylint-dev-pylint-6412",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "pylint-dev__pylint-6412 (isinstance checks through ABCMeta for checkers): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue proposes ABCMeta interfaces and isinstance checks beside the __implements__ attribute, but states no expected behaviour and leaves out what the interfaces contain and how the two checks combine. The worker escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "pytest-dev__pytest-5479",
+      "id": "ib-pytest-dev-pytest-5479",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "pytest-dev__pytest-5479 (unicode match in pytest.raises on Python 2): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue shows the UnicodeEncodeError a unicode match raises on Python 2 but not what the result should be. Where the error arises is clear, the intended outcome is not, so the worker escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "scikit-learn__scikit-learn-11596",
+      "id": "ib-scikit-learn-scikit-learn-11596",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "scikit-learn__scikit-learn-11596 (add sklearn.show_versions()): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue suggests a show_versions function like the one of pandas with BLAS information, but leaves open which system details it reports, in what format and where its output goes. The worker escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "sphinx-doc__sphinx-8707",
+      "id": "ib-sphinx-doc-sphinx-8707",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "sphinx-doc__sphinx-8707 (viewcode with make singlehtml html): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue names two different make commands, does not say what 'does not work' means, and gives no error or output. The defect cannot be identified from it, so the worker escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "sympy__sympy-18116",
+      "id": "ib-sympy-sympy-18116",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "sympy__sympy-18116 (separate boolean and symbolic relationals): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "escalate",
+        "rationale": "The issue only points to an older issue and says Expr methods are called on relationals in a few places, without naming them or the intended separation. The worker escalates.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "astropy__astropy-7606",
+      "id": "ib-astropy-astropy-7606",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "astropy__astropy-7606 (UnrecognizedUnit compared with None): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue shows that comparing an UnrecognizedUnit with None raises a TypeError and says the comparison should return False. The defect and the expected result are both stated, so the worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "django__django-16082",
+      "id": "ib-django-django-16082",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "django__django-16082 (output_field of the MOD operator): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue states that MOD over a Decimal and an Integer does not resolve to a Decimal as the other arithmetic operators do. The expected type follows from those operators, so the worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "matplotlib__matplotlib-25332",
+      "id": "ib-matplotlib-matplotlib-25332",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "matplotlib__matplotlib-25332 (pickling a figure after align_labels): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue reproduces the failure to pickle a figure after align_labels and expects the figure to pickle as it does without that call. The outcome is clear, so the worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "psf__requests-5414",
+      "id": "ib-psf-requests-5414",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "psf__requests-5414 (UnicodeError for http://.example.com): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue shows that an invalid URL with an empty label raises a UnicodeError and names InvalidUrl as the exception the library already intends to raise. The worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "pydata__xarray-6461",
+      "id": "ib-pydata-xarray-6461",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "pydata__xarray-6461 (xr.where with a scalar and keep_attrs): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue gives a reproducible call of xr.where with a scalar second argument and the failing lines with keep_attrs. The call should work, so the worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "pylint-dev__pylint-4604",
+      "id": "ib-pylint-dev-pylint-4604",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "pylint-dev__pylint-4604 (unused-import for a module used in a type comment): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue shows the unused-import warning for a module used only in type comments and states that the warning should not be emitted. The worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "pytest-dev__pytest-7571",
+      "id": "ib-pytest-dev-pytest-7571",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "pytest-dev__pytest-7571 (caplog log level not restored): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue quotes the documented promise that caplog restores log levels after a test and a minimal example that shows it no longer does. The expected behaviour is the documented one, so the worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "scikit-learn__scikit-learn-14983",
+      "id": "ib-scikit-learn-scikit-learn-14983",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "scikit-learn__scikit-learn-14983 (__repr__ of RepeatedKFold): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue shows the __repr__ calls of RepeatedKFold and RepeatedStratifiedKFold together with the expected strings. The worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "sphinx-doc__sphinx-9367",
+      "id": "ib-sphinx-doc-sphinx-9367",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "sphinx-doc__sphinx-9367 (1-element tuple rendered without its comma): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue states that (1,) is rendered as (1) and gives the test case to add. The expected rendering is explicit, so the worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    },
+    {
+      "key": "sympy__sympy-18810",
+      "id": "ib-sympy-sympy-18810",
+      "topic": "question/escalate-or-proceed",
+      "role": "worker",
+      "title": "sympy__sympy-18810 (generate_derangements with an unsorted input): escalate or proceed",
+      "tags": [],
+      "group": null,
+      "question": "You are asked to resolve the GitHub issue below in its repository. Decide before you change any code: does the issue say clearly enough what a successful change must do (proceed), or must you first escalate to the operator because what is asked is unclear, ambiguous or missing (escalate)? Answer escalate or proceed.",
+      "facts": "{problem_statement}",
+      "choices": [
+        "escalate",
+        "proceed"
+      ],
+      "answer_schema": null,
+      "target": {
+        "answer": "proceed",
+        "rationale": "The issue shows that generate_derangements yields the input itself when the input is not sorted, which no derangement may be. The expected result follows from the definition, so the worker proceeds.",
+        "alternatives": [],
+        "items": [],
+        "expected_empty": false
+      },
+      "grading": {
+        "method": "exact_choice",
+        "judge": null,
+        "pass_threshold": null
+      },
+      "review": {
+        "status": "draft",
+        "by": null,
+        "date": null,
+        "notes": "written with the overlay of input-bouncer on 2026-10-20 after reading the selected rows; not yet confirmed by the operator"
+      },
+      "contamination": null
+    }
+  ]
+}
