@@ -14,7 +14,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import de.cuioss.tools.logging.CuiLogger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -27,6 +26,8 @@ import java.util.TreeMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+
+import de.cuioss.tools.logging.CuiLogger;
 import de.planmarshall.core.role.corpus.CorpusImport;
 import de.planmarshall.core.role.corpus.CorpusValidator;
 import de.planmarshall.core.role.corpus.CorpusViolation;
@@ -120,7 +121,7 @@ class CorpusSourcesTest {
 
     @Test
     @DisplayName("every topic has as many generated items as overlay rows")
-    void itemsPerTopic() throws IOException {
+    void itemsPerTopic() throws Exception {
         var declared = new TreeMap<String, Integer>();
         overlays.forEach(overlay -> overlay.rows().forEach(row -> declared.merge(row.topic(), 1, Integer::sum)));
 
@@ -134,7 +135,7 @@ class CorpusSourcesTest {
 
     @Test
     @DisplayName("every generated closed item has pairwise distinct choices")
-    void closedItemsHaveDistinctChoices() throws IOException {
+    void closedItemsHaveDistinctChoices() throws Exception {
         var repeated = new ArrayList<String>();
         for (var item : generatedItems()) {
             if (item.grading().method().isClosed()) {
