@@ -93,12 +93,6 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:job-runtime-wiring.adoc[`job-runtime-wiring`]; link:worker-surface-tools.adoc[`worker-surface-tools`]; link:../../../pm-mcp-core/doc/plans/supervision-scenarios.adoc[`pm-mcp-core` / `supervision-scenarios`]
 |Milestone 4
 
-|link:question-corpus-ask-rate.adoc[`question-corpus-ask-rate`]
-|The ask rate of the question corpus measured
-|`done`
-|nothing
-|Milestone 4
-
 |link:question-archive-recut.adoc[`question-archive-recut`]
 |The private archive questions re-cut to escalate or decide
 |`open`
