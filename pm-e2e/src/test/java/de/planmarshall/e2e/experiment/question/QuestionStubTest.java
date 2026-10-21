@@ -712,6 +712,101 @@ class QuestionStubTest {
     }
 
     @Nested
+    @DisplayName("run plan")
+    class RunPlans {
+
+        private static final QuestionLoopExperiment.LargeWork NOT_READ = () -> {
+            throw new IllegalStateException("the large work was read");
+        };
+
+        @ParameterizedTest(name = "{0} -> {1}")
+        @CsvSource({"both, 'false,true'", "fresh, false", "WARM, true"})
+        @DisplayName("pm.experiment.warmth restricts the warm/fresh axis of the run matrix")
+        void shouldRestrictWarmth(String value, String expected) throws Exception {
+            var config = config(1, 0, QuestionLoopExperiment.Warmth.of(value));
+
+            var plans = QuestionLoopExperiment.r4(config, NOT_READ);
+
+            var warm = plans.stream().map(QuestionLoopExperiment.RunPlan::warm).distinct().toList();
+            assertAll("the planned workers",
+                    () -> assertEquals(expected, String.join(",", warm.stream().map(String::valueOf).toList())),
+                    () -> assertEquals(Form.values().length * warm.size(), plans.size()));
+        }
+
+        @Test
+        @DisplayName("plans fresh and warm workers by default")
+        void shouldDefaultToBoth() {
+            assertEquals(QuestionLoopExperiment.Warmth.BOTH, QuestionLoopExperiment.Warmth.of(null));
+        }
+
+        @Test
+        @DisplayName("fails an unknown value with the values it takes")
+        void shouldRefuseUnknownWarmth() {
+            var refused = assertThrows(IllegalArgumentException.class,
+                    () -> QuestionLoopExperiment.Warmth.of("lukewarm"));
+
+            assertTrue(refused.getMessage().contains("-Dpm.experiment.warmth=lukewarm: both, fresh or warm"),
+                    refused.getMessage());
+        }
+
+        @Test
+        @DisplayName("R4 small work only: large-runs 0 plans no large run and does not read the large work")
+        void shouldPlanSmallWorkOnly() throws Exception {
+            var config = config(2, 0, QuestionLoopExperiment.Warmth.BOTH);
+
+            var plans = QuestionLoopExperiment.r4(config, NOT_READ);
+
+            assertAll("the small work",
+                    () -> assertEquals(2 * 2 * Form.values().length, plans.size()),
+                    () -> assertTrue(plans.stream().allMatch(plan -> "small".equals(plan.fixture().size())),
+                            plans.toString()));
+        }
+
+        @Test
+        @DisplayName("R4 large work only: runs 0, fresh, one run plans each scenario once in hold and resume")
+        void shouldPlanLargeWorkOnly() throws Exception {
+            var config = config(0, 1, QuestionLoopExperiment.Warmth.FRESH);
+            var large = QuestionFixtures.LARGE_SCENARIOS.stream()
+                    .map(id -> new QuestionFixtures.Fixture(id, "large", "", "", null, false, null)).toList();
+
+            var plans = QuestionLoopExperiment.r4(config, () -> large);
+
+            var planned = plans.stream().map(plan -> plan.fixture().id() + " " + plan.form() + " " + plan.warm())
+                    .toList();
+            var expected = new ArrayList<String>();
+            for (var id : QuestionFixtures.LARGE_SCENARIOS) {
+                expected.add(id + " HOLD false");
+                expected.add(id + " RESUME false");
+            }
+            assertEquals(expected, planned);
+        }
+
+        @Test
+        @DisplayName("R4 with no runs in either part plans nothing")
+        void shouldPlanNothingWithoutRuns() throws Exception {
+            var config = config(0, 0, QuestionLoopExperiment.Warmth.BOTH);
+
+            assertEquals(List.of(), QuestionLoopExperiment.r4(config, NOT_READ));
+        }
+
+        @Test
+        @DisplayName("refuses a negative count of runs")
+        void shouldRefuseNegativeRuns() {
+            var refused = assertThrows(IllegalArgumentException.class,
+                    () -> config(-1, 0, QuestionLoopExperiment.Warmth.BOTH));
+
+            assertTrue(refused.getMessage().contains("must be 0 or more"), refused.getMessage());
+        }
+
+        private QuestionLoopExperiment.Config config(int runs, int largeRuns, QuestionLoopExperiment.Warmth warmth) {
+            return new QuestionLoopExperiment.Config(List.of(Host.CLAUDE), Map.of(Host.CLAUDE, "claude-haiku-4-5"),
+                    runs, Integer.MAX_VALUE, 1, directory.resolve("cache"), directory.resolve("telemetry"), "ref",
+                    directory.resolve("clones"), largeRuns, directory.resolve("workspace"),
+                    directory.resolve("results"), List.of("pm-exec"), Duration.ofMinutes(20), warmth);
+        }
+    }
+
+    @Nested
     @DisplayName("Antigravity results")
     class AntigravityResults {
 

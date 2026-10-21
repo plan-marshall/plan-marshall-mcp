@@ -62,7 +62,9 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * R1 and R2 run on the probe only. R4 runs the probe as small work with every continuation form and
  * {@code pm.experiment.runs} runs, and as large work the two scenarios of {@link QuestionFixtures#LARGE_SCENARIOS}
  * with {@code pm.experiment.r4.large-runs} (3) runs per host in the continuation forms hold and resume, whose tokens
- * and time R4 records.
+ * and time R4 records. Either count may be {@code 0}: that part plans no run (the large work is then not read), so R4
+ * runs as two invocations, small work only ({@code -Dpm.experiment.r4.large-runs=0}) and large work only
+ * ({@code -Dpm.experiment.runs=0}).
  * <p>
  * Properties: {@code pm.experiment.hosts} (default {@code claude,opencode,antigravity}; Q7 runs on Claude Code
  * only), {@code pm.experiment.model.<host>} (default {@code claude-haiku-4-5} for Claude Code, the harness default
@@ -73,6 +75,8 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * {@code pm.experiment.clones} (the directory of the local clones, the parent of this repository's main checkout; both
  * defaults are found from the git common directory, also inside a worktree:
  * {@link QuestionFixtures#siblingRepositories(Path)}), {@code pm.experiment.r4.large-runs} (3),
+ * {@code pm.experiment.warmth} ({@code both}, {@code fresh} or {@code warm}, default {@code both}: which workers each
+ * item's run matrix plans; another value fails the run; Q7 runs fresh only, {@link Warmth}),
  * {@code pm.experiment.workspace} (below the temporary directory, outside the repository),
  * {@code pm.experiment.run-timeout} ({@code PT20M}), {@code pm.experiment.q4.other-host},
  * {@code pm.experiment.q6.quorum-a} and {@code pm.experiment.q6.quorum-b} ({@code <host>:<model>}),
@@ -157,10 +161,18 @@ class QuestionLoopExperiment {
      * @param results      the results directory ({@code runs.jsonl} and the per-run logs)
      * @param exec         the {@code pm-exec} command line
      * @param runTimeout   the bound of one run beside its holds
+     * @param warmth       the warm/fresh axis of the run matrix
      */
     record Config(List<Host> hosts, Map<Host, String> models, int runs, int fixtures, int parallel, Path cache,
     Path telemetry, String telemetryRef, Path clones, int largeRuns, Path workspace, Path results,
-    List<String> exec, Duration runTimeout) {
+    List<String> exec, Duration runTimeout, Warmth warmth) {
+
+        Config {
+            if (runs < 0 || largeRuns < 0) {
+                throw new IllegalArgumentException("pm.experiment.runs (" + runs + ") and pm.experiment.r4.large-runs ("
+                        + largeRuns + ") must be 0 or more");
+            }
+        }
 
         static Config load() throws IOException {
             var telemetry = System.getProperty("pm.experiment.telemetry");
@@ -191,7 +203,8 @@ class QuestionLoopExperiment {
                     Path.of(System.getProperty("pm.experiment.workspace",
                             Path.of(System.getProperty("java.io.tmpdir"), "pm-qlv-" + stamp).toString())),
                     Path.of("target", "question-loop").toAbsolutePath(), QuestionDriver.resolveExec(),
-                    Duration.parse(System.getProperty("pm.experiment.run-timeout", "PT20M")));
+                    Duration.parse(System.getProperty("pm.experiment.run-timeout", "PT20M")),
+                    Warmth.of(System.getProperty(Warmth.PROPERTY)));
         }
 
         String model(Host host) {
@@ -360,24 +373,92 @@ class QuestionLoopExperiment {
                                     .holding(Duration.ofSeconds(30)).faulting(fault));
                         }
                     });
-            case "R4" -> {
-                each(config, config.hosts(), probe(), (host, warm, fixture, index) -> {
-                    for (var form : Form.values()) {
-                        plans.add(RunPlan.of(item, index, host, config.model(host), warm, form, fixture, "entity")
-                                .holding(Duration.ofMinutes(1)));
-                    }
-                });
-                var large = limit(QuestionFixtures.largeScenarios(telemetry(config), config.clones()), config);
-                each(config.largeRuns(), config.hosts(), large, (host, warm, fixture, index) -> {
-                    for (var form : List.of(Form.HOLD, Form.RESUME)) {
-                        plans.add(RunPlan.of(item, index, host, config.model(host), warm, form, fixture, "entity")
-                                .holding(Duration.ofMinutes(1)));
-                    }
-                });
-            }
+            case "R4" -> plans.addAll(r4(config,
+                    () -> limit(QuestionFixtures.largeScenarios(telemetry(config), config.clones()), config)));
             default -> throw new IllegalArgumentException("unknown item " + item + ": Q1 to Q7, R1 to R4");
         }
         return plans;
+    }
+
+    /** The large work of R4, loaded only when it has runs. */
+    @FunctionalInterface
+    interface LargeWork {
+        List<Fixture> load() throws IOException;
+    }
+
+    /**
+     * Plans R4: the probe as small work with every continuation form and {@link Config#runs()} runs, and the large
+     * work with {@link Config#largeRuns()} runs in the continuation forms hold and resume. A part with zero runs plans
+     * no run, and the large work is not loaded then, so R4 can run as two invocations, small work only and large work
+     * only.
+     *
+     * @param config the configuration
+     * @param large  the large work
+     * @return the planned runs
+     * @throws IOException if the large work cannot be loaded
+     */
+    static List<RunPlan> r4(Config config, LargeWork large) throws IOException {
+        var plans = new ArrayList<RunPlan>();
+        each(config, config.hosts(), probe(), (host, warm, fixture, index) -> {
+            for (var form : Form.values()) {
+                plans.add(RunPlan.of("R4", index, host, config.model(host), warm, form, fixture, "entity")
+                        .holding(Duration.ofMinutes(1)));
+            }
+        });
+        if (config.largeRuns() > 0) {
+            each(config.largeRuns(), config.warmth(), config.hosts(), large.load(),
+                    (host, warm, fixture, index) -> {
+                        for (var form : List.of(Form.HOLD, Form.RESUME)) {
+                            plans.add(RunPlan.of("R4", index, host, config.model(host), warm, form, fixture,
+                                    "entity").holding(Duration.ofMinutes(1)));
+                        }
+                    });
+        }
+        return plans;
+    }
+
+    /**
+     * The warm/fresh axis of the run matrix, set by {@code pm.experiment.warmth}: {@code both} (the default), {@code
+     * fresh} or {@code warm}.
+     */
+    enum Warmth {
+        /** Fresh and warm workers. */
+        BOTH(List.of(false, true)),
+        /** Fresh workers only. */
+        FRESH(List.of(false)),
+        /** Warm workers only. */
+        WARM(List.of(true));
+
+        /** The system property that selects the axis. */
+        static final String PROPERTY = "pm.experiment.warmth";
+
+        private final List<Boolean> planned;
+
+        Warmth(List<Boolean> planned) {
+            this.planned = planned;
+        }
+
+        /** @return the values of {@link RunPlan#warm()} this selection plans, fresh first */
+        List<Boolean> planned() {
+            return planned;
+        }
+
+        /**
+         * @param value {@code both}, {@code fresh} or {@code warm}, in any case; {@code null} for the default
+         * @return the selection
+         * @throws IllegalArgumentException for any other value
+         */
+        static Warmth of(String value) {
+            if (value == null) {
+                return BOTH;
+            }
+            for (var warmth : values()) {
+                if (warmth.name().equalsIgnoreCase(value.strip())) {
+                    return warmth;
+                }
+            }
+            throw new IllegalArgumentException("unknown -D" + PROPERTY + "=" + value + ": both, fresh or warm");
+        }
     }
 
     @FunctionalInterface
@@ -386,12 +467,12 @@ class QuestionLoopExperiment {
     }
 
     private static void each(Config config, List<Host> hosts, List<Fixture> fixtures, PlanStep step) {
-        each(config.runs(), hosts, fixtures, step);
+        each(config.runs(), config.warmth(), hosts, fixtures, step);
     }
 
-    private static void each(int runs, List<Host> hosts, List<Fixture> fixtures, PlanStep step) {
+    private static void each(int runs, Warmth warmth, List<Host> hosts, List<Fixture> fixtures, PlanStep step) {
         for (var host : hosts) {
-            for (var warm : List.of(false, true)) {
+            for (var warm : warmth.planned()) {
                 for (var fixture : fixtures) {
                     for (var index = 0; index < runs; index++) {
                         step.plan(host, warm, fixture, index);
