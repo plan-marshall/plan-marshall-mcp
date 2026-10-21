@@ -1,0 +1,677 @@
+/*
+ * Copyright © 2026-present Oliver Wolff
+ *
+ * SPDX-License-Identifier: LicenseRef-Proprietary
+ *
+ * All rights reserved. This file is part of plan-marshall-mcp, which is proprietary software.
+ * No right to use, copy, modify or distribute this file is granted; see the LICENSE.md file at
+ * the root of this repository.
+ */
+package de.planmarshall.e2e.experiment.question;
+
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
+import java.nio.channels.Channels;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import de.planmarshall.e2e.experiment.question.QuestionStub.AnswerResult;
+import de.planmarshall.e2e.experiment.question.QuestionStub.Form;
+import de.planmarshall.e2e.experiment.question.QuestionStub.PartAnswer;
+import de.planmarshall.e2e.experiment.question.QuestionStub.Settings;
+import de.planmarshall.e2e.experiment.question.QuestionStub.TaskSpec;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+/**
+ * The stub of the question loop without a model (experiment only): a client speaks to it over its socket as a relay
+ * does, with the worker's identity in the first line.
+ * <p>
+ * Hazards it guards, each a premise of the measurement: an ask whose envelope the server would refuse being recorded
+ * anyway, so Q1 counted asks no server takes; a lease of a fenced generation staying with it, so a replaced worker's
+ * task is never offered again (PM-WORK-2); an open question record lost with a stub restart, or its answer delivered
+ * twice, so Q7 measured the stub instead of the loop (PM-WF-12); a continuing task without {@code facts.answers}, so
+ * Q4 measured a worker that never saw its answer; and an ask link offered beyond the question bound, so Q5 never
+ * reached the bound. Beside the stub: a scenario recipe read into a fixture with an invented check, or another recipe
+ * than the two large ones used, so R4 measured work nobody chose; a checkout that changes the local clone; and
+ * Antigravity's tokens read as 0 or its missing-session resume, which starts a new conversation, counted as hung or as
+ * failed. The recipes and corpus items of these tests are written by the tests; no network, model or real repository
+ * is used.
+ */
+@Timeout(value = 60, unit = TimeUnit.SECONDS)
+@DisplayName("QuestionStub: the question loop of a worker without a model")
+class QuestionStubTest {
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final String ROLE = "implement";
+    private static final String TASK = "T-1";
+    private static final String WORKER = "w1";
+    private static final String LINKS_EMPTY = "links: []";
+
+    @TempDir
+    Path directory;
+
+    private final List<Client> clients = new ArrayList<>();
+    private Path socket;
+    private QuestionStub stub;
+
+    @BeforeEach
+    void socket() {
+        var bytes = new byte[6];
+        RANDOM.nextBytes(bytes);
+        socket = Path.of("/tmp", "pmq-test-" + HexFormat.of().formatHex(bytes) + ".sock");
+    }
+
+    @AfterEach
+    void stop() throws IOException {
+        for (var client : clients) {
+            client.close();
+        }
+        if (stub != null) {
+            stub.close();
+        }
+    }
+
+    @Nested
+    @DisplayName("ask")
+    class Ask {
+
+        @Test
+        @DisplayName("records a valid envelope, ends the task asked with no link, and delivers the decision")
+        void shouldRecordValidEnvelope() throws Exception {
+            stub = start(1);
+            var client = activeWorker(Form.FALLBACK);
+
+            var asked = client.ask("ask", validEnvelope());
+
+            assertAll("the asked representation",
+                    () -> assertTrue(asked.contains("state: task.asked"), asked),
+                    () -> assertTrue(asked.contains(LINKS_EMPTY), asked),
+                    () -> assertEquals("Q-001", stub.operatorDecisions().peek()),
+                    () -> assertTrue(Files.readString(stub.records()).contains("\"line\":\"asked\"")));
+        }
+
+        @Test
+        @DisplayName("refuses an envelope with one option and no recommendation with invalid_link_args")
+        void shouldRefuseInvalidEnvelope() throws Exception {
+            stub = start(1);
+            var client = activeWorker(Form.FALLBACK);
+            var envelope = validEnvelope();
+            var part = (ObjectNode) envelope.path("parts").get(0);
+            ((ArrayNode) part.get("options")).remove(1);
+            part.putNull("recommendation");
+
+            var refused = client.ask("ask", envelope);
+
+            assertAll("the refusal",
+                    () -> assertTrue(refused.contains("reason: invalid_link_args"), refused),
+                    () -> assertTrue(refused.contains("two to five are required"), refused),
+                    () -> assertTrue(refused.contains("exactly one recommended option is required"), refused),
+                    () -> assertTrue(refused.contains("state: entity.active"), refused),
+                    () -> assertTrue(stub.operatorDecisions().isEmpty()),
+                    () -> assertFalse(Files.exists(stub.records())));
+        }
+
+        @Test
+        @DisplayName("refuses an envelope that carries a server-owned field")
+        void shouldRefuseServerOwnedField() throws Exception {
+            stub = start(1);
+            var client = activeWorker(Form.FALLBACK);
+            var envelope = validEnvelope();
+            ((ObjectNode) envelope.path("parts").get(0)).put("question_id", "Q-999");
+
+            var refused = client.ask("ask", envelope);
+
+            assertTrue(refused.contains("question_id: a server-owned field"), refused);
+        }
+    }
+
+    @Nested
+    @DisplayName("continuation")
+    class Continuation {
+
+        @Test
+        @DisplayName("holds: the answer arrives through pm_wait with ack as its only link, then the task is active")
+        void shouldDeliverHeldAnswerThroughWait() throws Exception {
+            stub = start(QuestionStub.QUESTION_BOUND);
+            var client = activeWorker(Form.HOLD);
+            var asked = client.ask("ask", validEnvelope());
+
+            var answered = stub.answer("Q-001", 1, List.of(answer("Q-001")));
+            var delivered = client.call("pm_wait", QuestionStub.JSON.createObjectNode());
+            var acknowledged = client.link("ack", QuestionStub.JSON.createObjectNode());
+
+            assertAll("the held continuation",
+                    () -> assertTrue(asked.contains("state: entity.awaiting_answer"), asked),
+                    () -> assertEquals(AnswerResult.ANSWERED, answered),
+                    () -> assertTrue(delivered.contains("state: task.answer"), delivered),
+                    () -> assertTrue(delivered.contains("answers[1]{question_id,plan_task_id,question_text,"
+                            + "branch_key,label,text,kind}:"), delivered),
+                    () -> assertTrue(delivered.contains("links[1]{rel,link,form,free}:"), delivered),
+                    () -> assertTrue(acknowledged.contains("state: entity.active"), acknowledged),
+                    () -> assertEquals(AnswerResult.ALREADY_ANSWERED,
+                            stub.answer("Q-001", 1, List.of(answer("Q-001")))));
+        }
+
+        @Test
+        @DisplayName("falls back: the answer reaches a new task of the role in facts.answers")
+        void shouldCarryAnswerIntoNewTask() throws Exception {
+            stub = start(QuestionStub.QUESTION_BOUND);
+            var client = activeWorker(Form.FALLBACK);
+            client.ask("ask", validEnvelope());
+
+            stub.answer("Q-001", 1, List.of(answer("Q-001")));
+            var offered = client.call("pm_wait", QuestionStub.JSON.createObjectNode());
+            var active = client.link("ack", QuestionStub.JSON.createObjectNode());
+
+            assertAll("the continuing task",
+                    () -> assertTrue(offered.contains("state: task.offered"), offered),
+                    () -> assertTrue(active.contains("Q-001,null,"), active),
+                    () -> assertTrue(active.contains(",description,Follow the description,"), active),
+                    () -> assertTrue(stub.taskIds().contains("T-1-Q-001"), stub.taskIds().toString()));
+        }
+
+        @Test
+        @DisplayName("withdraws the ask link once the question bound is reached")
+        void shouldWithdrawAskLinkAtBound() throws Exception {
+            stub = start(1);
+            var client = activeWorker(Form.FALLBACK);
+            var beforeBound = client.state();
+            client.ask("ask", validEnvelope());
+            stub.answer("Q-001", 1, List.of(answer("Q-001")));
+            client.call("pm_wait", QuestionStub.JSON.createObjectNode());
+
+            var atBound = client.link("ack", QuestionStub.JSON.createObjectNode());
+
+            assertAll("the bound",
+                    () -> assertTrue(beforeBound.contains("submit,ask,submit,"), beforeBound),
+                    () -> assertFalse(atBound.contains("submit,ask,submit,"), atBound),
+                    () -> assertTrue(atBound.contains("submit,submit,submit,"), atBound));
+        }
+    }
+
+    @Nested
+    @DisplayName("leases")
+    class Leases {
+
+        @Test
+        @DisplayName("a newer generation fences the older: its calls are refused and its task is offered anew")
+        void shouldFenceOlderGeneration() throws Exception {
+            stub = start(QuestionStub.QUESTION_BOUND);
+            stub.queue(task(Form.FALLBACK));
+            var older = Client.connect(socket, WORKER, 1);
+            clients.add(older);
+            var offered = older.call("pm_wait", QuestionStub.JSON.createObjectNode());
+            try (var newer = Client.connect(socket, WORKER, 2)) {
+                newer.initialize();
+
+                var fenced = older.link("ack", QuestionStub.JSON.createObjectNode());
+                var reoffered = newer.call("pm_wait", QuestionStub.JSON.createObjectNode());
+
+                assertAll("the fence",
+                        () -> assertTrue(offered.contains("state: task.offered"), offered),
+                        () -> assertTrue(fenced.contains("error: generation_fenced"), fenced),
+                        () -> assertTrue(reoffered.contains("state: task.offered"), reoffered),
+                        () -> assertTrue(reoffered.contains("entity: T-1"), reoffered));
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("restart")
+    class Restart {
+
+        @Test
+        @DisplayName("an open record survives a stub restart, and its answer continues exactly once")
+        void shouldKeepOpenRecordAcrossRestart() throws Exception {
+            stub = start(QuestionStub.QUESTION_BOUND);
+            activeWorker(Form.FALLBACK).ask("ask", validEnvelope());
+            stub.close();
+
+            stub = start(QuestionStub.QUESTION_BOUND);
+            var reannounced = stub.operatorDecisions().peek();
+            var answered = stub.answer("Q-001", 1, List.of(answer("Q-001")));
+            var continued = stub.taskIds();
+            stub.close();
+            stub = start(QuestionStub.QUESTION_BOUND);
+            var replayed = stub.taskIds();
+            var lines = Files.readAllLines(stub.records()).stream()
+                    .filter(line -> line.contains("\"line\":\"continued\"")).count();
+
+            assertAll("the restarts",
+                    () -> assertEquals("Q-001", reannounced),
+                    () -> assertEquals(AnswerResult.ANSWERED, answered),
+                    () -> assertEquals(List.of("T-1-Q-001"), continued),
+                    () -> assertEquals(List.of(), replayed),
+                    () -> assertEquals(1, lines),
+                    () -> assertEquals(AnswerResult.ALREADY_ANSWERED,
+                            stub.answer("Q-001", 1, List.of(answer("Q-001")))));
+        }
+    }
+
+    @Nested
+    @DisplayName("Antigravity launch")
+    class AntigravityLaunch {
+
+        @Test
+        @DisplayName("a new session without a model drops --model and --conversation with their placeholders")
+        void shouldDropFlagsWithoutValue() {
+            var values = new LinkedHashMap<String, String>();
+            values.put("{prompt}", "Do it.");
+            values.put("{model}", null);
+            values.put("{session_id}", null);
+
+            var command = QuestionDriver.expand(QuestionDriver.AGY_ARGV, values);
+
+            assertEquals(List.of("agy", "--print", "Do it.", "--output-format", "json",
+                    "--dangerously-skip-permissions"), command);
+        }
+
+        @Test
+        @DisplayName("a resume with a model names both")
+        void shouldKeepFlagsWithValue() {
+            var values = new LinkedHashMap<String, String>();
+            values.put("{prompt}", "Continue.");
+            values.put("{model}", "gemini-3.8-flash-low");
+            values.put("{session_id}", "e8e99133-b297-4498-8d6f-e47d68f4b624");
+
+            var command = QuestionDriver.expand(QuestionDriver.AGY_ARGV, values);
+
+            assertEquals(List.of("agy", "--print", "Continue.", "--output-format", "json",
+                    "--dangerously-skip-permissions", "--model", "gemini-3.8-flash-low", "--conversation",
+                    "e8e99133-b297-4498-8d6f-e47d68f4b624"), command);
+        }
+    }
+
+    @Nested
+    @DisplayName("scenario recipes")
+    class ScenarioRecipes {
+
+        private static final String REPOSITORY = "widget-lib";
+        private static final String COMMIT = "0123456789abcdef0123456789abcdef01234567";
+        private static final String TITLE = "Count the widgets";
+        private static final String DESCRIPTION = "Count every widget of the catalogue and report the total.";
+
+        @Test
+        @DisplayName("builds the task, reply and check of a scenario whose answer is an offered choice")
+        void shouldBuildScenarioWithOfferedAnswer() throws Exception {
+            var source = branch();
+            writeScenario(source, "q-demo-offered", "beta", "beta", null);
+
+            var fixture = QuestionFixtures.scenario(source, "q-demo-offered", directory.resolve("clones"));
+
+            assertAll("the scenario",
+                    () -> assertEquals("large", fixture.size()),
+                    () -> assertTrue(fixture.task().contains(TITLE), fixture.task()),
+                    () -> assertTrue(fixture.task().contains(DESCRIPTION), fixture.task()),
+                    () -> assertTrue(fixture.task().contains(QuestionFixtures.CANARY_FILE), fixture.task()),
+                    () -> assertEquals("Do beta.", fixture.reply()),
+                    () -> assertEquals(List.of("alpha", "beta", "gamma"), fixture.check().choices()),
+                    () -> assertEquals("beta", fixture.check().reference()),
+                    () -> assertEquals(directory.resolve("clones").resolve(REPOSITORY), fixture.checkout().localClone()),
+                    () -> assertEquals(COMMIT, fixture.checkout().commit()));
+        }
+
+        @Test
+        @DisplayName("adds the operator's new option as a further choice when the own-words item confirms it")
+        void shouldAddOperatorsNewOption() throws Exception {
+            var source = branch();
+            writeScenario(source, "q-demo-new", "delta", "Do something none of the options says.",
+                    "new_option: delta");
+
+            var fixture = QuestionFixtures.scenario(source, "q-demo-new", directory.resolve("clones"));
+
+            assertAll("the check",
+                    () -> assertEquals(List.of("alpha", "beta", "gamma", "delta"), fixture.check().choices()),
+                    () -> assertEquals("delta", fixture.check().reference()));
+        }
+
+        @Test
+        @DisplayName("stops when the own-words item does not map the answer to a new option")
+        void shouldStopWithoutNewOptionMapping() throws Exception {
+            var source = branch();
+            writeScenario(source, "q-demo-unmapped", "delta", "Do something none of the options says.",
+                    "option: alpha");
+            var clones = directory.resolve("clones");
+
+            var stop = assertThrows(IllegalStateException.class,
+                    () -> QuestionFixtures.scenario(source, "q-demo-unmapped", clones));
+
+            assertTrue(stop.getMessage().contains("new_option"), stop.getMessage());
+        }
+
+        @Test
+        @DisplayName("stops instead of inventing a field the recipe lacks")
+        void shouldStopOnMissingField() throws Exception {
+            var source = branch();
+            var recipe = writeScenario(source, "q-demo-missing", "beta", "beta", null);
+            recipe.remove("asking_task");
+            write(source, QuestionFixtures.SCENARIOS + "/q-demo-missing.json", recipe);
+            var clones = directory.resolve("clones");
+
+            var stop = assertThrows(IllegalStateException.class,
+                    () -> QuestionFixtures.scenario(source, "q-demo-missing", clones));
+
+            assertTrue(stop.getMessage().contains("asking_task"), stop.getMessage());
+        }
+
+        @Test
+        @DisplayName("uses only the two large scenarios and names every other recipe as unused")
+        void shouldUseOnlyLargeScenarios() throws Exception {
+            var source = branch();
+            for (var id : QuestionFixtures.LARGE_SCENARIOS) {
+                writeScenario(source, id, "beta", "beta", null);
+            }
+            writeScenario(source, "q-demo-other", "beta", "beta", null);
+
+            var large = QuestionFixtures.largeScenarios(source, directory.resolve("clones"));
+            var unused = QuestionFixtures.unusedScenarios(source);
+
+            assertAll("the selection",
+                    () -> assertEquals(QuestionFixtures.LARGE_SCENARIOS, large.stream()
+                            .map(QuestionFixtures.Fixture::id).toList()),
+                    () -> assertEquals(List.of("q-demo-other"), unused));
+        }
+
+        @Test
+        @DisplayName("checks a local clone out at the start commit without changing the clone")
+        void shouldCheckOutWithoutChangingClone() throws Exception {
+            var clone = Files.createDirectories(directory.resolve("clones").resolve(REPOSITORY));
+            QuestionFixtures.git(null, "init", "--quiet", clone.toString());
+            var first = commit(clone, "one");
+            var second = commit(clone, "two");
+            var worker = directory.resolve("worker");
+
+            QuestionFixtures.prepare(new QuestionFixtures.Fixture("q-demo", "large", "", "", null, false,
+                    new QuestionFixtures.Checkout(clone, first)), worker);
+
+            assertAll("the checkout",
+                    () -> assertEquals("one", Files.readString(worker.resolve("file.txt"))),
+                    () -> assertTrue(Files.isRegularFile(worker.resolve(QuestionFixtures.CANARY_FILE))),
+                    () -> assertEquals(second, QuestionFixtures.git(clone, "rev-parse", "HEAD").strip()),
+                    () -> assertEquals("", QuestionFixtures.git(clone, "status", "--porcelain")),
+                    () -> assertEquals("two", Files.readString(clone.resolve("file.txt"))));
+        }
+
+        private DirectorySource branch() throws IOException {
+            return new DirectorySource(Files.createDirectories(directory.resolve("branch")));
+        }
+
+        private ObjectNode writeScenario(DirectorySource source, String id, String branchKey, String targetAnswer,
+                String ownWords) throws IOException {
+            var recipe = QuestionStub.JSON.createObjectNode();
+            recipe.put("id", id);
+            recipe.put("item", "decision/question/" + id);
+            recipe.put("repository", "https://example.org/acme/" + REPOSITORY);
+            recipe.put("start_commit", COMMIT);
+            recipe.put("plan", "2026-01-01-demo");
+            recipe.put("plan_month", "26-01");
+            recipe.put("asking_task", "TASK-002");
+            var answer = recipe.putObject("answer_to_deliver");
+            answer.put("branch_key", branchKey);
+            answer.put("text", "Do " + branchKey + ".");
+            write(source, QuestionFixtures.SCENARIOS + "/" + id + ".json", recipe);
+
+            var task = QuestionStub.JSON.createObjectNode();
+            task.put("title", TITLE);
+            task.put("description", DESCRIPTION);
+            write(source, "projects/" + REPOSITORY + "/archived-plans/26-01/2026-01-01-demo/tasks/TASK-002.json",
+                    task);
+
+            var item = QuestionStub.JSON.createObjectNode();
+            var input = item.putObject("input");
+            input.put("question", "Which way?");
+            input.putArray("choices").add("alpha").add("beta").add("gamma");
+            item.putObject("target").put("answer", targetAnswer);
+            write(source, QuestionFixtures.CORPUS + "/decision/question/" + id + ".json", item);
+
+            if (ownWords != null) {
+                var mapping = QuestionStub.JSON.createObjectNode();
+                mapping.putObject("target").put("answer", ownWords);
+                write(source, QuestionFixtures.CORPUS + "/decision/own-words/" + id + ".json", mapping);
+            }
+            return recipe;
+        }
+
+        private static void write(DirectorySource source, String path, JsonNode content) throws IOException {
+            var file = source.root().resolve(path);
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, QuestionStub.JSON.writeValueAsString(content));
+        }
+
+        private static String commit(Path repository, String content) throws IOException {
+            Files.writeString(repository.resolve("file.txt"), content);
+            QuestionFixtures.git(repository, "add", "file.txt");
+            QuestionFixtures.git(repository, "-c", "user.name=test", "-c", "user.email=test@example.org", "-c",
+                    "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", content);
+            return QuestionFixtures.git(repository, "rev-parse", "HEAD").strip();
+        }
+    }
+
+    @Nested
+    @DisplayName("Antigravity results")
+    class AntigravityResults {
+
+        @ParameterizedTest(name = "{0} -> {1} tokens")
+        @CsvSource(delimiter = '|', value = {
+                "{\"input_tokens\":100,\"output_tokens\":20} | 120",
+                "{\"total_tokens\":150,\"input_tokens\":100,\"output_tokens\":20} | 150",
+                "{\"promptTokenCount\":70,\"candidatesTokenCount\":5,\"totalTokenCount\":77} | 77"})
+        @DisplayName("reads the tokens of agy's top-level usage")
+        void shouldReadTopLevelUsage(String usage, long expected) throws Exception {
+            var outputs = agyOutput(usage);
+
+            assertEquals(expected, QuestionResults.tokens(outputs));
+        }
+
+        @Test
+        @DisplayName("reads agy's top-level response as the final text")
+        void shouldReadTopLevelResponse() throws Exception {
+            var outputs = agyOutput("{\"input_tokens\":1}");
+
+            assertEquals("Done.", QuestionResults.finalText(outputs));
+        }
+
+        @ParameterizedTest(name = "new session {0}, started {1}, exit after {2} ms with {3} -> {4}")
+        @CsvSource({
+                "true, true, 600000, 0, negative_new_session",
+                "false, true, 2000, 1, failed_at_once",
+                "false, true, -1, -1, hung",
+                "false, true, 90000, 1, hung",
+                "false, true, 2000, 0, exited_without_failure",
+                "true, false, -1, -1, hung"})
+        @DisplayName("classifies the resume of a missing session")
+        void shouldClassifyNegativeResume(boolean newSession, boolean started, long exitAfter, int exitCode,
+                String expected) {
+            assertEquals(expected, QuestionResults.negativeOutcome(newSession, started, exitAfter, exitCode));
+        }
+
+        @Test
+        @DisplayName("recognises agy's warning that the named conversation was not found")
+        void shouldRecogniseMissingSessionWarning() {
+            var stderr = "warning: conversation \"abc-1\" not found\n";
+
+            assertAll("the warning",
+                    () -> assertTrue(QuestionResults.warnsMissingSession(stderr, "abc-1")),
+                    () -> assertFalse(QuestionResults.warnsMissingSession(stderr, "abc-2")));
+        }
+
+        private static List<JsonNode> agyOutput(String usage) throws IOException {
+            var result = (ObjectNode) QuestionStub.JSON.readTree("{\"conversation_id\":\"c-1\",\"status\":\"success\","
+                    + "\"response\":\"Done.\",\"num_turns\":2,\"usage\":" + usage + "}");
+            var stamped = QuestionStub.JSON.createObjectNode();
+            stamped.put("at", 1L);
+            stamped.put("line", QuestionStub.JSON.writeValueAsString(result));
+            return List.of(stamped);
+        }
+    }
+
+    // --- fixtures ---
+
+    /** The files of a telemetry branch, written by the test into a directory. */
+    private record DirectorySource(Path root) implements QuestionFixtures.Source {
+
+        @Override
+        public String read(String path) throws IOException {
+            var file = root.resolve(path);
+            if (!Files.isRegularFile(file)) {
+                throw new IllegalStateException("not on the branch: " + path);
+            }
+            return Files.readString(file);
+        }
+
+        @Override
+        public List<String> names(String path) throws IOException {
+            try (var entries = Files.list(root.resolve(path))) {
+                return entries.map(entry -> entry.getFileName().toString()).sorted().toList();
+            }
+        }
+    }
+
+    private QuestionStub start(int questionBound) throws IOException {
+        return QuestionStub.start(Settings.of(directory.resolve("stub"), socket).withWindow(Duration.ofMillis(300))
+                .withQuestionBound(questionBound));
+    }
+
+    private static TaskSpec task(Form form) {
+        var facts = QuestionStub.JSON.createObjectNode();
+        facts.put("task", "Implement the function as its contract says.");
+        return TaskSpec.entity(TASK, ROLE, "Work the task in facts.task", facts,
+                "answer:text[1..200],judgment:text[0..2000]", form, List.of());
+    }
+
+    /** A worker leased the task at spawn, which it acknowledged. */
+    private Client activeWorker(Form form) throws IOException {
+        stub.queue(task(form));
+        stub.leaseAtSpawn(TASK, WORKER, 1);
+        var client = Client.connect(socket, WORKER, 1);
+        clients.add(client);
+        var offered = client.state();
+        assertTrue(offered.contains("state: task.offered"), offered);
+        var active = client.link("ack", QuestionStub.JSON.createObjectNode());
+        assertTrue(active.contains("state: entity.active"), active);
+        return client;
+    }
+
+    private static ObjectNode validEnvelope() throws IOException {
+        return (ObjectNode) QuestionStub.JSON.readTree(QuestionDriver.ENVELOPE_EXAMPLE);
+    }
+
+    private static PartAnswer answer(String questionId) {
+        return new PartAnswer(questionId, "description", "The description is right.", "chosen");
+    }
+
+    /** A worker's connection as its relay opens it: the identity first, then newline-delimited JSON-RPC. */
+    private static final class Client implements AutoCloseable {
+
+        private final SocketChannel channel;
+        private final BufferedReader reader;
+        private final OutputStream out;
+        private int nextId;
+
+        private Client(SocketChannel channel) {
+            this.channel = channel;
+            this.reader = new BufferedReader(new InputStreamReader(Channels.newInputStream(channel),
+                    StandardCharsets.UTF_8));
+            this.out = Channels.newOutputStream(channel);
+        }
+
+        static Client connect(Path socket, String worker, int generation) throws IOException {
+            var channel = SocketChannel.open(StandardProtocolFamily.UNIX);
+            channel.connect(UnixDomainSocketAddress.of(socket));
+            var client = new Client(channel);
+            client.send("{\"worker\":\"" + worker + "\",\"generation\":" + generation + ",\"role\":\"" + ROLE
+                    + "\",\"harness\":\"test\"}");
+            return client;
+        }
+
+        void initialize() throws IOException {
+            var id = ++nextId;
+            send("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"initialize\",\"params\":{}}");
+            response(id);
+        }
+
+        String state() throws IOException {
+            var arguments = QuestionStub.JSON.createObjectNode();
+            arguments.put("entity", TASK);
+            return call("pm_state", arguments);
+        }
+
+        String link(String link, ObjectNode args) throws IOException {
+            var arguments = QuestionStub.JSON.createObjectNode();
+            arguments.put("plan_id", QuestionStub.PLAN_ID);
+            arguments.put("link", link);
+            arguments.set("args", args);
+            return call("pm_do", arguments);
+        }
+
+        String ask(String link, ObjectNode envelope) throws IOException {
+            var args = QuestionStub.JSON.createObjectNode();
+            args.set("decision", envelope);
+            return link(link, args);
+        }
+
+        String call(String tool, ObjectNode arguments) throws IOException {
+            var id = ++nextId;
+            var request = QuestionStub.JSON.createObjectNode();
+            request.put("jsonrpc", "2.0");
+            request.put("id", id);
+            request.put("method", "tools/call");
+            var params = request.putObject("params");
+            params.put("name", tool);
+            params.set("arguments", arguments);
+            send(QuestionStub.JSON.writeValueAsString(request));
+            return response(id).path("result").path("content").get(0).path("text").asText();
+        }
+
+        private JsonNode response(int id) throws IOException {
+            for (var line = reader.readLine(); line != null; line = reader.readLine()) {
+                var message = QuestionStub.JSON.readTree(line);
+                if (message.path("id").asInt(-1) == id) {
+                    return message;
+                }
+            }
+            throw new IOException("the stub closed the connection before response " + id);
+        }
+
+        private void send(String line) throws IOException {
+            out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        }
+
+        @Override
+        public void close() throws IOException {
+            channel.close();
+        }
+    }
+}
