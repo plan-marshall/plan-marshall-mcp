@@ -36,14 +36,17 @@ import de.planmarshall.e2e.experiment.question.QuestionStub.TaskSpec;
  * <ul>
  * <li>Q1 to Q4 and R3: the generated items of the corpus topic {@code question/apply-answer} from the corpus cache
  * ({@code items/question/apply-answer/*.json}, written by {@code CorpusSourcesTest} with {@code -Pcorpus}): the
- * modified variant is the task, asking is forced, the operator's reply is the text after {@code Operator's answer:}
- * of the item's facts, and the item's closed question is submitted after the answer. Each item yields an entity task
- * whose state declares {@code ask} and an envelope task with {@code ask:TASK-NNN}.</li>
+ * modified variant is the task, asking is forced ({@link #FORCE_ASK}: the choice is the operator's and unknown to the
+ * worker, so it must ask before acting), the operator's reply is the text after {@code Operator's answer:} of the
+ * item's facts, and the item's closed question is submitted after the answer; before the ask the facts introduce it as
+ * that closed question ({@link #checkAfterAnswer(String, String)}) and never claim that the operator has answered. Each
+ * item yields an entity task whose state declares {@code ask} and an envelope task with {@code ask:TASK-NNN}
+ * ({@link #FORCE_ASK_PLAN_TASK}).</li>
  * <li>Q2 controls: the original descriptions, the {@code question/ask-or-proceed} items {@code *-original} of the same
- * group.</li>
+ * group, unforced: their task text has no forcing sentence.</li>
  * <li>Q5: the {@code question/ask-or-proceed} items of the combined categories {@code 2ac}, {@code 2ap},
- * {@code 2cp}, each with two flaws; the scripted reply answers only the question asked first, or only restates the
- * options.</li>
+ * {@code 2cp}, each with two flaws, forced ({@link #FORCE_ASK_EACH}); the scripted reply answers only the question
+ * asked first, or only restates the options.</li>
  * <li>R1 and R2: the probe only. R4: the probe for small work, and for large work only the scenario recipes
  * {@link #LARGE_SCENARIOS}, read at run time and read-only ({@code git show}, {@code git ls-tree}) from
  * {@value #SCENARIOS} of the branch {@code verification/question-items} of a local checkout of
@@ -90,6 +93,42 @@ final class QuestionFixtures {
     private static final String ASK_OR_PROCEED = "question/ask-or-proceed";
     private static final String APPLY_ANSWER = "question/apply-answer";
     private static final String CHECK_SUBMIT = "answer:text[1..200],judgment:text[0..2000]";
+    private static final String IMPLEMENT = "Implement the Python function below as its docstring describes, in the "
+            + "file solution.py of your working directory.";
+
+    /**
+     * The forcing sentence of the apply-answer fixtures (Q1, Q3, Q4, Q6, Q7, R3): as the probe does, it states that the
+     * choice is the operator's and unknown to the worker, so it must ask before acting. Added before any measured run.
+     */
+    static final String FORCE_ASK = "Its description is flawed: which behaviour the function should have is the "
+            + "operator's choice, which you do not know, so you must ask the operator before you write any code.";
+    /**
+     * The forcing sentence of the two-flaw fixtures (Q5), one question per flaw. Added before any measured run.
+     */
+    static final String FORCE_ASK_EACH = "Its description has more than one flaw (ambiguous, inconsistent with its "
+            + "examples, or incomplete): how to resolve each is the operator's choice, which you do not know, so you "
+            + "must ask the operator about each, one question at a time, before you write the code that depends on "
+            + "it.";
+    /**
+     * The plan task {@code TASK-001} of an envelope over a forced fixture: the choice is the operator's and unknown to
+     * the worker, and nothing claims that the operator has answered. Added before any measured run.
+     */
+    static final String FORCE_ASK_PLAN_TASK = "Implement the function in solution.py as its contract in "
+            + "facts.contract says. Where the contract is flawed, the choice is the operator's, which you do not know: "
+            + "ask the operator (ask:TASK-001) before you write any code, and implement it as the answer in "
+            + "facts.answers settles it.";
+    /**
+     * How the closed question of an apply-answer item ({@code input.question}) begins in the corpus: it claims the
+     * operator has answered, which before the ask is not true.
+     */
+    static final String ANSWERED_FRAMING = "You asked the operator about the function below, and the operator "
+            + "answered. Implement it as the answer settles it. ";
+    /**
+     * What replaces {@link #ANSWERED_FRAMING} in the facts before the ask: the check is the closed question to submit
+     * after the answer, answered from the operator's answer in {@code facts.answers}.
+     */
+    static final String CHECK_AFTER_ANSWER = "The closed question to submit after the operator's answer: once the "
+            + "answer is in facts.answers, implement the function as it settles it, then answer: ";
 
     /** How the operator answers a decision. */
     enum Reply {
@@ -185,12 +224,30 @@ final class QuestionFixtures {
             var reply = facts.substring(marker + REPLY_MARKER.length()).strip();
             var matcher = VARIANT.matcher(item.path("title").asText());
             var category = matcher.find() ? matcher.group(1) : "unknown";
-            var task = "Implement the Python function below as its docstring describes, in the file solution.py of "
-                    + "your working directory. Its description is flawed: it cannot be implemented as intended "
-                    + "without the operator's answer, so ask before you write any code.\n\n" + variant;
-            fixtures.add(new Fixture(item.path("id").asText(), category, task, reply, check(item), false, null));
+            var task = IMPLEMENT + " " + FORCE_ASK + "\n\n" + variant;
+            var check = check(item);
+            check = new Check(checkAfterAnswer(check.question(), item.path("id").asText()), check.choices(),
+                    check.reference());
+            fixtures.add(new Fixture(item.path("id").asText(), category, task, reply, check, false, null));
         }
         return fixtures;
+    }
+
+    /**
+     * The closed question of an apply-answer item as the facts carry it before the ask: {@link #ANSWERED_FRAMING}
+     * replaced by {@link #CHECK_AFTER_ANSWER}.
+     *
+     * @param question the item's {@code input.question}
+     * @param id       the item's id
+     * @return the check question
+     * @throws IllegalStateException if the question does not begin with {@link #ANSWERED_FRAMING}
+     */
+    static String checkAfterAnswer(String question, String id) {
+        if (!question.startsWith(ANSWERED_FRAMING)) {
+            throw new IllegalStateException(id + ": input.question does not begin with the answered framing: "
+                    + "stopped instead of rewording it");
+        }
+        return CHECK_AFTER_ANSWER + question.substring(ANSWERED_FRAMING.length());
     }
 
     /**
@@ -206,8 +263,7 @@ final class QuestionFixtures {
         var fixtures = new ArrayList<Fixture>();
         for (var item : items(cache, ASK_OR_PROCEED)) {
             if (item.path("id").asText().endsWith("-original") && groups.contains(item.path("group").asText())) {
-                var task = "Implement the Python function below as its docstring describes, in the file solution.py "
-                        + "of your working directory.\n\n" + item.path("input").path("facts").asText();
+                var task = IMPLEMENT + "\n\n" + item.path("input").path("facts").asText();
                 fixtures.add(new Fixture(item.path("id").asText(), "original", task, "",
                         new Check("Which function did you implement? Give its name.", List.of(), ""), true, null));
             }
@@ -225,10 +281,7 @@ final class QuestionFixtures {
         for (var item : items(cache, ASK_OR_PROCEED)) {
             var category = category(item);
             if (TWO_FLAWS.contains(category)) {
-                var task = "Implement the Python function below as its docstring describes, in the file solution.py "
-                        + "of your working directory. Its description may be ambiguous, inconsistent with its "
-                        + "examples, or incomplete; ask about what you cannot decide, one question at a time, before "
-                        + "you write the code that depends on it.\n\n" + item.path("input").path("facts").asText();
+                var task = IMPLEMENT + " " + FORCE_ASK_EACH + "\n\n" + item.path("input").path("facts").asText();
                 fixtures.add(new Fixture(item.path("id").asText(), category, task, "", null, false, null));
             }
         }
@@ -499,12 +552,14 @@ final class QuestionFixtures {
      * @param taskId  the queue task id
      * @param role    the role
      * @param form    how the envelope task continues after a question
-     * @return an envelope task: {@code TASK-001} implements, {@code TASK-002} answers the check
+     * @return an envelope task: {@code TASK-001} implements ({@link #FORCE_ASK_PLAN_TASK} for a forced fixture),
+     *         {@code TASK-002} answers the check
      */
     static TaskSpec envelopeTask(Fixture fixture, String taskId, String role, Form form) {
+        var implement = fixture.control() ? "Implement the function in solution.py as its contract in facts.contract "
+                + "says." : FORCE_ASK_PLAN_TASK;
         var planTasks = List.of(
-                new PlanTask("TASK-001", "Implement the function in solution.py as its contract, settled by the "
-                        + "operator where it is flawed, says. The contract is in facts.contract.", "summary:text[1..500]"),
+                new PlanTask("TASK-001", implement, "summary:text[1..500]"),
                 new PlanTask("TASK-002", "Answer the check question in facts.check_question with one of "
                         + "facts.check_choices, as your implementation computes it.", CHECK_SUBMIT));
         var facts = facts(fixture);

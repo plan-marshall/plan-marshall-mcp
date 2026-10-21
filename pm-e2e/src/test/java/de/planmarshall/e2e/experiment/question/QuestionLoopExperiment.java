@@ -31,6 +31,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -39,6 +40,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Fault;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Launch;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.OpenCodeDataHome;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Worker;
 import de.planmarshall.e2e.experiment.question.QuestionFixtures.Fixture;
 import de.planmarshall.e2e.experiment.question.QuestionFixtures.Reply;
@@ -66,8 +68,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * ({@code -Dpm.experiment.runs=0}).
  * <p>
  * Properties: {@code pm.experiment.hosts} (default {@code claude,opencode,antigravity}; Q7 runs on Claude Code
- * only), {@code pm.experiment.model.<host>} (default {@code claude-haiku-4-5} for Claude Code, the harness default
- * otherwise), {@code pm.experiment.runs} (20), {@code pm.experiment.fixtures} (a limit on the fixtures per item, all
+ * only), {@code pm.experiment.model.<host>} (default {@code claude-haiku-4-5} for Claude Code,
+ * {@code opencode/gpt-5.4-nano} for OpenCode on the global data home, the harness default otherwise:
+ * {@link #defaultModel(Host, OpenCodeDataHome)}), {@code pm.experiment.opencode.data-home} ({@code global}, the
+ * default, or {@code worker}: {@link OpenCodeDataHome}), {@code pm.experiment.runs} (20), {@code pm.experiment.fixtures} (a limit on the fixtures per item, all
  * by default), {@code pm.experiment.parallel} (4), {@code pm.experiment.corpus-cache}
  * ({@code pm-mcp-server/target/corpus-cache}), {@code pm.experiment.telemetry} (the checkout beside this repository's
  * main checkout), {@code pm.experiment.telemetry.ref} ({@value QuestionFixtures#TELEMETRY_REF}),
@@ -146,15 +150,22 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * {@code auth.json} is not enough): there only the free models of the provider {@code opencode} are routable
  * ({@code opencode models --standalone}), and {@code opencode/deepseek-v4.1-flash-free} ran against the stub; a model
  * of the login fails with {@code Model unavailable} unless the data home is the operator's. The harness default
- * ({@code opencode/flint-40b-free}) failed with {@code 503 Endpoint is unavailable} in the one run that used it; the
- * default stays the harness default, and {@code pm.experiment.model.opencode} names another model.</li>
+ * ({@code opencode/flint-40b-free}) failed with {@code 503 Endpoint is unavailable} in the one run that used it.
+ * OpenCode therefore runs on the operator's global data home by default ({@code pm.experiment.opencode.data-home},
+ * {@link OpenCodeDataHome#GLOBAL}) with {@code opencode/gpt-5.4-nano}, a model of the login verified to run there: a
+ * departure from the per-worker data home of the work package, accepted by the operator and recorded in the result's
+ * limits. The sessions of the runs stay in the operator's history. Every OpenCode worker then writes the one SQLite
+ * database of that data home, and concurrent standalone servers on it are not verified, so the runs that start
+ * OpenCode run one at a time ({@link #serialOpenCode(Config)}); the other runs keep {@code pm.experiment.parallel}.
+ * {@code pm.experiment.opencode.data-home=worker} restores the per-worker data home and the harness default
+ * model.</li>
  * <li>Session id: every line of {@code --format json} carries the top-level {@code sessionID}, error lines
  * included.</li>
  * <li>Resume: {@code --session <id>} continued the session under the same id (it named the entity of the earlier
  * turn).</li>
  * <li>Missing id: {@code --session ses_<26 characters>} that names no session creates one under that id, runs the
- * prompt and exits 0; R2 classifies it as {@code exited_without_failure} ({@link QuestionResults#negativeOutcome}),
- * though OpenCode started a session. An id of another form ({@code not a session id!}, a UUID) fails at once, exit 1,
+ * prompt and exits 0; R2 classifies it as {@code negative_new_session}, as Antigravity's
+ * ({@link QuestionResults#startedNewSession}). An id of another form ({@code not a session id!}, a UUID) fails at once, exit 1,
  * with {@code Expected a string starting with "ses"}; R2 therefore names a missing session in OpenCode's own form
  * ({@link QuestionDriver#missingSessionId(Host)}).</li>
  * <li>The held call: a {@code pm_wait} the stub held for 150 s returned {@code wait: again} after 150.0 s, uncut; one
@@ -179,7 +190,19 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 @EnabledIfSystemProperty(named = "pm.experiment.question", matches = ".+")
 class QuestionLoopExperiment {
 
+    /** The model of Claude Code unless {@code pm.experiment.model.claude} names another. */
+    static final String CLAUDE_MODEL = "claude-haiku-4-5";
+    /**
+     * The model of OpenCode on the global data home unless {@code pm.experiment.model.opencode} names another: a model
+     * of the operator's login, verified to run there on 2026-10-21.
+     */
+    static final String OPENCODE_GLOBAL_MODEL = "opencode/gpt-5.4-nano";
+    /** The worker note every launch prompt ends with. */
+    static final String WORKTREE_NOTE = "Your working directory is your worktree; files you write stay there.";
+
     private static final Path ROOT = Path.of("").toAbsolutePath().getParent();
+    /** One run at a time that starts OpenCode on the global data home: its workers share one SQLite database. */
+    private static final ReentrantLock OPENCODE_SERIAL = new ReentrantLock();
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ROLE = "implement";
     private static final String TASK_ID = "T-1";
@@ -214,10 +237,11 @@ class QuestionLoopExperiment {
      * @param exec         the {@code pm-exec} command line
      * @param runTimeout   the bound of one run beside its holds
      * @param warmth       the warm/fresh axis of the run matrix
+     * @param openCodeDataHome where OpenCode workers keep their data
      */
     record Config(List<Host> hosts, Map<Host, String> models, int runs, int fixtures, int parallel, Path cache,
     Path telemetry, String telemetryRef, Path clones, int largeRuns, Path workspace, Path results,
-    List<String> exec, Duration runTimeout, Warmth warmth) {
+    List<String> exec, Duration runTimeout, Warmth warmth, OpenCodeDataHome openCodeDataHome) {
 
         Config {
             if (runs < 0 || largeRuns < 0) {
@@ -234,10 +258,11 @@ class QuestionLoopExperiment {
             for (var name : System.getProperty("pm.experiment.hosts", "claude,opencode,antigravity").split(",")) {
                 hosts.add(Host.of(name));
             }
+            var dataHome = OpenCodeDataHome.of(System.getProperty(OpenCodeDataHome.PROPERTY));
             var models = new EnumMap<Host, String>(Host.class);
             for (var host : Host.values()) {
                 var model = System.getProperty("pm.experiment.model." + host.executable(),
-                        host == Host.CLAUDE ? "claude-haiku-4-5" : null);
+                        defaultModel(host, dataHome));
                 if (model != null) {
                     models.put(host, model);
                 }
@@ -256,7 +281,7 @@ class QuestionLoopExperiment {
                             Path.of(System.getProperty("java.io.tmpdir"), "pm-qlv-" + stamp).toString())),
                     Path.of("target", "question-loop").toAbsolutePath(), QuestionDriver.resolveExec(),
                     Duration.parse(System.getProperty("pm.experiment.run-timeout", "PT20M")),
-                    Warmth.of(System.getProperty(Warmth.PROPERTY)));
+                    Warmth.of(System.getProperty(Warmth.PROPERTY)), dataHome);
         }
 
         String model(Host host) {
@@ -346,6 +371,11 @@ class QuestionLoopExperiment {
             QuestionResults.limitsOfR4(result, QuestionFixtures.unusedScenarios(telemetry(config)).size(),
                     config.largeRuns(), config.runs());
         }
+        QuestionResults.limitsOfFixtures(result, item);
+        var openCodeModels = openCodeModels(plans, config);
+        if (config.openCodeDataHome() == OpenCodeDataHome.GLOBAL && !openCodeModels.isEmpty()) {
+            QuestionResults.limitOfOpenCodeDataHome(result, openCodeModels);
+        }
         QuestionResults.scale(item, result, runs, QuestionResults.invocations(config.results(), item));
         var file = QuestionResults.write(item, result);
 
@@ -381,10 +411,110 @@ class QuestionLoopExperiment {
         config.hosts().forEach(host -> hosts.add(host.executable()));
         record.put("warmth", config.warmth().name().toLowerCase(Locale.ROOT));
         record.put("parallel", config.parallel());
+        record.put("opencode_data_home", config.openCodeDataHome().name().toLowerCase(Locale.ROOT));
+        record.put("opencode_serial", serialOpenCode(config) && plans.stream().anyMatch(QuestionLoopExperiment::usesOpenCode));
         var ages = record.putArray("r2_ages_s");
         durations(R2_AGES, R2_AGES_DEFAULT).forEach(age -> ages.add(age.toSeconds()));
         record.put("planned_runs", plans.size());
         return record;
+    }
+
+    /**
+     * @param host     a host
+     * @param dataHome where OpenCode keeps its data
+     * @return the model a host runs unless {@code pm.experiment.model.<host>} names another: {@value #CLAUDE_MODEL}
+     *         for Claude Code, {@value #OPENCODE_GLOBAL_MODEL} for OpenCode on the global data home, else {@code null}
+     *         (the harness default; on a per-worker data home only the free models are routable)
+     */
+    static String defaultModel(Host host, OpenCodeDataHome dataHome) {
+        return switch (host) {
+            case CLAUDE -> CLAUDE_MODEL;
+            case OPENCODE -> dataHome == OpenCodeDataHome.GLOBAL ? OPENCODE_GLOBAL_MODEL : null;
+            case ANTIGRAVITY -> null;
+        };
+    }
+
+    /**
+     * @param role a quorum role of Q6 ({@code quorum-a}, {@code quorum-b})
+     * @return its {@code <host>:<model>}: {@code pm.experiment.q6.<role>}, else Claude Code with
+     *         {@value #CLAUDE_MODEL} for {@code quorum-a} and OpenCode with {@code opencode-go/muse-spark-1.3-contributor}
+     *         for any other
+     */
+    static String q6Assignment(String role) {
+        return System.getProperty("pm.experiment.q6." + role, "quorum-a".equals(role) ? "claude:" + CLAUDE_MODEL
+                : "opencode:opencode-go/muse-spark-1.3-contributor");
+    }
+
+    /**
+     * @param plan a planned run
+     * @return whether it starts an OpenCode worker: as the asker, as the continuing host, or as a voter of Q6
+     */
+    static boolean usesOpenCode(RunPlan plan) {
+        if (plan.host() == Host.OPENCODE || plan.continueHost() == Host.OPENCODE) {
+            return true;
+        }
+        return "vote".equals(plan.kind()) && QUORUMS.values().stream().flatMap(quorum -> quorum.roles().stream())
+                .distinct().anyMatch(role -> Host.of(q6Assignment(role).split(":", 2)[0]) == Host.OPENCODE);
+    }
+
+    /**
+     * @param plans  the planned runs
+     * @param config the configuration
+     * @return the OpenCode models the runs start, the harness default as {@code null}; empty when none starts OpenCode
+     */
+    static Set<String> openCodeModels(List<RunPlan> plans, Config config) {
+        var models = new HashSet<String>();
+        for (var plan : plans) {
+            if (plan.host() == Host.OPENCODE) {
+                models.add(plan.model());
+            }
+            if (plan.continueHost() == Host.OPENCODE) {
+                models.add(config.model(Host.OPENCODE));
+            }
+            if ("vote".equals(plan.kind())) {
+                QUORUMS.values().stream().flatMap(quorum -> quorum.roles().stream()).distinct()
+                        .map(role -> q6Assignment(role).split(":", 2))
+                        .filter(assignment -> Host.of(assignment[0]) == Host.OPENCODE)
+                        .forEach(assignment -> models.add(assignment.length > 1 ? assignment[1] : null));
+            }
+        }
+        return models;
+    }
+
+    /**
+     * @param config the configuration
+     * @return whether the runs that start OpenCode run one at a time: on the global data home every OpenCode worker
+     *         writes the one SQLite database of the operator's data home, and concurrent standalone servers on it are
+     *         not verified to be safe
+     */
+    static boolean serialOpenCode(Config config) {
+        return config.openCodeDataHome() == OpenCodeDataHome.GLOBAL;
+    }
+
+    /**
+     * The launch of a worker of the measurement: the contract of its role with {@link #WORKTREE_NOTE}, and the work
+     * tools of its host.
+     *
+     * @param worker      the worker id
+     * @param generation  its generation
+     * @param role        its role
+     * @param host        its host
+     * @param resumable   whether its session is kept
+     * @param toolTimeout the host's MCP tool timeout, {@code null} for the host default
+     * @return the launch
+     */
+    static Launch workerLaunch(String worker, int generation, String role, Host host, boolean resumable,
+            Duration toolTimeout) {
+        return new Launch(worker, generation, role, QuestionDriver.contract(role, WORKTREE_NOTE), resumable,
+                toolTimeout, workTools(host), null);
+    }
+
+    private static List<String> workTools(Host host) {
+        return switch (host) {
+            case CLAUDE -> List.of("Read", "Write", "Edit", "Glob", "Grep");
+            case OPENCODE -> List.of("read", "write", "edit", "glob", "grep");
+            case ANTIGRAVITY -> List.of();
+        };
     }
 
     // --- plans ---
@@ -601,8 +731,18 @@ class QuestionLoopExperiment {
         try (var executor = Executors.newFixedThreadPool(config.parallel())) {
             var futures = new ArrayList<Future<?>>();
             for (var plan : plans) {
+                var serial = serialOpenCode(config) && usesOpenCode(plan);
                 futures.add(executor.submit(() -> {
-                    runOne(plan, config, invocation);
+                    if (serial) {
+                        OPENCODE_SERIAL.lock();
+                    }
+                    try {
+                        runOne(plan, config, invocation);
+                    } finally {
+                        if (serial) {
+                            OPENCODE_SERIAL.unlock();
+                        }
+                    }
                     return null;
                 }));
             }
@@ -625,7 +765,8 @@ class QuestionLoopExperiment {
         var record = runRecord(plan, stubDir);
         record.put(QuestionResults.INVOCATION, invocation);
         try (var driver = QuestionDriver.start(stubSettings, new QuestionDriver.Settings(plan.host(), plan.model(),
-                     base.resolve("workers"), config.results().resolve("runs").resolve(id), config.exec()))) {
+                     base.resolve("workers"), config.results().resolve("runs").resolve(id), config.exec(),
+                     config.openCodeDataHome()))) {
             new Session(driver, plan, config, record).run();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -760,17 +901,7 @@ class QuestionLoopExperiment {
         }
 
         private Launch launch(String worker, int launchGeneration, String role, Host host, Duration toolTimeout) {
-            var extra = "Your working directory is your worktree; files you write stay there.";
-            return new Launch(worker, launchGeneration, role, QuestionDriver.contract(role, extra),
-                    plan.form() == Form.RESUME, toolTimeout, workTools(host), null);
-        }
-
-        private static List<String> workTools(Host host) {
-            return switch (host) {
-                case CLAUDE -> List.of("Read", "Write", "Edit", "Glob", "Grep");
-                case OPENCODE -> List.of("read", "write", "edit", "glob", "grep");
-                case ANTIGRAVITY -> List.of();
-            };
+            return workerLaunch(worker, launchGeneration, role, host, plan.form() == Form.RESUME, toolTimeout);
         }
 
         private boolean answer() throws InterruptedException, IOException {
@@ -875,8 +1006,8 @@ class QuestionLoopExperiment {
             record.put("negative_session", reported.orElse(""));
             var warned = QuestionResults.warnsMissingSession(driver.stderr(resumed), plan.negative());
             record.put("negative_not_found_warning", warned);
-            record.put("negative_new_session", warned
-                    || reported.isPresent() && !plan.negative().equals(reported.get()));
+            record.put(QuestionResults.NEGATIVE_NEW_SESSION, QuestionResults.startedNewSession(plan.host(),
+                    plan.negative(), reported.orElse(""), warned));
         }
 
         private Optional<JsonNode> nextAsked(long deadline) throws IOException, InterruptedException {
@@ -973,9 +1104,7 @@ class QuestionLoopExperiment {
                         if (id.startsWith("vote-") && "task.queued".equals(stub.state(id).orElse(""))
                                 && started.add(id)) {
                             var role = id.substring(id.lastIndexOf("quorum-"));
-                            var assignment = System.getProperty("pm.experiment.q6." + role,
-                                    "quorum-a".equals(role) ? "claude:claude-haiku-4-5"
-                                            : "opencode:opencode-go/muse-spark-1.3-contributor").split(":", 2);
+                            var assignment = q6Assignment(role).split(":", 2);
                             var host = Host.of(assignment[0]);
                             var voter = sibling(host, assignment.length > 1 ? assignment[1] : null);
                             var launch = new Launch(id, 1, role, QuestionDriver.contract(role, "You vote blind on the "

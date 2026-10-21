@@ -100,8 +100,8 @@ final class QuestionDriver implements AutoCloseable {
      * The headless launch of OpenCode 2.1.2, verified 2026-10-21 against the stub: the placeholders {@code {prompt}},
      * {@code {model}} and {@code {session_id}} are replaced, and a placeholder without a value is dropped together with
      * the flag before it. {@code --standalone} runs a private server ({@code opencode serve --stdio}) that honours the
-     * worker's {@code XDG_DATA_HOME}; without it the run goes to the operator's background service, which keeps the
-     * session in its own data directory. The worker directory is the process working directory and {@code PWD}: OpenCode
+     * worker's {@code XDG_DATA_HOME} ({@link OpenCodeDataHome}); without it the run goes to the operator's background
+     * service, which keeps the session in its own data directory. The worker directory is the process working directory and {@code PWD}: OpenCode
      * takes the project directory from {@code PWD}. No {@code --auto}: the agent's permissions allow what the worker
      * needs. {@code -Dpm.experiment.opencode.argv} (a JSON array) overrides it.
      */
@@ -135,7 +135,8 @@ final class QuestionDriver implements AutoCloseable {
             List.of(".claude", ".claude.json", ".cache/claude", ".local/state/claude", ".local/share/claude",
                     ".config/claude")),
         /**
-         * OpenCode, with a data directory per worker. A {@code pm_wait} held by the stub for 150 s returned uncut, and
+         * OpenCode, on the data home {@link OpenCodeDataHome} selects. A {@code pm_wait} held by the stub for 150 s
+         * returned uncut, and
          * one held for 330 s was still uncut after about 260 s, when the probe itself was ended (verified 2026-10-21);
          * what OpenCode does with a call held beyond that is not verified.
          */
@@ -229,15 +230,69 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
+     * Where OpenCode keeps its data ({@code XDG_DATA_HOME}), set by {@value #PROPERTY}: {@code global} (the default)
+     * or {@code worker}.
+     */
+    enum OpenCodeDataHome {
+        /**
+         * The operator's own data home, which the worker inherits: it has the operator's login, so the models of the
+         * login are routable ({@code opencode/gpt-5.4-nano} ran there, verified 2026-10-21), and every OpenCode
+         * worker writes the one SQLite database of it; the sessions of the runs stay in the operator's history. A
+         * departure from the per-worker data home of the work package, accepted by the operator.
+         */
+        GLOBAL,
+        /**
+         * A data home per worker below its directory ({@link #opencodeDataHome(Path)}), as the work package
+         * specifies: the login does not carry, and only the free models of the provider {@code opencode} are routable.
+         */
+        WORKER;
+
+        /** The system property that selects it. */
+        static final String PROPERTY = "pm.experiment.opencode.data-home";
+
+        /**
+         * @param value {@code global} or {@code worker}, in any case; {@code null} for the default
+         * @return the data home
+         * @throws IllegalArgumentException for any other value
+         */
+        static OpenCodeDataHome of(String value) {
+            if (value == null) {
+                return GLOBAL;
+            }
+            for (var home : values()) {
+                if (home.name().equalsIgnoreCase(value.strip())) {
+                    return home;
+                }
+            }
+            throw new IllegalArgumentException("unknown -D" + PROPERTY + "=" + value + ": global or worker");
+        }
+    }
+
+    /**
      * The driver's settings.
      *
-     * @param host      the host
-     * @param model     the model, {@code null} for the harness default
-     * @param workspace the parent of the worker directories, outside every repository
-     * @param runDir    where the worker output and the relay logs go
-     * @param exec      the {@code pm-exec} command line
+     * @param host             the host
+     * @param model            the model, {@code null} for the harness default
+     * @param workspace        the parent of the worker directories, outside every repository
+     * @param runDir           where the worker output and the relay logs go
+     * @param exec             the {@code pm-exec} command line
+     * @param openCodeDataHome where an OpenCode worker keeps its data
      */
-    record Settings(Host host, String model, Path workspace, Path runDir, List<String> exec) {
+    record Settings(Host host, String model, Path workspace, Path runDir, List<String> exec,
+    OpenCodeDataHome openCodeDataHome) {
+
+        /**
+         * Settings with OpenCode on its default data home ({@link OpenCodeDataHome#GLOBAL}).
+         *
+         * @param host      the host
+         * @param model     the model, {@code null} for the harness default
+         * @param workspace the parent of the worker directories
+         * @param runDir    where the worker output and the relay logs go
+         * @param exec      the {@code pm-exec} command line
+         */
+        Settings(Host host, String model, Path workspace, Path runDir, List<String> exec) {
+            this(host, model, workspace, runDir, exec, OpenCodeDataHome.GLOBAL);
+        }
     }
 
     /**
@@ -322,7 +377,7 @@ final class QuestionDriver implements AutoCloseable {
      */
     QuestionDriver sibling(Host host, String model) {
         var sibling = new QuestionDriver(stubSettings, new Settings(host, model, settings.workspace(),
-                settings.runDir(), settings.exec()), stub, false);
+                settings.runDir(), settings.exec(), settings.openCodeDataHome()), stub, false);
         siblings.add(sibling);
         return sibling;
     }
@@ -750,27 +805,41 @@ final class QuestionDriver implements AutoCloseable {
 
                 If the task cannot be decided without the operator's answer, follow the link ask (or ask:<task_id>) \
                 with args {"decision": <envelope>}: two to five options, exactly one recommended with your \
-                confidence (0 to 100) and a rationale naming the evidence, and the decision kind. Example:
+                confidence (0 to 100) and a rationale naming the evidence, and the decision kind. %s Example:
                 %s
                 If no ask link is offered, decide on your own judgment and state it in your submission, or follow \
                 infeasible with your evidence. When the facts carry answers, the question is settled: apply the \
                 answer and never ask it again. When the representation says to call pm_wait, call it, and call it \
                 again on 'wait: again'. When it has no links and says to end your turn, end your turn.
-                %s""".formatted(role, ENVELOPE_EXAMPLE, extra);
+                %s""".formatted(role, EVIDENCE_RULE, ENVELOPE_EXAMPLE, extra);
     }
 
-    /** The example of a decision envelope in the contract. */
+    /**
+     * An item of the envelope's evidence as the stub accepts it ({@link QuestionStub#validateDecision}: text that
+     * starts with {@code pm://}, at most 512 characters): the URI of the task entity of the plan.
+     */
+    static final String EVIDENCE_EXAMPLE = "pm://" + QuestionStub.PLAN_ID + "/T-1";
+
+    /**
+     * The evidence rule of the contract: the stub refuses an ask whose evidence holds anything but {@code pm://} URIs
+     * with {@code invalid_link_args} ({@code every item must be a pm:// URI}).
+     */
+    static final String EVIDENCE_RULE = "The envelope's evidence is a list of at most 20 pm:// URIs and nothing else "
+            + "(it may be empty): name the entity you work on as pm://<plan_id>/<entity>; a file name, a quote or a "
+            + "line of code is no evidence item and belongs into the description.";
+
+    /** The example of a decision envelope in the contract, with one evidence item ({@link #EVIDENCE_EXAMPLE}). */
     static final String ENVELOPE_EXAMPLE = """
             {"title":"Which reading of the contract","header":"The interface contract contradicts itself",\
             "description":"The description and the examples of the function disagree; the implementation \
-            depends on which is meant.","evidence":[],"blocks":"task","reversibility":"reversible","parts":[\
+            depends on which is meant.","evidence":["%s"],"blocks":"task","reversibility":"reversible","parts":[\
             {"question_text":"Which behaviour should the function implement?","decision_kind":"interpretation",\
             "answer_type":"one","options":[{"branch_key":"description","label":"Follow the description",\
             "description":"Implement what the text says.","consequences":"The examples are wrong."},\
             {"branch_key":"examples","label":"Follow the examples","description":"Implement what the examples \
             show.","consequences":"The text is wrong."}],"recommendation":{"branch_key":"description",\
             "confidence":60,"rationale":"The text states the intent; the examples look edited."},\
-            "own_words":true,"note":true,"delegation":false}]}""";
+            "own_words":true,"note":true,"delegation":false}]}""".formatted(EVIDENCE_EXAMPLE);
 
     @Override
     public void close() throws IOException {
@@ -851,14 +920,44 @@ final class QuestionDriver implements AutoCloseable {
             environment.put("MCP_TOOL_TIMEOUT", Long.toString(launch.toolTimeout().toMillis()));
         }
         if (settings.host() == Host.OPENCODE) {
-            environment.put("XDG_DATA_HOME", opencodeDataHome(settings.workspace().resolve(launch.worker()))
-                    .toString());
+            applyOpenCodeDataHome(environment, settings.openCodeDataHome(),
+                    settings.workspace().resolve(launch.worker()));
         }
         return environment;
     }
 
     /**
-     * The per-worker data home of OpenCode ({@code XDG_DATA_HOME}) with the operator's {@code auth.json} copied in; it
+     * Sets OpenCode's data home in a worker's environment: on {@link OpenCodeDataHome#GLOBAL} the inherited
+     * {@code XDG_DATA_HOME} (or its absence) stays as it is; on {@link OpenCodeDataHome#WORKER} it is the worker's own
+     * ({@link #opencodeDataHome(Path)}).
+     *
+     * @param environment the worker's environment, changed in place
+     * @param home        the data home
+     * @param directory   the worker directory
+     * @throws IOException if the worker's data home cannot be created
+     */
+    static void applyOpenCodeDataHome(Map<String, String> environment, OpenCodeDataHome home, Path directory)
+            throws IOException {
+        if (home == OpenCodeDataHome.WORKER) {
+            environment.put("XDG_DATA_HOME", opencodeDataHome(directory).toString());
+        }
+    }
+
+    /**
+     * @param environment the environment the worker inherits
+     * @return OpenCode's directory in the operator's global data home: {@code $XDG_DATA_HOME/opencode}, else
+     *         {@code ~/.local/share/opencode}
+     */
+    static Path globalOpencodeData(Map<String, String> environment) {
+        var dataHome = environment.get("XDG_DATA_HOME");
+        return dataHome == null || dataHome.isBlank()
+                ? Path.of(System.getProperty("user.home"), ".local", "share", "opencode")
+                : Path.of(dataHome, "opencode");
+    }
+
+    /**
+     * The per-worker data home of OpenCode ({@code XDG_DATA_HOME}, {@link OpenCodeDataHome#WORKER}) with the operator's
+     * {@code auth.json} copied in; it
      * is kept while the worker's session may be resumed and removed with the workspace. With {@code --standalone}
      * OpenCode 2.1.2 keeps the worker's sessions in it ({@code opencode/opencode.db}) and resumes from it, but the copied
      * login does not carry: {@code opencode models --standalone} lists only the free models of the provider
@@ -884,6 +983,12 @@ final class QuestionDriver implements AutoCloseable {
         var paths = new ArrayList<Path>();
         paths.add(directory);
         settings.host().stateDirs.stream().map(home::resolve).filter(Files::exists).forEach(paths::add);
+        if (settings.host() == Host.OPENCODE && settings.openCodeDataHome() == OpenCodeDataHome.GLOBAL) {
+            var global = globalOpencodeData(System.getenv());
+            if (Files.exists(global)) {
+                paths.add(global);
+            }
+        }
         paths.add(Path.of("/tmp"));
         paths.add(Path.of("/dev"));
         return paths;

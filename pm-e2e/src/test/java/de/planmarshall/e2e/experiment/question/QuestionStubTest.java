@@ -12,6 +12,7 @@ package de.planmarshall.e2e.experiment.question;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -37,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -48,6 +50,7 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Fault;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Launch;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.LaunchFailure;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.OpenCodeDataHome;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Worker;
 import de.planmarshall.e2e.experiment.question.QuestionStub.AnswerResult;
 import de.planmarshall.e2e.experiment.question.QuestionStub.Form;
@@ -83,7 +86,12 @@ import org.junit.jupiter.params.provider.CsvSource;
  * {@code --standalone}, or with a relay that lacks its identity; a missing OpenCode session named in a form OpenCode
  * refuses at once; a result that mixes the records of earlier passes unseen, or reports a smaller pass as one at the
  * specified scale; and the default telemetry checkout and scenario clones resolved below
- * a worktree instead of beside the main checkout. The recipes, corpus items, repositories and executables of these
+ * a worktree instead of beside the main checkout. Beside them the ask's own text: a contract that never states the
+ * evidence rule the stub enforces, so first asks are refused; a forced fixture whose facts claim the operator has
+ * already answered, so the worker submits without asking; a Q2 control that is forced too; OpenCode on a data home
+ * without the operator's login, or its runs in parallel on the one global database; OpenCode's missing-session resume,
+ * which starts a session under the named id, counted as an exit without failure; and a result that does not record the
+ * fixture wording or the OpenCode departure. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used.
  */
@@ -172,6 +180,150 @@ class QuestionStubTest {
             var refused = client.ask("ask", envelope);
 
             assertTrue(refused.contains("question_id: a server-owned field"), refused);
+        }
+
+        @Test
+        @DisplayName("refuses evidence that is no pm:// URI, which the contract's evidence rule forbids")
+        void shouldRefuseEvidenceWithoutPmUri() throws Exception {
+            stub = start(1);
+            var client = activeWorker(Form.FALLBACK);
+            var envelope = validEnvelope();
+            envelope.putArray("evidence").add("solution.py");
+
+            var refused = client.ask("ask", envelope);
+
+            assertTrue(refused.contains("evidence: every item must be a pm:// URI"), refused);
+        }
+    }
+
+    @Nested
+    @DisplayName("contract")
+    class Contract {
+
+        @Test
+        @DisplayName("states the evidence rule, and its example carries one pm:// evidence item the stub accepts")
+        void shouldStateEvidenceRule() throws Exception {
+            var contract = QuestionDriver.contract(ROLE, "");
+            var errors = new ArrayList<String>();
+
+            QuestionStub.validateDecision(validEnvelope(), errors);
+
+            var evidence = validEnvelope().path("evidence");
+            assertAll("the contract",
+                    () -> assertTrue(contract.contains(QuestionDriver.EVIDENCE_RULE), contract),
+                    () -> assertTrue(contract.contains("pm:// URIs and nothing else"), contract),
+                    () -> assertTrue(contract.contains("\"evidence\":[\"pm://qlv/T-1\"]"), contract),
+                    () -> assertEquals(1, evidence.size()),
+                    () -> assertTrue(evidence.get(0).asText().startsWith("pm://"), evidence.toString()),
+                    () -> assertEquals(List.of(), errors));
+        }
+    }
+
+    @Nested
+    @DisplayName("fixture wording")
+    class FixtureWording {
+
+        private static final String QUESTION = "What does candidate([1.0, 2.0], 0.5) return?";
+
+        @Test
+        @DisplayName("a forced apply-answer fixture forces the ask and never claims that the operator answered")
+        void shouldForceAskWithoutClaimedAnswer() throws Exception {
+            var cache = cache();
+
+            var fixture = QuestionFixtures.applyAnswer(cache).getFirst();
+            var facts = QuestionFixtures.entityTask(fixture, TASK, ROLE, Form.FALLBACK).facts();
+
+            assertAll("the forced fixture",
+                    () -> assertTrue(fixture.task().contains(QuestionFixtures.FORCE_ASK), fixture.task()),
+                    () -> assertTrue(fixture.task().contains("operator's choice, which you do not know"),
+                            fixture.task()),
+                    () -> assertFalse(fixture.task().contains("Operator's answer"), fixture.task()),
+                    () -> assertEquals(QuestionFixtures.CHECK_AFTER_ANSWER + QUESTION,
+                            facts.path("check_question").asText()),
+                    () -> assertFalse(facts.toString().contains("the operator answered"), facts.toString()),
+                    () -> assertEquals("Closer.", fixture.reply()),
+                    () -> assertEquals("False", fixture.check().reference()));
+        }
+
+        @Test
+        @DisplayName("the envelope's TASK-001 forces the ask and no longer says the operator settled the contract")
+        void shouldForceAskInEnvelope() throws Exception {
+            var fixture = QuestionFixtures.applyAnswer(cache()).getFirst();
+
+            var spec = QuestionFixtures.envelopeTask(fixture, TASK, ROLE, Form.FALLBACK);
+
+            var implement = spec.planTasks().getFirst().text();
+            assertAll("the envelope",
+                    () -> assertEquals(QuestionFixtures.FORCE_ASK_PLAN_TASK, implement),
+                    () -> assertFalse(implement.contains("settled by the operator"), implement),
+                    () -> assertTrue(spec.facts().path("contract").asText().contains(QuestionFixtures.FORCE_ASK)),
+                    () -> assertFalse(spec.facts().toString().contains("the operator answered"),
+                            spec.facts().toString()));
+        }
+
+        @Test
+        @DisplayName("a Q2 control keeps its original, unforced task text")
+        void shouldKeepControlUnforced() throws Exception {
+            var cache = cache();
+
+            var control = QuestionFixtures.controls(cache).getFirst();
+
+            assertAll("the control",
+                    () -> assertTrue(control.control()),
+                    () -> assertEquals("Implement the Python function below as its docstring describes, in the "
+                            + "file solution.py of your working directory.\n\ndef candidate(): pass", control.task()),
+                    () -> assertFalse(control.task().contains("ask"), control.task()));
+        }
+
+        @Test
+        @DisplayName("a two-flaw fixture of Q5 forces an ask per flaw")
+        void shouldForceAskPerFlaw() throws Exception {
+            var fixture = QuestionFixtures.twoFlaws(cache()).getFirst();
+
+            assertAll("the two-flaw fixture",
+                    () -> assertEquals("2ac", fixture.category()),
+                    () -> assertTrue(fixture.task().contains(QuestionFixtures.FORCE_ASK_EACH), fixture.task()));
+        }
+
+        @Test
+        @DisplayName("stops when the closed question lacks the answered framing it replaces")
+        void shouldStopWithoutAnsweredFraming() {
+            var stop = assertThrows(IllegalStateException.class,
+                    () -> QuestionFixtures.checkAfterAnswer(QUESTION, "he-x"));
+
+            assertTrue(stop.getMessage().contains("he-x"), stop.getMessage());
+        }
+
+        private Path cache() throws IOException {
+            var cache = directory.resolve("cache");
+            var apply = QuestionStub.JSON.createObjectNode();
+            apply.put("id", "question/apply-answer/he-x");
+            apply.put("title", "HumanEval/0 (has_close_elements), variant 1a: apply the operator's answer");
+            apply.put("group", "humaneval-x");
+            var input = apply.putObject("input");
+            input.put("question", QuestionFixtures.ANSWERED_FRAMING + QUESTION);
+            input.put("facts", "def candidate(numbers, threshold): pass" + QuestionFixtures.REPLY_MARKER + "Closer.");
+            input.putArray("choices").add("False").add("True");
+            apply.putObject("target").put("answer", "False");
+            writeItem(cache, "question/apply-answer", "he-x", apply);
+            var original = QuestionStub.JSON.createObjectNode();
+            original.put("id", "question/ask-or-proceed/he-x-original");
+            original.put("group", "humaneval-x");
+            original.putObject("input").put("facts", "def candidate(): pass");
+            writeItem(cache, "question/ask-or-proceed", "he-x-original", original);
+            var twoFlaws = QuestionStub.JSON.createObjectNode();
+            twoFlaws.put("id", "question/ask-or-proceed/he-x-2ac");
+            twoFlaws.put("group", "humaneval-x");
+            twoFlaws.putArray("tags").add("category:2ac");
+            twoFlaws.putObject("input").put("facts", "def candidate(): pass");
+            writeItem(cache, "question/ask-or-proceed", "he-x-2ac", twoFlaws);
+            return cache;
+        }
+
+        private static void writeItem(Path cache, String topic, String name, JsonNode item) throws IOException {
+            var file = cache.resolve("items").resolve(topic).resolve(name + ".json");
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, QuestionStub.JSON.writeValueAsString(item));
         }
     }
 
@@ -380,6 +532,82 @@ class QuestionStubTest {
                     () -> assertTrue(tools.path(QuestionStub.SERVER + "*").asBoolean()),
                     () -> assertTrue(tools.path("read").asBoolean()),
                     () -> assertTrue(tools.path(Host.OPENCODE.questionTool()).isMissingNode(), tools.toString()));
+        }
+
+        @ParameterizedTest(name = "{0} -> {1}")
+        @CsvSource(nullValues = "none", value = {"none, GLOBAL", "global, GLOBAL", "Worker, WORKER"})
+        @DisplayName("pm.experiment.opencode.data-home selects the data home, global by default")
+        void shouldSelectDataHome(String value, OpenCodeDataHome expected) {
+            assertEquals(expected, OpenCodeDataHome.of(value));
+        }
+
+        @Test
+        @DisplayName("fails an unknown data home with the values it takes")
+        void shouldRefuseUnknownDataHome() {
+            var refused = assertThrows(IllegalArgumentException.class, () -> OpenCodeDataHome.of("shared"));
+
+            assertTrue(refused.getMessage().contains("-Dpm.experiment.opencode.data-home=shared: global or worker"),
+                    refused.getMessage());
+        }
+
+        @Test
+        @DisplayName("the global data home keeps the inherited XDG_DATA_HOME; the worker's sets its own")
+        void shouldApplyDataHome() throws Exception {
+            var global = new LinkedHashMap<String, String>();
+            global.put("XDG_DATA_HOME", "/home/operator/.local/share");
+            var worker = new LinkedHashMap<String, String>();
+            var workerDirectory = directory.resolve("w1");
+
+            QuestionDriver.applyOpenCodeDataHome(global, OpenCodeDataHome.GLOBAL, workerDirectory);
+            QuestionDriver.applyOpenCodeDataHome(worker, OpenCodeDataHome.WORKER, workerDirectory);
+
+            assertAll("the data homes",
+                    () -> assertEquals(Map.of("XDG_DATA_HOME", "/home/operator/.local/share"), global),
+                    () -> assertEquals(workerDirectory.resolve("data").toString(), worker.get("XDG_DATA_HOME")),
+                    () -> assertEquals(Path.of("/home/operator/.local/share/opencode"),
+                            QuestionDriver.globalOpencodeData(global)));
+        }
+
+        @Test
+        @DisplayName("defaults to opencode/gpt-5.4-nano on the global data home, the harness default on the worker's")
+        void shouldDefaultModelPerDataHome() {
+            assertAll("the default models",
+                    () -> assertEquals("opencode/gpt-5.4-nano",
+                            QuestionLoopExperiment.defaultModel(Host.OPENCODE, OpenCodeDataHome.GLOBAL)),
+                    () -> assertNull(QuestionLoopExperiment.defaultModel(Host.OPENCODE, OpenCodeDataHome.WORKER)),
+                    () -> assertEquals("claude-haiku-4-5",
+                            QuestionLoopExperiment.defaultModel(Host.CLAUDE, OpenCodeDataHome.GLOBAL)));
+        }
+
+        @Test
+        @DisplayName("runs that start OpenCode on the global data home run one at a time, and name their models")
+        void shouldSerializeOpenCodeRuns() {
+            var fixture = QuestionFixtures.probe();
+            var asker = QuestionLoopExperiment.RunPlan.of("Q1", 0, Host.OPENCODE, "opencode/gpt-5.4-nano", false,
+                    Form.FALLBACK, fixture, "entity");
+            var continuation = QuestionLoopExperiment.RunPlan.of("Q4", 1, Host.CLAUDE, "claude-haiku-4-5", false,
+                    Form.FALLBACK, fixture, "entity").continuingOn(Host.OPENCODE);
+            var claudeOnly = QuestionLoopExperiment.RunPlan.of("Q1", 0, Host.CLAUDE, "claude-haiku-4-5", false,
+                    Form.FALLBACK, fixture, "entity");
+            var global = config(OpenCodeDataHome.GLOBAL);
+
+            assertAll("the OpenCode runs",
+                    () -> assertTrue(QuestionLoopExperiment.usesOpenCode(asker)),
+                    () -> assertTrue(QuestionLoopExperiment.usesOpenCode(continuation)),
+                    () -> assertFalse(QuestionLoopExperiment.usesOpenCode(claudeOnly)),
+                    () -> assertTrue(QuestionLoopExperiment.serialOpenCode(global)),
+                    () -> assertFalse(QuestionLoopExperiment.serialOpenCode(config(OpenCodeDataHome.WORKER))),
+                    () -> assertEquals(Set.of("opencode/gpt-5.4-nano"),
+                            QuestionLoopExperiment.openCodeModels(List.of(asker, continuation, claudeOnly), global)),
+                    () -> assertEquals(Set.of(), QuestionLoopExperiment.openCodeModels(List.of(claudeOnly), global)));
+        }
+
+        private QuestionLoopExperiment.Config config(OpenCodeDataHome dataHome) {
+            return new QuestionLoopExperiment.Config(List.of(Host.CLAUDE, Host.OPENCODE),
+                    Map.of(Host.CLAUDE, "claude-haiku-4-5", Host.OPENCODE, "opencode/gpt-5.4-nano"), 1,
+                    Integer.MAX_VALUE, 4, directory.resolve("cache"), directory.resolve("telemetry"), "ref",
+                    directory.resolve("clones"), 0, directory.resolve("workspace"), directory.resolve("results"),
+                    List.of("pm-exec"), Duration.ofMinutes(20), QuestionLoopExperiment.Warmth.FRESH, dataHome);
         }
 
         @Test
@@ -918,7 +1146,8 @@ class QuestionStubTest {
             return new QuestionLoopExperiment.Config(List.of(Host.CLAUDE), Map.of(Host.CLAUDE, "claude-haiku-4-5"),
                     runs, Integer.MAX_VALUE, 1, directory.resolve("cache"), directory.resolve("telemetry"), "ref",
                     directory.resolve("clones"), largeRuns, directory.resolve("workspace"),
-                    directory.resolve("results"), List.of("pm-exec"), Duration.ofMinutes(20), warmth);
+                    directory.resolve("results"), List.of("pm-exec"), Duration.ofMinutes(20), warmth,
+                    OpenCodeDataHome.GLOBAL);
         }
     }
 
@@ -1008,6 +1237,46 @@ class QuestionStubTest {
         }
 
         @Test
+        @DisplayName("records the fixture wording of a forced item, and for Q2 that its controls stay unforced")
+        void shouldRecordFixtureWording() {
+            var q1 = verdict("pass");
+            var q2 = verdict("pass");
+            var r1 = verdict("pass");
+
+            QuestionResults.limitsOfFixtures(q1, "Q1");
+            QuestionResults.limitsOfFixtures(q2, "Q2");
+            QuestionResults.limitsOfFixtures(r1, "R1");
+
+            var wording = q1.path("limits").get(0).asText();
+            assertAll("the limits",
+                    () -> assertTrue(wording.contains(QuestionFixtures.FORCE_ASK), wording),
+                    () -> assertTrue(wording.contains(QuestionFixtures.FORCE_ASK_PLAN_TASK), wording),
+                    () -> assertTrue(wording.contains(QuestionFixtures.FORCE_ASK_EACH), wording),
+                    () -> assertTrue(wording.contains("added before any measured run"), wording),
+                    () -> assertTrue(q1.path("limits").get(1).asText().contains(QuestionDriver.EVIDENCE_RULE)),
+                    () -> assertEquals(2, q1.path("limits").size()),
+                    () -> assertTrue(q2.path("limits").get(2).asText().contains("unforced")),
+                    () -> assertTrue(r1.path("limits").isMissingNode(), r1.toString()),
+                    () -> assertEquals("pass", q1.path("verdict").asText()));
+        }
+
+        @Test
+        @DisplayName("records OpenCode on the global data home with its model, beside the limits of R4")
+        void shouldRecordOpenCodeDataHome() {
+            var result = verdict("none");
+
+            QuestionResults.limitOfOpenCodeDataHome(result, Set.of("opencode/gpt-5.4-nano"));
+            QuestionResults.limitsOfR4(result, 3, 3, 20);
+
+            var limits = result.path("limits");
+            assertAll("the limits",
+                    () -> assertEquals("OpenCode ran on the global data home with opencode/gpt-5.4-nano, a departure "
+                            + "from the per-worker data home of the package, accepted by the operator.",
+                            limits.get(0).asText().substring(0, limits.get(0).asText().indexOf(". ") + 1)),
+                    () -> assertEquals(5, limits.size()));
+        }
+
+        @Test
         @DisplayName("invocations are appended to invocations.jsonl and read per item")
         void shouldReadInvocationsPerItem() throws Exception {
             var results = directory.resolve("results");
@@ -1084,6 +1353,29 @@ class QuestionStubTest {
         void shouldClassifyNegativeResume(boolean newSession, boolean started, long exitAfter, int exitCode,
                 String expected) {
             assertEquals(expected, QuestionResults.negativeOutcome(newSession, started, exitAfter, exitCode));
+        }
+
+        @ParameterizedTest(name = "{0}: named {1}, reported {2}, warned {3} -> {4}")
+        @CsvSource(nullValues = "none", value = {
+                "OPENCODE, ses_a, ses_a, false, true",
+                "OPENCODE, ses_a, none, false, false",
+                "CLAUDE, id-a, id-a, false, false",
+                "CLAUDE, id-a, id-b, false, true",
+                "ANTIGRAVITY, id-a, id-b, false, true",
+                "ANTIGRAVITY, id-a, none, true, true"})
+        @DisplayName("a missing-session resume started a new session: OpenCode's under the named id, others' by warning "
+                + "or another id")
+        void shouldRecogniseNewSession(Host host, String named, String reported, boolean warned, boolean expected) {
+            assertEquals(expected, QuestionResults.startedNewSession(host, named, reported, warned));
+        }
+
+        @Test
+        @DisplayName("OpenCode's missing-session resume, which exits 0 at once under the named id, is a new session")
+        void shouldClassifyOpenCodeMissingSession() {
+            var newSession = QuestionResults.startedNewSession(Host.OPENCODE, "ses_a", "ses_a", false);
+
+            assertEquals(QuestionResults.NEGATIVE_NEW_SESSION,
+                    QuestionResults.negativeOutcome(newSession, true, 5000, 0));
         }
 
         @Test

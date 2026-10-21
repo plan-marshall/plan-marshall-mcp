@@ -103,6 +103,10 @@ final class QuestionResults {
     /** The mark of a verdict from a pass smaller than specified. */
     static final String NOT_AT_SCALE = "not at the specified scale";
 
+    /** The items whose fixtures force the ask: the apply-answer and two-flaw fixtures. */
+    static final Set<String> FORCED_ITEMS = Set.of("Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "R3");
+
+    private static final String LIMITS = "limits";
     private static final String UNKNOWN_INVOCATION = "unknown";
     private static final String EVENT = "event";
     private static final String WORKER = "worker";
@@ -701,7 +705,8 @@ final class QuestionResults {
 
     /**
      * Classifies the resume of a missing or over-age session (R2). A new session comes first: the harness neither
-     * failed nor hung, it worked on a conversation of its own (Antigravity), however long that took. Otherwise a
+     * failed nor hung, it worked on a conversation of its own (Antigravity, OpenCode:
+     * {@link #startedNewSession(Host, String, String, boolean)}), however long that took. Otherwise a
      * non-zero exit within {@link #HUNG_RESUME_MS} failed at once; no exit, or one later than that, is hung; an exit 0
      * within it with no new session is recorded as such.
      *
@@ -729,6 +734,83 @@ final class QuestionResults {
      */
     static boolean warnsMissingSession(String stderr, String sessionId) {
         return stderr.contains("conversation \"" + sessionId + "\" not found");
+    }
+
+    /**
+     * Whether the resume of a missing session (R2) started a new session, the bookkeeping behind
+     * {@link #NEGATIVE_NEW_SESSION}: the harness warned that the named session was not found (Antigravity), or it
+     * reports a session other than the one named, or it is OpenCode and reports any session. OpenCode 2.1.2 creates a
+     * session under a well-formed id that names none ({@code ses_} and 26 characters), runs the prompt and exits 0
+     * (verified 2026-10-21), so the id it reports is the one named and still a new session.
+     *
+     * @param host     the host
+     * @param named    the session id the generation was told to resume
+     * @param reported the session id the generation reports, empty when none
+     * @param warned   whether it warned that the named session was not found
+     * @return whether it started a new session
+     */
+    static boolean startedNewSession(Host host, String named, String reported, boolean warned) {
+        if (warned) {
+            return true;
+        }
+        if (reported == null || reported.isEmpty()) {
+            return false;
+        }
+        return !named.equals(reported) || host == Host.OPENCODE;
+    }
+
+    // --- limits ---
+
+    /**
+     * Appends one limit to a result's {@code limits}.
+     *
+     * @param result the result
+     * @param text   the limit
+     */
+    static void limit(ObjectNode result, String text) {
+        var limits = result.get(LIMITS) instanceof ArrayNode array ? array : result.putArray(LIMITS);
+        limits.add(text);
+    }
+
+    /**
+     * Adds the limit of the fixture wording to the result of an item whose fixtures force the ask (Q1 to Q7, R3): the
+     * forcing sentences, the closed question introduced as the one to submit after the answer, the evidence rule of the
+     * contract, all added before any measured run; for Q2 also that its controls stay unforced.
+     *
+     * @param result the result
+     * @param item   the item
+     */
+    static void limitsOfFixtures(ObjectNode result, String item) {
+        if (!FORCED_ITEMS.contains(item)) {
+            return;
+        }
+        limit(result, "Asking is forced by the fixture text, added before any measured run after a smoke pass of Q1 "
+                + "in which the workers rarely asked. The apply-answer task says: \"" + QuestionFixtures.FORCE_ASK
+                + "\" Its envelope plan task TASK-001 says: \"" + QuestionFixtures.FORCE_ASK_PLAN_TASK + "\" The "
+                + "two-flaw task of Q5 says: \"" + QuestionFixtures.FORCE_ASK_EACH + "\" Before the ask the facts no "
+                + "longer claim that the operator has answered: the closed question begins \""
+                + QuestionFixtures.CHECK_AFTER_ANSWER + "\" instead of the corpus's \""
+                + QuestionFixtures.ANSWERED_FRAMING.strip() + "\"");
+        limit(result, "The worker's contract states the evidence rule of the decision envelope, added before any "
+                + "measured run: \"" + QuestionDriver.EVIDENCE_RULE + "\" Its example envelope carries the evidence "
+                + "item " + QuestionDriver.EVIDENCE_EXAMPLE + ".");
+        if ("Q2".equals(item)) {
+            limit(result, "The controls of Q2 keep their original, unforced task text: no forcing sentence.");
+        }
+    }
+
+    /**
+     * Adds the limit of OpenCode on the operator's global data home.
+     *
+     * @param result the result
+     * @param models the OpenCode models of the runs, the harness default as {@code null}
+     */
+    static void limitOfOpenCodeDataHome(ObjectNode result, Set<String> models) {
+        var named = models.stream().map(model -> model == null ? "the harness default" : model).sorted().toList();
+        limit(result, "OpenCode ran on the global data home with " + String.join(", ", named) + ", a departure from "
+                + "the per-worker data home of the package, accepted by the operator. Its runs ran one at a time, "
+                + "because every OpenCode worker writes the one SQLite database of that data home; their sessions "
+                + "stay in the operator's history.");
     }
 
     private static boolean r3(List<RunView> views, ObjectNode group) {
@@ -796,17 +878,16 @@ final class QuestionResults {
      * @param runs      the runs per fixture, host, form and continuation of the other items
      */
     static void limitsOfR4(ObjectNode result, int unused, int largeRuns, int runs) {
-        var limits = result.putArray("limits");
-        limits.add("Small work is the probe; large work only the scenarios "
+        limit(result, "Small work is the probe; large work only the scenarios "
                 + String.join(" and ", QuestionFixtures.LARGE_SCENARIOS) + ". The other " + unused + " scenario "
                 + "recipes are not used: they need tasks replayed from records whose commits are gone, or outside "
                 + "state that has changed.");
-        limits.add("The large scenarios ran " + largeRuns + " runs per host and form in the continuation forms hold "
-                + "and resume only, instead of " + runs + " runs in every form. R4 has no pass criterion; its figures "
-                + "are tokens and time, and the answer check of the large scenarios is secondary.");
-        limits.add("Asking is not forced in the large scenarios: a run in which the worker did not ask is counted as "
-                + "no_ask, not as a pass.");
-        limits.add("Both corpus items behind the large scenarios are drafts.");
+        limit(result, "The large scenarios ran " + largeRuns + " runs per host and form in the continuation forms "
+                + "hold and resume only, instead of " + runs + " runs in every form. R4 has no pass criterion; its "
+                + "figures are tokens and time, and the answer check of the large scenarios is secondary.");
+        limit(result, "Asking is not forced in the large scenarios: a run in which the worker did not ask is counted "
+                + "as no_ask, not as a pass.");
+        limit(result, "Both corpus items behind the large scenarios are drafts.");
     }
 
     private static JsonNode longestPassing(ArrayNode groups, String parameter) {
