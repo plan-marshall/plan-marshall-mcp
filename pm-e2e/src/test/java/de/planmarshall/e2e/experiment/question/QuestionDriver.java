@@ -21,6 +21,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -29,6 +30,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
@@ -83,6 +85,29 @@ final class QuestionDriver implements AutoCloseable {
      */
     static final String AGY_CONFIG = ".agents/plugins/pm-question-stub/mcp_config.json";
 
+    /** The agent of {@code opencode.json} that the worker runs as: the stub's tools and the work tools only. */
+    static final String OPENCODE_AGENT = "pull-worker";
+
+    /**
+     * The tool through which OpenCode 2.1.2 offers MCP tools to the model: it runs code that calls
+     * {@code tools['plan-marshall'].pm_wait()} (verified 2026-10-21). The agent permits it together with
+     * {@code plan-marshall*}; permitting {@code plan-marshall.pm_wait} and its siblings by name did not expose the
+     * stub's tools to the code.
+     */
+    static final String OPENCODE_CODE_TOOL = "execute";
+
+    /**
+     * The headless launch of OpenCode 2.1.2, verified 2026-10-21 against the stub: the placeholders {@code {prompt}},
+     * {@code {model}} and {@code {session_id}} are replaced, and a placeholder without a value is dropped together with
+     * the flag before it. {@code --standalone} runs a private server ({@code opencode serve --stdio}) that honours the
+     * worker's {@code XDG_DATA_HOME}; without it the run goes to the operator's background service, which keeps the
+     * session in its own data directory. The worker directory is the process working directory and {@code PWD}: OpenCode
+     * takes the project directory from {@code PWD}. No {@code --auto}: the agent's permissions allow what the worker
+     * needs. {@code -Dpm.experiment.opencode.argv} (a JSON array) overrides it.
+     */
+    static final List<String> OPENCODE_ARGV = List.of("opencode", "run", "--standalone", "--format", "json",
+            "--agent", OPENCODE_AGENT, "--model", "{model}", "--session", "{session_id}", "{prompt}");
+
     /**
      * The prefix of the property that names a host's executable by its path ({@code pm.experiment.exe.claude},
      * {@code pm.experiment.exe.opencode}); {@code pm-exec} runs a program by its absolute path only.
@@ -92,6 +117,7 @@ final class QuestionDriver implements AutoCloseable {
     /** The event the stub logs when a generation's relay connects: the first event the generation causes itself. */
     static final String CONNECTED = "connected";
 
+    private static final SecureRandom RANDOM = new SecureRandom();
     private static final String FAULT_INJECTED = "fault_injected";
     private static final Duration TERMINATION_GRACE = Duration.ofSeconds(10);
     private static final Duration POLL = Duration.ofMillis(100);
@@ -108,7 +134,11 @@ final class QuestionDriver implements AutoCloseable {
         CLAUDE("claude", "AskUserQuestion", 15, false, 240, 30,
             List.of(".claude", ".claude.json", ".cache/claude", ".local/state/claude", ".local/share/claude",
                     ".config/claude")),
-        /** OpenCode, with a data directory per worker. */
+        /**
+         * OpenCode, with a data directory per worker. A {@code pm_wait} held by the stub for 150 s returned uncut, and
+         * one held for 330 s was still uncut after about 260 s, when the probe itself was ended (verified 2026-10-21);
+         * what OpenCode does with a call held beyond that is not verified.
+         */
         OPENCODE("opencode", "question", 270, true, 240, 30,
                 List.of(".local/state/opencode", ".cache/opencode", ".config/opencode")),
         /**
@@ -254,10 +284,17 @@ final class QuestionDriver implements AutoCloseable {
      * @param worker     the worker id
      * @param generation its generation
      * @param exit       the exit code of its process
-     * @param stderr     the first line it wrote to {@code stderr}, empty when none
+     * @param stderr     the first line of {@code stderr} that is not a line of {@code pm-exec}'s own
+     *                   ({@code {"pm_exec":...}}), the harness's cause; without one {@code pm-exec}'s error line, else
+     *                   its first line, empty when none
+     * @param tail       the last {@value #STDERR_TAIL} lines of {@code stderr} that are not lines of {@code pm-exec}'s
+     *                   own
      */
-    record LaunchFailure(String worker, int generation, int exit, String stderr) {
+    record LaunchFailure(String worker, int generation, int exit, String stderr, List<String> tail) {
     }
+
+    /** How many of the harness's last {@code stderr} lines a launch failure records. */
+    static final int STDERR_TAIL = 5;
 
     private final QuestionStub.Settings stubSettings;
     private final Settings settings;
@@ -683,12 +720,12 @@ final class QuestionDriver implements AutoCloseable {
         if (alive) {
             terminate(worker);
         }
-        var failure = new LaunchFailure(worker.id(), worker.generation(), worker.process().waitFor(),
-                stderr.lines().filter(line -> !line.isBlank()).findFirst().orElse(""));
+        var failure = launchFailure(worker.id(), worker.generation(), worker.process().waitFor(), stderr(worker));
         if (launchFailures.putIfAbsent(key, failure) == null) {
             var fields = identity(worker);
             fields.put("exit", failure.exit());
             fields.put("stderr", failure.stderr());
+            fields.put("stderr_tail", failure.tail());
             stub.event("launch_failed", fields);
         }
         return Optional.of(launchFailures.get(key));
@@ -807,6 +844,7 @@ final class QuestionDriver implements AutoCloseable {
                 environment.put(name, value);
             }
         });
+        environment.put("PWD", settings.workspace().resolve(launch.worker()).toString());
         environment.putAll(QuestionStub.relayEnvironment(stub.settings().socket(), launch.worker(),
                 launch.generation(), launch.role(), settings.host().executable(), relayLog));
         if (settings.host() == Host.CLAUDE && launch.toolTimeout() != null) {
@@ -820,10 +858,18 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
-     * The per-worker data home of OpenCode with the operator's login copied in; it is kept while the worker's
-     * session may be resumed and removed with the workspace.
+     * The per-worker data home of OpenCode ({@code XDG_DATA_HOME}) with the operator's {@code auth.json} copied in; it
+     * is kept while the worker's session may be resumed and removed with the workspace. With {@code --standalone}
+     * OpenCode 2.1.2 keeps the worker's sessions in it ({@code opencode/opencode.db}) and resumes from it, but the copied
+     * login does not carry: {@code opencode models --standalone} lists only the free models of the provider
+     * {@code opencode} there, and a model of the login ({@code opencode/gpt-5.4-nano}, {@code opencode-go/...}) fails
+     * with {@code Model unavailable} (verified 2026-10-21).
+     *
+     * @param directory the worker directory
+     * @return the data home
+     * @throws IOException if it cannot be created
      */
-    private static Path opencodeDataHome(Path directory) throws IOException {
+    static Path opencodeDataHome(Path directory) throws IOException {
         var dataHome = Files.createDirectories(directory.resolve("data"));
         var login = Path.of(System.getProperty("user.home"), ".local/share/opencode/auth.json");
         var target = Files.createDirectories(dataHome.resolve("opencode")).resolve("auth.json");
@@ -870,16 +916,9 @@ final class QuestionDriver implements AutoCloseable {
                 }
             }
             case OPENCODE -> {
-                Files.writeString(directory.resolve("opencode.json"), opencodeConfig(relay, launch));
-                command.addAll(List.of(executable(host, environment), "run", "--format", "json", "--agent",
-                        "pull-worker"));
-                if (settings.model() != null) {
-                    command.addAll(List.of("-m", settings.model()));
-                }
-                if (launch.sessionId() != null) {
-                    command.addAll(List.of("--session", launch.sessionId()));
-                }
-                command.addAll(List.of("--dir", directory.toString(), launch.prompt()));
+                Files.writeString(directory.resolve("opencode.json"), opencodeConfig(relay, launch, environment));
+                command.addAll(opencodeCommand(launch.prompt(), settings.model(), launch.sessionId(),
+                        executable(host, environment)));
             }
             case ANTIGRAVITY -> command.addAll(antigravityCommand(launch, directory, relay, environment));
         }
@@ -927,6 +966,55 @@ final class QuestionDriver implements AutoCloseable {
             command.set(0, agyExecutable(environment));
         }
         environment.put("PM_Q_HOST_TOOLS", "all");
+        return command;
+    }
+
+    /**
+     * A session id that names no stored session, for the negative resume of R2: a UUID for Claude Code and Antigravity;
+     * for OpenCode an id of its own form ({@code ses_} and 26 characters), because OpenCode refuses any other at once
+     * ({@code Expected a string starting with "ses"}, exit 1), which is the unreadable id and not the missing one.
+     *
+     * @param host the host
+     * @return the id
+     */
+    static String missingSessionId(Host host) {
+        if (host == Host.OPENCODE) {
+            var bytes = new byte[13];
+            RANDOM.nextBytes(bytes);
+            return "ses_" + HexFormat.of().formatHex(bytes);
+        }
+        return UUID.randomUUID().toString();
+    }
+
+    /**
+     * The launch of OpenCode: {@link #OPENCODE_ARGV}, or {@code -Dpm.experiment.opencode.argv} (a JSON array with the
+     * placeholders {@code {prompt}}, {@code {model}} and {@code {session_id}}), with the executable by its absolute
+     * path.
+     *
+     * @param prompt     the prompt
+     * @param model      the model, {@code null} for the harness default
+     * @param sessionId  the session to resume, {@code null} for a new one
+     * @param executable the absolute path of {@code opencode}
+     * @return the command
+     * @throws JsonProcessingException if the property is no JSON array
+     */
+    static List<String> opencodeCommand(String prompt, String model, String sessionId, String executable)
+            throws JsonProcessingException {
+        var argv = new ArrayList<String>();
+        var configured = System.getProperty("pm.experiment.opencode.argv");
+        if (configured == null) {
+            argv.addAll(OPENCODE_ARGV);
+        } else {
+            QuestionStub.JSON.readTree(configured).forEach(item -> argv.add(item.asText()));
+        }
+        var values = new LinkedHashMap<String, String>();
+        values.put("{prompt}", prompt);
+        values.put("{model}", model);
+        values.put("{session_id}", sessionId);
+        var command = expand(argv, values);
+        if (!command.isEmpty() && Host.OPENCODE.executable().equals(command.getFirst())) {
+            command.set(0, executable);
+        }
         return command;
     }
 
@@ -1049,7 +1137,21 @@ final class QuestionDriver implements AutoCloseable {
         return QuestionStub.JSON.writerWithDefaultPrettyPrinter().writeValueAsString(root);
     }
 
-    private static String opencodeConfig(List<String> relay, Launch launch) throws JsonProcessingException {
+    /**
+     * The {@code opencode.json} of a worker directory: the stub's MCP server as a local server with the relay's
+     * identity in its {@code environment} (it reached the relay both with {@code --standalone} and through the
+     * background service, which does not start the server in the worker's environment), and the agent
+     * {@value #OPENCODE_AGENT} with {@value #OPENCODE_CODE_TOOL}, the stub's tools ({@code plan-marshall*}) and the
+     * work tools only; every other tool, the question tool among them, is denied.
+     *
+     * @param relay       the relay command line
+     * @param launch      the launch
+     * @param environment the worker's environment; its {@code PM_Q_} variables go into the server's environment
+     * @return the configuration
+     * @throws JsonProcessingException if it cannot be written
+     */
+    static String opencodeConfig(List<String> relay, Launch launch, Map<String, String> environment)
+            throws JsonProcessingException {
         var root = QuestionStub.JSON.createObjectNode();
         root.put("$schema", "https://opencode.ai/config.json");
         var server = root.putObject("mcp").putObject(QuestionStub.SERVER);
@@ -1057,15 +1159,22 @@ final class QuestionDriver implements AutoCloseable {
         var command = server.putArray("command");
         relay.forEach(command::add);
         server.put("enabled", true);
+        var serverEnvironment = server.putObject("environment");
+        environment.forEach((name, value) -> {
+            if (name.startsWith("PM_Q_")) {
+                serverEnvironment.put(name, value);
+            }
+        });
         if (launch.toolTimeout() != null) {
             server.put("timeout", launch.toolTimeout().toMillis());
         }
-        var agent = root.putObject("agent").putObject("pull-worker");
+        var agent = root.putObject("agent").putObject(OPENCODE_AGENT);
         agent.put("description", "question-loop worker");
         agent.put("mode", "primary");
         var tools = agent.putObject("tools");
         tools.put("*", false);
-        QuestionStub.TOOLS.forEach(tool -> tools.put(QuestionStub.SERVER + "_" + tool, true));
+        tools.put(OPENCODE_CODE_TOOL, true);
+        tools.put(QuestionStub.SERVER + "*", true);
         launch.workTools().forEach(tool -> tools.put(tool, true));
         return QuestionStub.JSON.writerWithDefaultPrettyPrinter().writeValueAsString(root);
     }
@@ -1150,11 +1259,42 @@ final class QuestionDriver implements AutoCloseable {
 
     /** @return whether a line is {@code pm-exec}'s report of an error ({@code {"pm_exec":"error",...}}) */
     static boolean pmExecError(String line) {
+        return "error".equals(pmExecStage(line));
+    }
+
+    /** @return whether a line is one of {@code pm-exec}'s own ({@code {"pm_exec":...}}), not the harness's */
+    static boolean pmExecLine(String line) {
+        return !pmExecStage(line).isEmpty();
+    }
+
+    private static String pmExecStage(String line) {
         try {
-            return "error".equals(QuestionStub.JSON.readTree(line).path("pm_exec").asText());
+            var node = QuestionStub.JSON.readTree(line);
+            return node != null && node.path("pm_exec").isTextual() ? node.path("pm_exec").asText() : "";
         } catch (JsonProcessingException _) {
-            return false;
+            return "";
         }
+    }
+
+    /**
+     * The launch failure of a worker from what it wrote to {@code stderr}: the harness's own first line and last
+     * {@value #STDERR_TAIL} lines, without the lines {@code pm-exec} writes itself, so that the cause reaches the run
+     * record and not {@code pm-exec}'s {@code launched} line.
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param exit       its exit code
+     * @param stderr     what it wrote to {@code stderr}
+     * @return the launch failure
+     */
+    static LaunchFailure launchFailure(String worker, int generation, int exit, String stderr) {
+        var lines = stderr.lines().filter(line -> !line.isBlank()).toList();
+        var harness = lines.stream().filter(line -> !pmExecLine(line)).toList();
+        var first = harness.stream().findFirst()
+                .or(() -> lines.stream().filter(QuestionDriver::pmExecError).findFirst())
+                .or(() -> lines.stream().findFirst()).orElse("");
+        return new LaunchFailure(worker, generation, exit, first,
+                List.copyOf(harness.subList(Math.max(0, harness.size() - STDERR_TAIL), harness.size())));
     }
 
     private static boolean matches(JsonNode event, Worker worker) {

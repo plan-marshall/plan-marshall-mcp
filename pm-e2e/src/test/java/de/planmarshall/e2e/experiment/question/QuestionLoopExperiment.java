@@ -27,7 +27,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -124,6 +123,57 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * stream-json}, and whether agy passes its own environment to an MCP server (the relay's identity is written into
  * the server's {@code env}).</li>
  * </ul>
+ * <p>
+ * OpenCode runs on the launch verified on 2026-10-21 with OpenCode 2.1.2 against the stub ({@link OpenCodeProbeTest},
+ * {@link QuestionDriver#OPENCODE_ARGV}); {@code -Dpm.experiment.opencode.argv} (a JSON array with {@code {prompt}},
+ * {@code {model}}, {@code {session_id}}) overrides it. What was verified, and what was not:
+ * <ul>
+ * <li>Command: {@code opencode run --standalone --format json --agent pull-worker [--model <provider/model>]
+ * [--session <id>] <prompt>}. There is no {@code --dir}: the worker directory is the process working directory, and
+ * OpenCode takes the project directory from {@code PWD}, which the driver sets to it (with {@code PWD} inherited from
+ * the test JVM, OpenCode worked in {@code pm-e2e} of this repository and found no agent {@code pull-worker}).</li>
+ * <li>Configuration: OpenCode reads the {@code opencode.json} of the worker directory beside the operator's global
+ * one; the stub's server ({@code mcp.plan-marshall}, {@code type: local}) connected with the relay's identity from the
+ * server's {@code environment}. OpenCode offers MCP tools only through its code tool {@code execute}
+ * ({@code tools['plan-marshall'].pm_wait()}); the agent permits {@code execute} and {@code plan-marshall*}, and
+ * {@code pm_state} and {@code pm_wait} reached the stub. Permitting {@code plan-marshall.pm_wait} and its siblings by
+ * name did not expose them. The small models do not always find the tools behind {@code execute}: in 2 of 4 runs of
+ * {@code opencode/gpt-5.4-nano} as {@code pull-worker} the model ended without calling them.</li>
+ * <li>Background service versus standalone: without {@code --standalone} the run goes to the operator's background
+ * service ({@code opencode service status}); the session lands in the service's data directory and not in the
+ * worker's {@code XDG_DATA_HOME}. With {@code --standalone} a private server keeps the session in the worker's data
+ * home and resumes from it. The operator's login does not carry into a worker's data home (copying
+ * {@code auth.json} is not enough): there only the free models of the provider {@code opencode} are routable
+ * ({@code opencode models --standalone}), and {@code opencode/deepseek-v4.1-flash-free} ran against the stub; a model
+ * of the login fails with {@code Model unavailable} unless the data home is the operator's. The harness default
+ * ({@code opencode/flint-40b-free}) failed with {@code 503 Endpoint is unavailable} in the one run that used it; the
+ * default stays the harness default, and {@code pm.experiment.model.opencode} names another model.</li>
+ * <li>Session id: every line of {@code --format json} carries the top-level {@code sessionID}, error lines
+ * included.</li>
+ * <li>Resume: {@code --session <id>} continued the session under the same id (it named the entity of the earlier
+ * turn).</li>
+ * <li>Missing id: {@code --session ses_<26 characters>} that names no session creates one under that id, runs the
+ * prompt and exits 0; R2 classifies it as {@code exited_without_failure} ({@link QuestionResults#negativeOutcome}),
+ * though OpenCode started a session. An id of another form ({@code not a session id!}, a UUID) fails at once, exit 1,
+ * with {@code Expected a string starting with "ses"}; R2 therefore names a missing session in OpenCode's own form
+ * ({@link QuestionDriver#missingSessionId(Host)}).</li>
+ * <li>The held call: a {@code pm_wait} the stub held for 150 s returned {@code wait: again} after 150.0 s, uncut; one
+ * held for 330 s was uncut after about 260 s, when the probe was ended by its own build bound. Longer holds and
+ * OpenCode's own limit on a held call are not verified.</li>
+ * <li>Permissions: no {@code --auto}; the agent's allowed tools ran without a prompt, and a read outside the worker
+ * directory was refused ({@code Permission denied: external_directory}). The question tool is denied by the agent's
+ * {@code "*": false}; the models' own listings of their tools never named it.</li>
+ * <li>Not verified: the launch through {@code pm-exec} (the probe started OpenCode directly), and whether OpenCode
+ * passes its own environment to a local MCP server (the relay's identity is written into the server's
+ * {@code environment}).</li>
+ * </ul>
+ * <p>
+ * Bookkeeping: {@code runs.jsonl} is append-only and read per item, so the records of an item are cleared by the
+ * operator before its first invocation; R4 runs as two invocations that share the item's records. Every invocation
+ * appends its settings to {@code invocations.jsonl} (runs, fixtures and their limit, hosts, warmth, large runs,
+ * parallel runs, R2 ages) and every run record carries its invocation id, so the result lists the invocations it
+ * aggregates, a record of an earlier pass shows up there, and {@code atSpecifiedScale} says whether every invocation
+ * ran the specified 20 runs per fixture and host without a fixture limit ({@link QuestionResults#scale}).
  */
 @DisplayName("Question loop experiment: one item with -Dpm.experiment.question=<item>")
 @EnabledIfSystemProperty(named = "pm.experiment.question", matches = ".+")
@@ -137,6 +187,8 @@ class QuestionLoopExperiment {
     private static final String DECISION = "decision";
     private static final Duration POLL = Duration.ofSeconds(1);
     private static final Duration ANSWER_WAIT = Duration.ofMinutes(15);
+    private static final String R2_AGES = "pm.experiment.r2.ages";
+    private static final String R2_AGES_DEFAULT = "PT5M,PT1H,PT24H";
     private static final Map<String, Quorum> QUORUMS = Map.of(
             "interpretation", new Quorum(List.of("quorum-a", "quorum-b"), 90),
             "approach", new Quorum(List.of("quorum-a", "quorum-b"), 90),
@@ -285,15 +337,54 @@ class QuestionLoopExperiment {
         var plans = plans(item, config);
         assertFalse(plans.isEmpty(), "no run planned for " + item);
 
-        execute(plans, config);
-        var result = QuestionResults.evaluate(item, QuestionResults.runs(config.results(), item));
+        var invocation = invocation(item, config, plans);
+        QuestionResults.recordInvocation(config.results(), invocation);
+        execute(plans, config, invocation.path(QuestionResults.INVOCATION).asText());
+        var runs = QuestionResults.runs(config.results(), item);
+        var result = QuestionResults.evaluate(item, runs);
         if ("R4".equals(item)) {
             QuestionResults.limitsOfR4(result, QuestionFixtures.unusedScenarios(telemetry(config)).size(),
                     config.largeRuns(), config.runs());
         }
+        QuestionResults.scale(item, result, runs, QuestionResults.invocations(config.results(), item));
         var file = QuestionResults.write(item, result);
 
         assertTrue(Files.isRegularFile(file), "no result written for " + item);
+    }
+
+    /**
+     * The record of one invocation of an item: its id, which every run record of it carries, and the settings it ran
+     * with, so the result can say which invocations it aggregates and whether they ran at the specified scale.
+     *
+     * @param item   the item
+     * @param config the configuration
+     * @param plans  the runs it plans
+     * @return the invocation record
+     */
+    static ObjectNode invocation(String item, Config config, List<RunPlan> plans) {
+        var bytes = new byte[4];
+        RANDOM.nextBytes(bytes);
+        var record = QuestionStub.JSON.createObjectNode();
+        record.put(QuestionResults.INVOCATION, item + "-" + Instant.now().toString().replace(":", "")
+                .replace(".", "") + "-" + HexFormat.of().formatHex(bytes));
+        record.put("item", item);
+        record.put("started_at", Instant.now().toString());
+        record.put("runs", config.runs());
+        record.put("large_runs", config.largeRuns());
+        if (config.fixtures() == Integer.MAX_VALUE) {
+            record.putNull("fixtures_limit");
+        } else {
+            record.put("fixtures_limit", config.fixtures());
+        }
+        record.put("fixtures", plans.stream().map(plan -> plan.fixture().id()).distinct().count());
+        var hosts = record.putArray("hosts");
+        config.hosts().forEach(host -> hosts.add(host.executable()));
+        record.put("warmth", config.warmth().name().toLowerCase(Locale.ROOT));
+        record.put("parallel", config.parallel());
+        var ages = record.putArray("r2_ages_s");
+        durations(R2_AGES, R2_AGES_DEFAULT).forEach(age -> ages.add(age.toSeconds()));
+        record.put("planned_runs", plans.size());
+        return record;
     }
 
     // --- plans ---
@@ -353,13 +444,13 @@ class QuestionLoopExperiment {
                 }
             });
             case "R2" -> each(config, config.hosts(), probe(), (host, warm, fixture, index) -> {
-                for (var age : durations("pm.experiment.r2.ages", "PT5M,PT1H,PT24H")) {
+                for (var age : durations(R2_AGES, R2_AGES_DEFAULT)) {
                     plans.add(RunPlan.of(item, index, host, config.model(host), warm, Form.RESUME, fixture, "entity")
                             .holding(age));
                 }
                 var base = RunPlan.of(item, index, host, config.model(host), warm, Form.RESUME, fixture, "entity");
                 plans.add(base.holding(Duration.ofMinutes(5)).restarting());
-                plans.add(base.resumingSession(UUID.randomUUID().toString()));
+                plans.add(base.resumingSession(QuestionDriver.missingSessionId(host)));
                 var expired = System.getProperty("pm.experiment.r2.expired-session");
                 if (expired != null) {
                     plans.add(base.resumingSession(expired));
@@ -505,13 +596,13 @@ class QuestionLoopExperiment {
 
     // --- execution ---
 
-    private static void execute(List<RunPlan> plans, Config config) throws InterruptedException,
+    private static void execute(List<RunPlan> plans, Config config, String invocation) throws InterruptedException,
             ExecutionException {
         try (var executor = Executors.newFixedThreadPool(config.parallel())) {
             var futures = new ArrayList<Future<?>>();
             for (var plan : plans) {
                 futures.add(executor.submit(() -> {
-                    runOne(plan, config);
+                    runOne(plan, config, invocation);
                     return null;
                 }));
             }
@@ -521,7 +612,7 @@ class QuestionLoopExperiment {
         }
     }
 
-    private static void runOne(RunPlan plan, Config config) throws IOException {
+    private static void runOne(RunPlan plan, Config config, String invocation) throws IOException {
         var bytes = new byte[4];
         RANDOM.nextBytes(bytes);
         var suffix = HexFormat.of().formatHex(bytes);
@@ -532,6 +623,7 @@ class QuestionLoopExperiment {
         var stubSettings = QuestionStub.Settings.of(stubDir, Path.of("/tmp", "pmq-" + suffix + ".sock"))
                 .withWindow(plan.host().boundedWait()).withQuorums("vote".equals(plan.kind()) ? QUORUMS : Map.of());
         var record = runRecord(plan, stubDir);
+        record.put(QuestionResults.INVOCATION, invocation);
         try (var driver = QuestionDriver.start(stubSettings, new QuestionDriver.Settings(plan.host(), plan.model(),
                      base.resolve("workers"), config.results().resolve("runs").resolve(id), config.exec()))) {
             new Session(driver, plan, config, record).run();
@@ -815,6 +907,8 @@ class QuestionLoopExperiment {
                     record.put("launch_generation", value.generation());
                     record.put("launch_exit", value.exit());
                     record.put("launch_stderr", value.stderr());
+                    var tail = record.putArray("launch_stderr_tail");
+                    value.tail().forEach(tail::add);
                     record.put("error", "launch_failed: exit " + value.exit() + ": " + value.stderr());
                 }
             }

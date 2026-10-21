@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 
@@ -77,7 +78,11 @@ import org.junit.jupiter.params.provider.CsvSource;
  * Antigravity's tokens read as 0 or its missing-session resume, which starts a new conversation, counted as hung or as
  * failed. Beside them the launch: Claude Code or OpenCode handed to {@code pm-exec} by a bare name, which it refuses;
  * a worker that fails to launch noticed only at the run's deadline, or one killed by an injected fault, or one whose
- * relay connected, counted as a launch failure; and the default telemetry checkout and scenario clones resolved below
+ * relay connected, counted as a launch failure; a launch failure that records {@code pm-exec}'s {@code launched} line
+ * instead of the harness's own cause; OpenCode launched with a flag it does not have ({@code --dir}), without
+ * {@code --standalone}, or with a relay that lacks its identity; a missing OpenCode session named in a form OpenCode
+ * refuses at once; a result that mixes the records of earlier passes unseen, or reports a smaller pass as one at the
+ * specified scale; and the default telemetry checkout and scenario clones resolved below
  * a worktree instead of beside the main checkout. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used.
@@ -328,6 +333,68 @@ class QuestionStubTest {
     }
 
     @Nested
+    @DisplayName("OpenCode launch")
+    class OpenCodeLaunch {
+
+        private static final String OPENCODE = "/opt/homebrew/bin/opencode";
+
+        @Test
+        @DisplayName("a resume with a model runs standalone as pull-worker with --model and --session")
+        void shouldNameModelAndSession() throws Exception {
+            var command = QuestionDriver.opencodeCommand("Continue.", "opencode/deepseek-v4.1-flash-free",
+                    "ses_ea0479469ffez5MmZvmjJU2bd5", OPENCODE);
+
+            assertEquals(List.of(OPENCODE, "run", "--standalone", "--format", "json", "--agent", "pull-worker",
+                    "--model", "opencode/deepseek-v4.1-flash-free", "--session", "ses_ea0479469ffez5MmZvmjJU2bd5",
+                    "Continue."), command);
+        }
+
+        @Test
+        @DisplayName("a new session on the harness default drops --model and --session, and has no --dir")
+        void shouldDropFlagsWithoutValue() throws Exception {
+            var command = QuestionDriver.opencodeCommand("Do it.", null, null, OPENCODE);
+
+            assertEquals(List.of(OPENCODE, "run", "--standalone", "--format", "json", "--agent", "pull-worker",
+                    "Do it."), command);
+        }
+
+        @Test
+        @DisplayName("opencode.json gives the relay its identity and the agent execute and the stub's tools only")
+        void shouldWriteRelayIdentityAndAgent() throws Exception {
+            var environment = new LinkedHashMap<String, String>();
+            environment.put("PATH", "/usr/bin");
+            environment.putAll(QuestionStub.relayEnvironment(socket, WORKER, 2, ROLE, "opencode",
+                    directory.resolve("relay.jsonl")));
+            var launch = new Launch(WORKER, 2, ROLE, "Do it.", true, null, List.of("read"), null);
+
+            var config = QuestionStub.JSON.readTree(QuestionDriver.opencodeConfig(List.of("java", "Relay"), launch,
+                    environment));
+
+            var server = config.path("mcp").path(QuestionStub.SERVER);
+            var tools = config.path("agent").path(QuestionDriver.OPENCODE_AGENT).path("tools");
+            assertAll("the configuration",
+                    () -> assertEquals("2", server.path("environment").path("PM_Q_GENERATION").asText()),
+                    () -> assertTrue(server.path("environment").path("PATH").isMissingNode(), server.toString()),
+                    () -> assertFalse(tools.path("*").asBoolean(true)),
+                    () -> assertTrue(tools.path(QuestionDriver.OPENCODE_CODE_TOOL).asBoolean()),
+                    () -> assertTrue(tools.path(QuestionStub.SERVER + "*").asBoolean()),
+                    () -> assertTrue(tools.path("read").asBoolean()),
+                    () -> assertTrue(tools.path(Host.OPENCODE.questionTool()).isMissingNode(), tools.toString()));
+        }
+
+        @Test
+        @DisplayName("names a missing session in OpenCode's own form, and by a UUID elsewhere")
+        void shouldNameMissingSessionPerHost() {
+            var opencode = QuestionDriver.missingSessionId(Host.OPENCODE);
+            var claude = QuestionDriver.missingSessionId(Host.CLAUDE);
+
+            assertAll("the missing ids",
+                    () -> assertTrue(opencode.matches("ses_[0-9a-f]{26}"), opencode),
+                    () -> assertEquals(claude, UUID.fromString(claude).toString()));
+        }
+    }
+
+    @Nested
     @DisplayName("harness executable")
     class HarnessExecutable {
 
@@ -396,6 +463,8 @@ class QuestionStubTest {
         private static final String PROPERTY = QuestionDriver.EXECUTABLE_PROPERTY + "claude";
         private static final String PM_EXEC_ERROR = "{\"pm_exec\":\"error\",\"stage\":\"usage\",\"errno\":0,"
                 + "\"message\":\"program needs an absolute path: claude\"}";
+        private static final String PM_EXEC_LAUNCHED = "{\"pm_exec\":\"launched\",\"pid\":96187,"
+                + "\"confinement\":\"unavailable\",\"landlock_abi\":null,\"no_new_privs\":false}";
 
         private String previous;
         private Path claude;
@@ -449,9 +518,35 @@ class QuestionStubTest {
                 var failure = driver.launchFailure();
                 assertAll("the launch failure",
                         () -> assertTrue(asked.isEmpty()),
-                        () -> assertEquals(Optional.of(new LaunchFailure(WORKER, 1, 2, PM_EXEC_ERROR)), failure),
+                        () -> assertEquals(Optional.of(new LaunchFailure(WORKER, 1, 2, PM_EXEC_ERROR, List.of())),
+                                failure),
                         () -> assertTrue(Files.readString(driver.stub().events())
                                 .contains("\"event\":\"launch_failed\""), "no launch_failed event"));
+            }
+        }
+
+        @Test
+        @DisplayName("records the harness's own stderr line and its last lines, not pm-exec's launched line")
+        void shouldRecordHarnessStderr() throws Exception {
+            var lines = new StringBuilder("echo '" + PM_EXEC_LAUNCHED + "' >&2\n");
+            for (var index = 1; index <= 7; index++) {
+                lines.append("echo 'harness line ").append(index).append("' >&2\n");
+            }
+            var exec = script(directory.resolve("pm-exec"), lines + "exit 1");
+            try (var driver = driver(exec)) {
+                launch(driver);
+                var deadline = System.currentTimeMillis() + Duration.ofMinutes(20).toMillis();
+
+                assertTimeoutPreemptively(Duration.ofSeconds(30),
+                        () -> driver.awaitEventWhileLaunched(event -> false, deadline));
+
+                var failure = driver.launchFailure().orElseThrow();
+                assertAll("the launch failure",
+                        () -> assertEquals("harness line 1", failure.stderr()),
+                        () -> assertEquals(List.of("harness line 3", "harness line 4", "harness line 5",
+                                "harness line 6", "harness line 7"), failure.tail()),
+                        () -> assertTrue(Files.readString(driver.stub().events())
+                                .contains("\"stderr\":\"harness line 1\""), "the event does not name the harness line"));
             }
         }
 
@@ -790,6 +885,27 @@ class QuestionStubTest {
         }
 
         @Test
+        @DisplayName("records an invocation's settings: runs, fixtures and their limit, hosts, warmth, R4 large runs")
+        void shouldRecordInvocationSettings() throws Exception {
+            var config = config(2, 0, QuestionLoopExperiment.Warmth.FRESH);
+            var plans = QuestionLoopExperiment.r4(config, NOT_READ);
+
+            var invocation = QuestionLoopExperiment.invocation("R4", config, plans);
+
+            assertAll("the invocation",
+                    () -> assertTrue(invocation.path(QuestionResults.INVOCATION).asText().startsWith("R4-")),
+                    () -> assertEquals(2, invocation.path("runs").asInt()),
+                    () -> assertEquals(0, invocation.path("large_runs").asInt()),
+                    () -> assertTrue(invocation.path("fixtures_limit").isNull()),
+                    () -> assertEquals(1, invocation.path("fixtures").asInt()),
+                    () -> assertEquals("[\"claude\"]", invocation.path("hosts").toString()),
+                    () -> assertEquals("fresh", invocation.path("warmth").asText()),
+                    () -> assertEquals(1, invocation.path("parallel").asInt()),
+                    () -> assertEquals("[300,3600,86400]", invocation.path("r2_ages_s").toString()),
+                    () -> assertEquals(plans.size(), invocation.path("planned_runs").asInt()));
+        }
+
+        @Test
         @DisplayName("refuses a negative count of runs")
         void shouldRefuseNegativeRuns() {
             var refused = assertThrows(IllegalArgumentException.class,
@@ -803,6 +919,132 @@ class QuestionStubTest {
                     runs, Integer.MAX_VALUE, 1, directory.resolve("cache"), directory.resolve("telemetry"), "ref",
                     directory.resolve("clones"), largeRuns, directory.resolve("workspace"),
                     directory.resolve("results"), List.of("pm-exec"), Duration.ofMinutes(20), warmth);
+        }
+    }
+
+    @Nested
+    @DisplayName("result bookkeeping")
+    class ResultBookkeeping {
+
+        @Test
+        @DisplayName("a pass at the specified scale lists its invocation and keeps the verdict unmarked")
+        void shouldMarkSpecifiedScale() throws Exception {
+            var result = verdict("pass");
+            var runs = List.of(run("i1", "f1"), run("i1", "f2"));
+
+            QuestionResults.scale("Q1", result, runs, List.of(invocation("i1", "Q1", 20, 3, null)));
+
+            assertAll("the result",
+                    () -> assertTrue(result.path("atSpecifiedScale").asBoolean()),
+                    () -> assertTrue(result.path("verdict_scale").isMissingNode(), result.toString()),
+                    () -> assertEquals("pass", result.path("verdict").asText()),
+                    () -> assertEquals(2, result.path("run_records").asInt()),
+                    () -> assertEquals(2, result.path("fixtures").asInt()),
+                    () -> assertEquals("i1", result.path("invocations").get(0).path("invocation").asText()),
+                    () -> assertEquals(2, result.path("invocations").get(0).path("run_records").asInt()));
+        }
+
+        @ParameterizedTest(name = "{0}: runs {1}, large runs {2}, fixture limit {3} -> {4}")
+        @CsvSource(nullValues = "none", value = {
+                "Q1, 20, 3, none, true",
+                "Q1, 3, 3, none, false",
+                "Q1, 20, 3, 1, false",
+                "R4, 20, 0, none, true",
+                "R4, 0, 3, none, true",
+                "R4, 0, 1, none, false",
+                "R4, 0, 0, none, false"})
+        @DisplayName("one invocation runs at the specified scale only with the specified runs and no fixture limit")
+        void shouldJudgeInvocationScale(String item, int runs, int largeRuns, Integer limit, boolean expected) {
+            assertEquals(expected, QuestionResults.atSpecifiedScale(item, invocation("i1", item, runs, largeRuns,
+                    limit)));
+        }
+
+        @Test
+        @DisplayName("a smaller pass keeps its verdict, marked not at the specified scale")
+        void shouldMarkSmallerPass() throws Exception {
+            var result = verdict("fail");
+
+            QuestionResults.scale("Q1", result, List.of(run("i1", "f1")), List.of(invocation("i1", "Q1", 3, 3,
+                    null)));
+
+            assertAll("the result",
+                    () -> assertFalse(result.path("atSpecifiedScale").asBoolean(true)),
+                    () -> assertEquals(QuestionResults.NOT_AT_SCALE, result.path("verdict_scale").asText()),
+                    () -> assertEquals("fail", result.path("verdict").asText()));
+        }
+
+        @Test
+        @DisplayName("a record of an earlier pass without an invocation id shows up as unknown and not recorded")
+        void shouldShowStaleRecord() throws Exception {
+            var result = verdict("pass");
+            var stale = (ObjectNode) run("i1", "f1");
+            stale.remove(QuestionResults.INVOCATION);
+
+            QuestionResults.scale("Q1", result, List.of(run("i1", "f1"), stale),
+                    List.of(invocation("i1", "Q1", 20, 3, null)));
+
+            var invocations = result.path("invocations");
+            assertAll("the result",
+                    () -> assertEquals(2, invocations.size()),
+                    () -> assertEquals("unknown", invocations.get(1).path("invocation").asText()),
+                    () -> assertEquals("not recorded", invocations.get(1).path("settings").asText()),
+                    () -> assertFalse(result.path("atSpecifiedScale").asBoolean(true)));
+        }
+
+        @Test
+        @DisplayName("R4 is at the specified scale only when its small and its large work both ran so")
+        void shouldRequireBothPartsOfR4() throws Exception {
+            var both = verdict("none");
+            var smallOnly = verdict("none");
+            List<JsonNode> invocations = List.of(invocation("small", "R4", 20, 0, null),
+                    invocation("large", "R4", 0, 3, null));
+
+            QuestionResults.scale("R4", both, List.of(run("small", "probe"), run("large", "s1")), invocations);
+            QuestionResults.scale("R4", smallOnly, List.of(run("small", "probe")), invocations);
+
+            assertAll("the results",
+                    () -> assertTrue(both.path("atSpecifiedScale").asBoolean()),
+                    () -> assertFalse(smallOnly.path("atSpecifiedScale").asBoolean(true)));
+        }
+
+        @Test
+        @DisplayName("invocations are appended to invocations.jsonl and read per item")
+        void shouldReadInvocationsPerItem() throws Exception {
+            var results = directory.resolve("results");
+            QuestionResults.recordInvocation(results, invocation("q1-a", "Q1", 20, 3, null));
+            QuestionResults.recordInvocation(results, invocation("r4-a", "R4", 20, 0, null));
+
+            var read = QuestionResults.invocations(results, "Q1");
+
+            assertEquals(List.of("q1-a"), read.stream().map(node -> node.path(QuestionResults.INVOCATION).asText())
+                    .toList());
+        }
+
+        private static ObjectNode verdict(String verdict) {
+            var result = QuestionStub.JSON.createObjectNode();
+            result.put("verdict", verdict);
+            return result;
+        }
+
+        private static JsonNode run(String invocation, String fixture) {
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put(QuestionResults.INVOCATION, invocation);
+            run.put("fixture", fixture);
+            return run;
+        }
+
+        private static ObjectNode invocation(String id, String item, int runs, int largeRuns, Integer limit) {
+            var invocation = QuestionStub.JSON.createObjectNode();
+            invocation.put(QuestionResults.INVOCATION, id);
+            invocation.put("item", item);
+            invocation.put("runs", runs);
+            invocation.put("large_runs", largeRuns);
+            if (limit == null) {
+                invocation.putNull("fixtures_limit");
+            } else {
+                invocation.put("fixtures_limit", limit);
+            }
+            return invocation;
         }
     }
 

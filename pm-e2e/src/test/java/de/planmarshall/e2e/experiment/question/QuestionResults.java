@@ -38,7 +38,9 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * <p>
  * The pass criteria are those of the work package {@code question-loop-verification} ({@link #CRITERIA}, quoted
  * verbatim), encoded before the first measured run and not changed by any result. No figure comes from what a model
- * reports about itself.
+ * reports about itself. Beside the figures, the result names the invocations whose run records it aggregates and
+ * whether they ran at the specified scale ({@link #scale}); a smaller pass keeps its verdict, marked
+ * {@value #NOT_AT_SCALE}.
  */
 final class QuestionResults {
 
@@ -92,6 +94,16 @@ final class QuestionResults {
     /** A negative resume (R2) that ended at once with exit 0 and no new session. */
     static final String EXITED_WITHOUT_FAILURE = "exited_without_failure";
 
+    /** The field of a run record and of an invocation record that names the invocation. */
+    static final String INVOCATION = "invocation";
+    /** The runs per fixture and host the items are specified with. */
+    static final int SPECIFIED_RUNS = 20;
+    /** The runs per large scenario, host and form R4 is specified with. */
+    static final int SPECIFIED_LARGE_RUNS = 3;
+    /** The mark of a verdict from a pass smaller than specified. */
+    static final String NOT_AT_SCALE = "not at the specified scale";
+
+    private static final String UNKNOWN_INVOCATION = "unknown";
     private static final String EVENT = "event";
     private static final String WORKER = "worker";
     private static final String GENERATION = "generation";
@@ -166,6 +178,106 @@ final class QuestionResults {
     static List<JsonNode> runs(Path resultsDir, String item) throws IOException {
         return readJsonLines(resultsDir.resolve("runs.jsonl")).stream()
                 .filter(run -> item.equals(run.path("item").asText())).toList();
+    }
+
+    /**
+     * Appends the record of an invocation to {@code invocations.jsonl} of the results directory.
+     *
+     * @param resultsDir the results directory of the measurement
+     * @param invocation the invocation record ({@link QuestionLoopExperiment#invocation})
+     * @throws IOException if it cannot be written
+     */
+    static void recordInvocation(Path resultsDir, ObjectNode invocation) throws IOException {
+        Files.createDirectories(resultsDir);
+        Files.writeString(resultsDir.resolve("invocations.jsonl"),
+                QuestionStub.JSON.writeValueAsString(invocation) + "\n", StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+    }
+
+    /**
+     * @param resultsDir the results directory of the measurement
+     * @param item       an item
+     * @return the invocation records of the item
+     * @throws IOException if they cannot be read
+     */
+    static List<JsonNode> invocations(Path resultsDir, String item) throws IOException {
+        return readJsonLines(resultsDir.resolve("invocations.jsonl")).stream()
+                .filter(invocation -> item.equals(invocation.path("item").asText())).toList();
+    }
+
+    /**
+     * Adds the bookkeeping of an item's result: the invocations whose run records it aggregates (with their settings
+     * and record counts; a record without an invocation id counts under {@code unknown}), the number of run records
+     * and of fixtures, and {@code atSpecifiedScale}, true only when every aggregated invocation is recorded and ran at
+     * the specified scale ({@link #atSpecifiedScale(String, JsonNode)}) and, for R4, its small and its large work were
+     * both run so. A result that is not at the specified scale carries {@code verdict_scale}: {@value #NOT_AT_SCALE}.
+     * The verdict itself is not changed.
+     *
+     * @param item        the item
+     * @param result      its result ({@link #evaluate(String, List)})
+     * @param runs        the run records it was evaluated from
+     * @param invocations the invocation records of the item
+     */
+    static void scale(String item, ObjectNode result, List<JsonNode> runs, List<JsonNode> invocations) {
+        var counts = new LinkedHashMap<String, Integer>();
+        for (var run : runs) {
+            var id = run.path(INVOCATION).asText("");
+            counts.merge(id.isEmpty() ? UNKNOWN_INVOCATION : id, 1, Integer::sum);
+        }
+        var known = new HashMap<String, JsonNode>();
+        invocations.forEach(invocation -> known.put(invocation.path(INVOCATION).asText(), invocation));
+        var array = result.putArray("invocations");
+        var atScale = !counts.isEmpty();
+        var small = false;
+        var large = false;
+        for (var entry : counts.entrySet()) {
+            var recorded = known.get(entry.getKey());
+            var node = array.addObject();
+            node.put(INVOCATION, entry.getKey());
+            node.put("run_records", entry.getValue());
+            if (recorded == null) {
+                node.put("settings", "not recorded");
+                atScale = false;
+                continue;
+            }
+            node.set("settings", recorded);
+            var invocationAtScale = atSpecifiedScale(item, recorded);
+            node.put("atSpecifiedScale", invocationAtScale);
+            atScale &= invocationAtScale;
+            small |= recorded.path(RUNS).asInt() == SPECIFIED_RUNS;
+            large |= recorded.path("large_runs").asInt() == SPECIFIED_LARGE_RUNS;
+        }
+        if ("R4".equals(item)) {
+            atScale &= small && large;
+        }
+        result.put("run_records", runs.size());
+        result.put("fixtures", runs.stream().map(run -> run.path("fixture").asText()).distinct().count());
+        result.put("atSpecifiedScale", atScale);
+        if (!atScale) {
+            result.put("verdict_scale", NOT_AT_SCALE);
+        }
+    }
+
+    /**
+     * Whether one invocation ran at the specified scale: no fixture limit, and {@value #SPECIFIED_RUNS} runs per
+     * fixture and host; for R4, whose small and large work may run as separate invocations, each part either not run
+     * ({@code 0}) or run at its specified count ({@value #SPECIFIED_RUNS} small, {@value #SPECIFIED_LARGE_RUNS} large).
+     *
+     * @param item       the item
+     * @param invocation the invocation record
+     * @return whether it ran at the specified scale
+     */
+    static boolean atSpecifiedScale(String item, JsonNode invocation) {
+        if (!invocation.path("fixtures_limit").isNull() && !invocation.path("fixtures_limit").isMissingNode()) {
+            return false;
+        }
+        var runs = invocation.path(RUNS).asInt(-1);
+        if ("R4".equals(item)) {
+            var largeRuns = invocation.path("large_runs").asInt(-1);
+            return (runs == 0 || runs == SPECIFIED_RUNS) && (largeRuns == 0 || largeRuns == SPECIFIED_LARGE_RUNS)
+                    && runs + largeRuns > 0;
+        }
+        return runs == SPECIFIED_RUNS;
     }
 
     /**

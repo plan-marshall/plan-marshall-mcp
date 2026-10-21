@@ -24,13 +24,24 @@
  * MCP server as the workspace plugin {@code .agents/plugins/pm-question-stub/} of the worker directory, the session id
  * in {@code conversation_id}; a missing id starts a new conversation instead of failing, and an expired id is not
  * verified (see {@link de.planmarshall.e2e.experiment.question.QuestionLoopExperiment}).
- * {@code -Dpm.experiment.agy.argv} and {@code -Dpm.experiment.agy.config} override it.</li>
- * <li>{@link de.planmarshall.e2e.experiment.question.AgyProbeTest}: the probe of the agy CLI those values rest on,
- * disabled unless {@code -Dpm.experiment.agy.probe=<step>} is set.</li>
+ * {@code -Dpm.experiment.agy.argv} and {@code -Dpm.experiment.agy.config} override it. OpenCode's launch is the one
+ * verified with OpenCode 2.1.2 against the stub on 2026-10-21: {@code opencode run --standalone --format json --agent
+ * pull-worker [--model <model>] [--session <id>] <prompt>} in the worker directory as working directory and
+ * {@code PWD}, the stub's MCP server and the agent in the {@code opencode.json} of the worker directory (the stub's
+ * tools reached through OpenCode's code tool {@code execute}), the worker's data home in {@code XDG_DATA_HOME}, the
+ * session id in {@code sessionID}; the operator's login does not carry into a worker's data home, a missing
+ * {@code ses_} id creates a session under that id, and an id of another form fails at once (see
+ * {@link de.planmarshall.e2e.experiment.question.QuestionLoopExperiment}). {@code -Dpm.experiment.opencode.argv}
+ * overrides it.</li>
+ * <li>{@link de.planmarshall.e2e.experiment.question.AgyProbeTest} and
+ * {@link de.planmarshall.e2e.experiment.question.OpenCodeProbeTest}: the probes of the agy and OpenCode CLIs those
+ * values rest on, disabled unless {@code -Dpm.experiment.agy.probe=<step>} or
+ * {@code -Dpm.experiment.opencode.probe=<step>} is set.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionFixtures}: the loop tasks, generated from the corpus cache
  * and the private telemetry scenarios, never written into the repository.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionResults}: the pass criteria of the package, fixed before the
- * first measured run, and the figures per item, host, model and form.</li>
+ * first measured run, the figures per item, host, model and form, and the invocations a result aggregates with
+ * whether they ran at the specified scale.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionLoopExperiment}: the entry that runs one item, disabled
  * unless {@code -Dpm.experiment.question=<item>} is set.</li>
  * </ul>
