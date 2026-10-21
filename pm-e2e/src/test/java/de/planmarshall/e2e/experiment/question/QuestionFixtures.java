@@ -47,7 +47,8 @@ import de.planmarshall.e2e.experiment.question.QuestionStub.TaskSpec;
  * <li>R1 and R2: the probe only. R4: the probe for small work, and for large work only the scenario recipes
  * {@link #LARGE_SCENARIOS}, read at run time and read-only ({@code git show}, {@code git ls-tree}) from
  * {@value #SCENARIOS} of the branch {@code verification/question-items} of a local checkout of
- * {@code cuioss/plan-marshall-telemetry} ({@link #telemetry(Path, String)}); nothing of a recipe is written into this
+ * {@code cuioss/plan-marshall-telemetry} ({@link #telemetry(Path, String)}), by default beside the main checkout
+ * ({@link #siblingRepositories(Path)}); nothing of a recipe is written into this
  * repository. A recipe names the repository and its start commit, the archived plan and its asking task (whose title
  * and description are the worker's task), the reply to deliver, and the corpus item whose {@code input.choices} and
  * {@code target.answer} are the closed check ({@link #scenario(Source, String, Path)}). The worker directory is a new
@@ -395,6 +396,26 @@ final class QuestionFixtures {
             throw new IOException("interrupted: " + String.join(" ", command), e);
         }
         return out;
+    }
+
+    /**
+     * The directory that holds the main checkout of a repository and, beside it, the sibling repositories (the
+     * telemetry checkout, the local clones of the scenarios): the parent of the main checkout, found from the git
+     * common directory, so that a linked worktree (below {@code .plan/local/worktrees/}) resolves the same directory
+     * as the main checkout.
+     *
+     * @param workingTree the main checkout or a linked worktree of the repository
+     * @return the parent of the main checkout
+     * @throws IOException           if git cannot be run
+     * @throws IllegalStateException if git fails, or the common directory has no parent checkout
+     */
+    static Path siblingRepositories(Path workingTree) throws IOException {
+        var common = workingTree.resolve(git(workingTree, "rev-parse", "--git-common-dir").strip()).normalize();
+        var mainCheckout = common.getParent();
+        if (mainCheckout == null || mainCheckout.getParent() == null) {
+            throw new IllegalStateException("no main checkout above the git common directory " + common);
+        }
+        return mainCheckout.getParent();
     }
 
     /**

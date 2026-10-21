@@ -68,15 +68,23 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * only), {@code pm.experiment.model.<host>} (default {@code claude-haiku-4-5} for Claude Code, the harness default
  * otherwise), {@code pm.experiment.runs} (20), {@code pm.experiment.fixtures} (a limit on the fixtures per item, all
  * by default), {@code pm.experiment.parallel} (4), {@code pm.experiment.corpus-cache}
- * ({@code pm-mcp-server/target/corpus-cache}), {@code pm.experiment.telemetry} (the checkout beside this repository),
- * {@code pm.experiment.telemetry.ref} ({@value QuestionFixtures#TELEMETRY_REF}), {@code pm.experiment.clones} (the
- * directory of the local clones, the parent of this repository's checkout), {@code pm.experiment.r4.large-runs} (3),
+ * ({@code pm-mcp-server/target/corpus-cache}), {@code pm.experiment.telemetry} (the checkout beside this repository's
+ * main checkout), {@code pm.experiment.telemetry.ref} ({@value QuestionFixtures#TELEMETRY_REF}),
+ * {@code pm.experiment.clones} (the directory of the local clones, the parent of this repository's main checkout; both
+ * defaults are found from the git common directory, also inside a worktree:
+ * {@link QuestionFixtures#siblingRepositories(Path)}), {@code pm.experiment.r4.large-runs} (3),
  * {@code pm.experiment.workspace} (below the temporary directory, outside the repository),
  * {@code pm.experiment.run-timeout} ({@code PT20M}), {@code pm.experiment.q4.other-host},
  * {@code pm.experiment.q6.quorum-a} and {@code pm.experiment.q6.quorum-b} ({@code <host>:<model>}),
  * {@code pm.experiment.q7.open} ({@code PT1H}), {@code pm.experiment.r1.durations},
- * {@code pm.experiment.r2.ages} (ISO durations, comma-separated), {@code pm.experiment.r2.expired-session}, and the
- * launch settings of {@link QuestionDriver}.
+ * {@code pm.experiment.r2.ages} (ISO durations, comma-separated), {@code pm.experiment.r2.expired-session},
+ * {@code pm.experiment.exe.claude} and {@code pm.experiment.exe.opencode} (the executable's path, else found on the
+ * {@code PATH} or where the host installs itself: {@link QuestionDriver#executable(Host, Map)}), and the launch
+ * settings of {@link QuestionDriver}.
+ * <p>
+ * A worker that exits, or for which {@code pm-exec} reports an error, before its relay connected ends the run at once
+ * as {@code launch_failed}, with the exit code and the first line of its {@code stderr}: a failure of the run, never a
+ * pass and never a timeout ({@link QuestionDriver#launchFailure()}).
  * <p>
  * Antigravity runs without further parameters on the launch verified on 2026-10-21 with agy against the stub
  * ({@link QuestionDriver#AGY_ARGV}, {@link QuestionDriver#AGY_CONFIG}); {@code -Dpm.experiment.agy.argv} (a JSON array
@@ -154,7 +162,10 @@ class QuestionLoopExperiment {
     Path telemetry, String telemetryRef, Path clones, int largeRuns, Path workspace, Path results,
     List<String> exec, Duration runTimeout) {
 
-        static Config load() {
+        static Config load() throws IOException {
+            var telemetry = System.getProperty("pm.experiment.telemetry");
+            var clones = System.getProperty("pm.experiment.clones");
+            var siblings = telemetry == null || clones == null ? QuestionFixtures.siblingRepositories(ROOT) : null;
             var hosts = new ArrayList<Host>();
             for (var name : System.getProperty("pm.experiment.hosts", "claude,opencode,antigravity").split(",")) {
                 hosts.add(Host.of(name));
@@ -173,10 +184,9 @@ class QuestionLoopExperiment {
                     Integer.getInteger("pm.experiment.parallel", 4),
                     Path.of(System.getProperty("pm.experiment.corpus-cache",
                             ROOT.resolve("pm-mcp-server/target/corpus-cache").toString())),
-                    Path.of(System.getProperty("pm.experiment.telemetry",
-                            ROOT.resolveSibling("plan-marshall-telemetry").toString())),
+                    telemetry == null ? siblings.resolve("plan-marshall-telemetry") : Path.of(telemetry),
                     System.getProperty("pm.experiment.telemetry.ref", QuestionFixtures.TELEMETRY_REF),
-                    Path.of(System.getProperty("pm.experiment.clones", ROOT.getParent().toString())),
+                    clones == null ? siblings : Path.of(clones),
                     Integer.getInteger("pm.experiment.r4.large-runs", 3),
                     Path.of(System.getProperty("pm.experiment.workspace",
                             Path.of(System.getProperty("java.io.tmpdir"), "pm-qlv-" + stamp).toString())),
@@ -491,6 +501,7 @@ class QuestionLoopExperiment {
         private final Set<String> seenDecisions = new HashSet<>();
         private final AtomicBoolean running = new AtomicBoolean(true);
         private int generation = 1;
+        private boolean launchFailed;
 
         Session(QuestionDriver driver, RunPlan plan, Config config, ObjectNode record) {
             this.driver = driver;
@@ -514,7 +525,8 @@ class QuestionLoopExperiment {
                 var deadline = System.currentTimeMillis() + config.runTimeout().toMillis()
                         + plan.hold().toMillis() * 4;
                 var rounds = 0;
-                while (!entryDone() && System.currentTimeMillis() < deadline && rounds <= QuestionStub.QUESTION_BOUND) {
+                while (!launchFailed && !entryDone() && System.currentTimeMillis() < deadline
+                        && rounds <= QuestionStub.QUESTION_BOUND) {
                     var asked = nextAsked(deadline);
                     if (asked.isEmpty()) {
                         break;
@@ -536,7 +548,7 @@ class QuestionLoopExperiment {
                     current = continueAfter(asked.get(), current);
                 }
                 awaitEntry(deadline);
-                record.put("timed_out", !entryDone());
+                record.put("timed_out", !launchFailed && !entryDone());
             } finally {
                 running.set(false);
                 for (var helper : helpers) {
@@ -676,6 +688,9 @@ class QuestionLoopExperiment {
          */
         private void negativeResume(Worker current) throws IOException, InterruptedException {
             nextAsked(System.currentTimeMillis() + config.runTimeout().toMillis());
+            if (launchFailed) {
+                return;
+            }
             driver.awaitExit(current, plan.host().silenceLimit());
             var resumed = driver.resumeWithoutTask(current, plan.negative(), ++generation);
             var exit = driver.awaitExit(resumed, config.runTimeout());
@@ -692,11 +707,37 @@ class QuestionLoopExperiment {
         }
 
         private Optional<JsonNode> nextAsked(long deadline) throws IOException, InterruptedException {
-            var asked = driver.awaitEvent(event -> "asked".equals(event.path(EVENT).asText())
+            var asked = driver.awaitEventWhileLaunched(event -> "asked".equals(event.path(EVENT).asText())
                     && !seenDecisions.contains(event.path(DECISION).asText()) || entryDone(), deadline);
+            if (asked.isEmpty() && launchFailed()) {
+                return Optional.empty();
+            }
             asked.filter(event -> "asked".equals(event.path(EVENT).asText()))
                     .ifPresent(event -> seenDecisions.add(event.path(DECISION).asText()));
             return asked.filter(event -> "asked".equals(event.path(EVENT).asText()));
+        }
+
+        /**
+         * Records the run as {@code launch_failed} once a worker failed to launch, with its exit code and the first
+         * line of its {@code stderr}: a failure of the run, never a pass and never a timeout.
+         *
+         * @return whether a worker of the run failed to launch
+         */
+        private boolean launchFailed() throws IOException, InterruptedException {
+            if (!launchFailed) {
+                var failure = driver.launchFailure();
+                if (failure.isPresent()) {
+                    launchFailed = true;
+                    var value = failure.get();
+                    record.put("launch_failed", true);
+                    record.put("launch_worker", value.worker());
+                    record.put("launch_generation", value.generation());
+                    record.put("launch_exit", value.exit());
+                    record.put("launch_stderr", value.stderr());
+                    record.put("error", "launch_failed: exit " + value.exit() + ": " + value.stderr());
+                }
+            }
+            return launchFailed;
         }
 
         /**
@@ -715,8 +756,8 @@ class QuestionLoopExperiment {
             }
         }
 
-        private void awaitEntry(long deadline) throws InterruptedException {
-            while (!entryDone() && System.currentTimeMillis() < deadline) {
+        private void awaitEntry(long deadline) throws IOException, InterruptedException {
+            while (!entryDone() && System.currentTimeMillis() < deadline && !launchFailed()) {
                 Thread.sleep(POLL);
             }
         }

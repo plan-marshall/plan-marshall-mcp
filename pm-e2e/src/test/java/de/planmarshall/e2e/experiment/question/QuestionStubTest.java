@@ -13,9 +13,11 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -26,18 +28,26 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.Fault;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.Launch;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.LaunchFailure;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.Worker;
 import de.planmarshall.e2e.experiment.question.QuestionStub.AnswerResult;
 import de.planmarshall.e2e.experiment.question.QuestionStub.Form;
 import de.planmarshall.e2e.experiment.question.QuestionStub.PartAnswer;
@@ -65,8 +75,12 @@ import org.junit.jupiter.params.provider.CsvSource;
  * reached the bound. Beside the stub: a scenario recipe read into a fixture with an invented check, or another recipe
  * than the two large ones used, so R4 measured work nobody chose; a checkout that changes the local clone; and
  * Antigravity's tokens read as 0 or its missing-session resume, which starts a new conversation, counted as hung or as
- * failed. The recipes and corpus items of these tests are written by the tests; no network, model or real repository
- * is used.
+ * failed. Beside them the launch: Claude Code or OpenCode handed to {@code pm-exec} by a bare name, which it refuses;
+ * a worker that fails to launch noticed only at the run's deadline, or one killed by an injected fault, or one whose
+ * relay connected, counted as a launch failure; and the default telemetry checkout and scenario clones resolved below
+ * a worktree instead of beside the main checkout. The recipes, corpus items, repositories and executables of these
+ * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
+ * real repository is used.
  */
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 @DisplayName("QuestionStub: the question loop of a worker without a model")
@@ -314,6 +328,233 @@ class QuestionStubTest {
     }
 
     @Nested
+    @DisplayName("harness executable")
+    class HarnessExecutable {
+
+        @Test
+        @DisplayName("takes the path the property names, made absolute")
+        void shouldTakeOverride() throws Exception {
+            var claude = script(directory.resolve("override").resolve("claude"), "exit 0");
+
+            var resolved = QuestionDriver.executable(Host.CLAUDE, claude.toString(), "", List.of());
+
+            assertEquals(claude.toAbsolutePath().toString(), resolved);
+        }
+
+        @Test
+        @DisplayName("finds the executable on the PATH and returns its absolute path")
+        void shouldFindOnPath() throws Exception {
+            var bin = directory.resolve("path-bin");
+            var opencode = script(bin.resolve("opencode"), "exit 0");
+
+            var resolved = QuestionDriver.executable(Host.OPENCODE, null,
+                    directory.resolve("empty") + File.pathSeparator + bin, List.of());
+
+            assertEquals(opencode.toAbsolutePath().toString(), resolved);
+        }
+
+        @Test
+        @DisplayName("falls back to the host's known location when the PATH has none")
+        void shouldFallBackToKnownLocation() throws Exception {
+            var known = directory.resolve("known");
+            var claude = script(known.resolve("claude"), "exit 0");
+
+            var resolved = QuestionDriver.executable(Host.CLAUDE, null, directory.toString(), List.of(known));
+
+            assertEquals(claude.toAbsolutePath().toString(), resolved);
+        }
+
+        @Test
+        @DisplayName("stops with the property to set when no executable is found")
+        void shouldStopWhenNotFound() {
+            var path = directory.toString();
+            var known = List.of(directory.resolve("none"));
+
+            var stop = assertThrows(IllegalStateException.class,
+                    () -> QuestionDriver.executable(Host.CLAUDE, null, path, known));
+
+            assertTrue(stop.getMessage().contains("-Dpm.experiment.exe.claude"), stop.getMessage());
+        }
+
+        @Test
+        @DisplayName("stops when the property names a file that is not executable")
+        void shouldStopOnNonExecutableOverride() throws Exception {
+            var file = Files.writeString(directory.resolve("opencode.txt"), "");
+            var override = file.toString();
+
+            var stop = assertThrows(IllegalStateException.class,
+                    () -> QuestionDriver.executable(Host.OPENCODE, override, "", List.of()));
+
+            assertTrue(stop.getMessage().contains("-Dpm.experiment.exe.opencode"), stop.getMessage());
+        }
+    }
+
+    @Nested
+    @DisplayName("worker launch")
+    class WorkerLaunch {
+
+        private static final String PROPERTY = QuestionDriver.EXECUTABLE_PROPERTY + "claude";
+        private static final String PM_EXEC_ERROR = "{\"pm_exec\":\"error\",\"stage\":\"usage\",\"errno\":0,"
+                + "\"message\":\"program needs an absolute path: claude\"}";
+
+        private String previous;
+        private Path claude;
+
+        @BeforeEach
+        void claudeExecutable() throws IOException {
+            claude = script(directory.resolve("bin").resolve("claude"), "exit 0");
+            previous = System.getProperty(PROPERTY);
+            System.setProperty(PROPERTY, claude.toString());
+        }
+
+        @AfterEach
+        void restoreProperty() {
+            if (previous == null) {
+                System.clearProperty(PROPERTY);
+            } else {
+                System.setProperty(PROPERTY, previous);
+            }
+        }
+
+        @Test
+        @DisplayName("hands pm-exec the absolute path of Claude Code that the property names")
+        void shouldLaunchByAbsolutePath() throws Exception {
+            var arguments = directory.resolve("arguments.txt");
+            var exec = script(directory.resolve("pm-exec"), "printf '%s\\n' \"$@\" > '" + arguments + "'");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+
+                var exited = driver.awaitExit(worker, Duration.ofSeconds(30));
+
+                var lines = Files.readAllLines(arguments);
+                assertAll("the launch",
+                        () -> assertTrue(exited.isPresent(), "the fake pm-exec did not exit"),
+                        () -> assertEquals(claude.toAbsolutePath().toString(), lines.get(lines.indexOf("--") + 1),
+                                lines.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("fails a worker that exits before its first event at once, with its exit and stderr line")
+        void shouldFailExitedWorkerAtOnce() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_ERROR + "' >&2\nexit 2");
+            try (var driver = driver(exec)) {
+                launch(driver);
+                var deadline = System.currentTimeMillis() + Duration.ofMinutes(20).toMillis();
+
+                var asked = assertTimeoutPreemptively(Duration.ofSeconds(30),
+                        () -> driver.awaitEventWhileLaunched(event -> "asked".equals(event.path("event").asText()),
+                                deadline));
+
+                var failure = driver.launchFailure();
+                assertAll("the launch failure",
+                        () -> assertTrue(asked.isEmpty()),
+                        () -> assertEquals(Optional.of(new LaunchFailure(WORKER, 1, 2, PM_EXEC_ERROR)), failure),
+                        () -> assertTrue(Files.readString(driver.stub().events())
+                                .contains("\"event\":\"launch_failed\""), "no launch_failed event"));
+            }
+        }
+
+        @Test
+        @DisplayName("ends a worker that still runs after pm-exec reported an error, and fails it")
+        void shouldEndRunningWorkerWithError() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_ERROR + "' >&2\nexec sleep 30");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                var deadline = System.currentTimeMillis() + Duration.ofMinutes(20).toMillis();
+
+                assertTimeoutPreemptively(Duration.ofSeconds(30),
+                        () -> driver.awaitEventWhileLaunched(event -> false, deadline));
+
+                var failure = driver.launchFailure();
+                assertAll("the ended worker",
+                        () -> assertFalse(worker.process().isAlive()),
+                        () -> assertEquals(Optional.of(PM_EXEC_ERROR), failure.map(LaunchFailure::stderr)));
+            }
+        }
+
+        @Test
+        @DisplayName("a worker that still runs without an error has not failed to launch")
+        void shouldNotFailRunningWorker() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "exec sleep 30");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+
+                var failure = driver.launchFailure();
+
+                assertAll("the running worker",
+                        () -> assertTrue(worker.process().isAlive()),
+                        () -> assertEquals(Optional.empty(), failure));
+            }
+        }
+
+        @Test
+        @DisplayName("a worker whose relay connected before it exited has not failed to launch")
+        void shouldNotFailConnectedWorker() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "exit 1");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+
+                var failure = driver.launchFailure();
+
+                assertEquals(Optional.empty(), failure);
+            }
+        }
+
+        @Test
+        @DisplayName("a worker killed by an injected fault has not failed to launch")
+        void shouldNotFailFaultedWorker() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "exec sleep 30");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                driver.inject(worker, Fault.KILL);
+                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+
+                var failure = driver.launchFailure();
+
+                assertEquals(Optional.empty(), failure);
+            }
+        }
+
+        private QuestionDriver driver(Path exec) throws IOException {
+            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(Duration.ofMillis(300));
+            return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
+                    directory.resolve("workers"), directory.resolve("run"), List.of(exec.toString())));
+        }
+
+        private static Worker launch(QuestionDriver driver) throws IOException {
+            return driver.startFresh(task(Form.FALLBACK), new Launch(WORKER, 1, ROLE, "Do it.", false, null,
+                    List.of(), null));
+        }
+    }
+
+    @Nested
+    @DisplayName("default paths")
+    class DefaultPaths {
+
+        @Test
+        @DisplayName("resolve the sibling repositories to the main checkout's parent, also from a worktree")
+        void shouldResolveSiblingsFromWorktree() throws Exception {
+            var siblings = Files.createDirectories(directory.resolve("git"));
+            var main = Files.createDirectories(siblings.resolve("plan-marshall-mcp"));
+            QuestionFixtures.git(null, "init", "--quiet", main.toString());
+            commit(main, "one");
+            var worktree = main.resolve(".plan/local/worktrees/feature");
+            Files.createDirectories(worktree.getParent());
+            QuestionFixtures.git(main, "worktree", "add", "--quiet", "--detach", worktree.toString());
+
+            var fromMain = QuestionFixtures.siblingRepositories(main);
+            var fromWorktree = QuestionFixtures.siblingRepositories(worktree);
+
+            assertAll("the sibling repositories",
+                    () -> assertEquals(siblings.toRealPath(), fromMain.toRealPath()),
+                    () -> assertEquals(siblings.toRealPath(), fromWorktree.toRealPath()));
+        }
+    }
+
+    @Nested
     @DisplayName("scenario recipes")
     class ScenarioRecipes {
 
@@ -468,14 +709,6 @@ class QuestionStubTest {
             Files.createDirectories(file.getParent());
             Files.writeString(file, QuestionStub.JSON.writeValueAsString(content));
         }
-
-        private static String commit(Path repository, String content) throws IOException {
-            Files.writeString(repository.resolve("file.txt"), content);
-            QuestionFixtures.git(repository, "add", "file.txt");
-            QuestionFixtures.git(repository, "-c", "user.name=test", "-c", "user.email=test@example.org", "-c",
-                    "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", content);
-            return QuestionFixtures.git(repository, "rev-parse", "HEAD").strip();
-        }
     }
 
     @Nested
@@ -556,6 +789,22 @@ class QuestionStubTest {
                 return entries.map(entry -> entry.getFileName().toString()).sorted().toList();
             }
         }
+    }
+
+    private static String commit(Path repository, String content) throws IOException {
+        Files.writeString(repository.resolve("file.txt"), content);
+        QuestionFixtures.git(repository, "add", "file.txt");
+        QuestionFixtures.git(repository, "-c", "user.name=test", "-c", "user.email=test@example.org", "-c",
+                "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", content);
+        return QuestionFixtures.git(repository, "rev-parse", "HEAD").strip();
+    }
+
+    /** Writes a shell script and makes it executable: a fake {@code pm-exec} or harness, never a real one. */
+    private static Path script(Path file, String body) throws IOException {
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "#!/bin/sh\n" + body + "\n");
+        Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rwx------"));
+        return file;
     }
 
     private QuestionStub start(int questionBound) throws IOException {

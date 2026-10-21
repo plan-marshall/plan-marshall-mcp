@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -82,6 +83,16 @@ final class QuestionDriver implements AutoCloseable {
      */
     static final String AGY_CONFIG = ".agents/plugins/pm-question-stub/mcp_config.json";
 
+    /**
+     * The prefix of the property that names a host's executable by its path ({@code pm.experiment.exe.claude},
+     * {@code pm.experiment.exe.opencode}); {@code pm-exec} runs a program by its absolute path only.
+     */
+    static final String EXECUTABLE_PROPERTY = "pm.experiment.exe.";
+
+    /** The event the stub logs when a generation's relay connects: the first event the generation causes itself. */
+    static final String CONNECTED = "connected";
+
+    private static final String FAULT_INJECTED = "fault_injected";
     private static final Duration TERMINATION_GRACE = Duration.ofSeconds(10);
     private static final Duration POLL = Duration.ofMillis(100);
     private static final boolean LINUX = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("linux");
@@ -236,10 +247,24 @@ final class QuestionDriver implements AutoCloseable {
         }
     }
 
+    /**
+     * A worker generation that failed to launch: its process exited, or {@code pm-exec} reported an error, before the
+     * stub saw its relay connect.
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param exit       the exit code of its process
+     * @param stderr     the first line it wrote to {@code stderr}, empty when none
+     */
+    record LaunchFailure(String worker, int generation, int exit, String stderr) {
+    }
+
     private final QuestionStub.Settings stubSettings;
     private final Settings settings;
     private final boolean ownsStub;
     private final List<Worker> workers = new CopyOnWriteArrayList<>();
+    private final List<QuestionDriver> siblings = new CopyOnWriteArrayList<>();
+    private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
     private volatile QuestionStub stub;
 
     private QuestionDriver(QuestionStub.Settings stubSettings, Settings settings, QuestionStub stub,
@@ -252,15 +277,17 @@ final class QuestionDriver implements AutoCloseable {
 
     /**
      * A driver of another host on the same stub, for a continuation or a vote on another harness; closing it ends
-     * its workers and leaves the stub running.
+     * its workers and leaves the stub running. Its workers count in {@link #launchFailure()} of this driver.
      *
      * @param host  the host
      * @param model its model, {@code null} for the harness default
      * @return the sibling driver
      */
     QuestionDriver sibling(Host host, String model) {
-        return new QuestionDriver(stubSettings, new Settings(host, model, settings.workspace(), settings.runDir(),
-                settings.exec()), stub, false);
+        var sibling = new QuestionDriver(stubSettings, new Settings(host, model, settings.workspace(),
+                settings.runDir(), settings.exec()), stub, false);
+        siblings.add(sibling);
+        return sibling;
     }
 
     /**
@@ -457,7 +484,7 @@ final class QuestionDriver implements AutoCloseable {
     void inject(Worker worker, Fault fault) {
         var fields = identity(worker);
         fields.put("fault", fault.name());
-        stub.event("fault_injected", fields);
+        stub.event(FAULT_INJECTED, fields);
         switch (fault) {
             case STOP_BEFORE_ANSWER, MODEL_HANG -> signal(worker, "STOP");
             case KILL, RESUMED_EXIT -> {
@@ -584,6 +611,87 @@ final class QuestionDriver implements AutoCloseable {
             }
             Thread.sleep(POLL);
         }
+    }
+
+    /**
+     * Waits for an event of the stub's log as {@link #awaitEvent(Predicate, long)} does, but ends the wait at once
+     * when a worker of this driver or of a sibling failed to launch ({@link #launchFailure()}), instead of at the
+     * deadline.
+     *
+     * @param match       the event
+     * @param untilMillis the deadline (epoch milliseconds)
+     * @return the first matching event, empty at the deadline or on a launch failure
+     * @throws IOException          if the log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    Optional<JsonNode> awaitEventWhileLaunched(Predicate<JsonNode> match, long untilMillis)
+            throws IOException, InterruptedException {
+        while (true) {
+            var found = awaitEvent(match, 0);
+            if (found.isPresent() || launchFailure().isPresent() || System.currentTimeMillis() >= untilMillis) {
+                return found;
+            }
+            Thread.sleep(POLL);
+        }
+    }
+
+    /**
+     * @return the first worker of this driver or of its siblings that failed to launch, empty when none did
+     * @throws IOException          if the event log or a worker's output cannot be read
+     * @throws InterruptedException if interrupted while a worker is ended
+     */
+    Optional<LaunchFailure> launchFailure() throws IOException, InterruptedException {
+        for (var worker : workers) {
+            var failure = launchFailure(worker);
+            if (failure.isPresent()) {
+                return failure;
+            }
+        }
+        for (var sibling : siblings) {
+            var failure = sibling.launchFailure();
+            if (failure.isPresent()) {
+                return failure;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a worker failed to launch: its process exited, or {@code pm-exec} reported an error line, before the
+     * stub saw its relay connect ({@value #CONNECTED}). A worker into which a fault was injected has not failed to
+     * launch. A worker that still runs after {@code pm-exec} reported an error is ended. The first detection is logged
+     * as the event {@code launch_failed}.
+     *
+     * @param worker a worker
+     * @return its launch failure, empty when it launched or still may
+     * @throws IOException          if the event log or the worker's output cannot be read
+     * @throws InterruptedException if interrupted while the worker is ended
+     */
+    Optional<LaunchFailure> launchFailure(Worker worker) throws IOException, InterruptedException {
+        var key = worker.id() + "#" + worker.generation();
+        var known = launchFailures.get(key);
+        if (known != null) {
+            return Optional.of(known);
+        }
+        var alive = worker.process().isAlive();
+        var stderr = stderr(worker);
+        var reported = stderr.lines().anyMatch(QuestionDriver::pmExecError) || outputLines(worker.output()).stream()
+                .anyMatch(line -> "error".equals(line.path("pm_exec").asText()));
+        if (alive && !reported || sawEvent(worker, CONNECTED) || sawEvent(worker, FAULT_INJECTED)) {
+            return Optional.empty();
+        }
+        if (alive) {
+            terminate(worker);
+        }
+        var failure = new LaunchFailure(worker.id(), worker.generation(), worker.process().waitFor(),
+                stderr.lines().filter(line -> !line.isBlank()).findFirst().orElse(""));
+        if (launchFailures.putIfAbsent(key, failure) == null) {
+            var fields = identity(worker);
+            fields.put("exit", failure.exit());
+            fields.put("stderr", failure.stderr());
+            stub.event("launch_failed", fields);
+        }
+        return Optional.of(launchFailures.get(key));
     }
 
     /**
@@ -747,7 +855,8 @@ final class QuestionDriver implements AutoCloseable {
                 var allowed = new ArrayList<String>();
                 stubTools.forEach(tool -> allowed.add("mcp__" + QuestionStub.SERVER + "__" + tool));
                 allowed.addAll(launch.workTools());
-                command.addAll(List.of(host.executable(), "-p", launch.prompt(), "--mcp-config", config.toString(),
+                command.addAll(List.of(executable(host, environment), "-p", launch.prompt(), "--mcp-config",
+                        config.toString(),
                         "--strict-mcp-config", "--allowedTools", String.join(",", allowed), "--disallowedTools",
                         host.questionTool(), "--output-format", "stream-json", "--verbose"));
                 if (!launch.resumable()) {
@@ -762,7 +871,8 @@ final class QuestionDriver implements AutoCloseable {
             }
             case OPENCODE -> {
                 Files.writeString(directory.resolve("opencode.json"), opencodeConfig(relay, launch));
-                command.addAll(List.of(host.executable(), "run", "--format", "json", "--agent", "pull-worker"));
+                command.addAll(List.of(executable(host, environment), "run", "--format", "json", "--agent",
+                        "pull-worker"));
                 if (settings.model() != null) {
                     command.addAll(List.of("-m", settings.model()));
                 }
@@ -851,6 +961,67 @@ final class QuestionDriver implements AutoCloseable {
             }
         }
         return command;
+    }
+
+    /**
+     * The executable of Claude Code or OpenCode by its absolute path, as {@code pm-exec} requires it:
+     * {@code -Dpm.experiment.exe.<host>}, else the first match on the worker's {@code PATH}, else the host's known
+     * location ({@link #knownLocations(Host)}).
+     *
+     * @param host        the host
+     * @param environment the worker's environment, whose {@code PATH} is searched
+     * @return the absolute path
+     * @throws IllegalStateException if the property names no executable file, or none is found
+     */
+    static String executable(Host host, Map<String, String> environment) {
+        return executable(host, System.getProperty(EXECUTABLE_PROPERTY + host.executable()),
+                environment.getOrDefault("PATH", ""), knownLocations(host));
+    }
+
+    /**
+     * @param host           the host
+     * @param override       the path the property names, {@code null} for none
+     * @param searchPath     the {@code PATH} to search
+     * @param knownLocations the directories searched after it
+     * @return the absolute path of the host's executable
+     * @throws IllegalStateException if the override names no executable file, or none is found
+     */
+    static String executable(Host host, String override, String searchPath, List<Path> knownLocations) {
+        var property = "-D" + EXECUTABLE_PROPERTY + host.executable();
+        if (override != null) {
+            var path = Path.of(override).toAbsolutePath();
+            if (!Files.isRegularFile(path) || !Files.isExecutable(path)) {
+                throw new IllegalStateException(property + " names no executable file: " + path);
+            }
+            return path.toString();
+        }
+        var directories = new ArrayList<Path>();
+        for (var entry : searchPath.split(File.pathSeparator)) {
+            if (!entry.isEmpty()) {
+                directories.add(Path.of(entry));
+            }
+        }
+        directories.addAll(knownLocations);
+        for (var directory : directories) {
+            var candidate = directory.resolve(host.executable()).toAbsolutePath();
+            if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
+                return candidate.toString();
+            }
+        }
+        throw new IllegalStateException(host.executable() + " not found on the PATH or in " + knownLocations
+                + ": set " + property + " to its absolute path");
+    }
+
+    /**
+     * @param host a host
+     * @return where the host installs itself: {@code ~/.local/bin} for Claude Code and Antigravity,
+     *         {@code /opt/homebrew/bin} for OpenCode
+     */
+    static List<Path> knownLocations(Host host) {
+        return switch (host) {
+            case CLAUDE, ANTIGRAVITY -> List.of(Path.of(System.getProperty("user.home"), ".local", "bin"));
+            case OPENCODE -> List.of(Path.of("/opt/homebrew/bin"));
+        };
     }
 
     /** @return {@code agy} from the worker's {@code PATH}, else {@code ~/.local/bin/agy}, where it installs itself */
@@ -966,6 +1137,24 @@ final class QuestionDriver implements AutoCloseable {
             Thread.sleep(POLL);
         }
         return true;
+    }
+
+    private boolean sawEvent(Worker worker, String name) throws IOException {
+        for (var event : QuestionResults.readJsonLines(stub.events())) {
+            if (name.equals(event.path(EVENT).asText()) && matches(event, worker)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** @return whether a line is {@code pm-exec}'s report of an error ({@code {"pm_exec":"error",...}}) */
+    static boolean pmExecError(String line) {
+        try {
+            return "error".equals(QuestionStub.JSON.readTree(line).path("pm_exec").asText());
+        } catch (JsonProcessingException _) {
+            return false;
+        }
     }
 
     private static boolean matches(JsonNode event, Worker worker) {
