@@ -133,6 +133,8 @@ final class QuestionDriver implements AutoCloseable {
     private static final String WORKER = "worker";
     private static final String GENERATION = "generation";
     private static final String EVENT = "event";
+    private static final String DECISION = "decision";
+    private static final String TASK = "task";
 
     /**
      * The hosts of the measurement with the per-host values of their client profiles (PM-CLIENT-2).
@@ -654,7 +656,8 @@ final class QuestionDriver implements AutoCloseable {
      * a decision its quorum decided ({@code adjudicated} {@code decided}, answered with {@code channel: quorum}) is
      * taken as it is, without waiting for an operator, and logged as {@value #QUORUM_ANSWER_TAKEN}. Either way the
      * caller continues the task the same way afterwards (hold, resume, or the fallback task with
-     * {@code facts.answers}). A quorum that escalates (a disagreement, a confidence below the score, a missing vote)
+     * {@code facts.answers}), and starts no generation for a continuation the asking worker already took and closed
+     * over its held {@code pm_wait} ({@link #continuedByHold(String)}). A quorum that escalates (a disagreement, a confidence below the score, a missing vote)
      * delivers the decision to the operator, who answers it. The wait ends early, empty, when a worker of this driver
      * or of a sibling failed to launch, ended early, or met a quota error ({@link #awaitEventWhileLaunched}).
      *
@@ -689,6 +692,108 @@ final class QuestionDriver implements AutoCloseable {
 
     /** The event the driver logs when it takes a decision its quorum answered, without an operator. */
     static final String QUORUM_ANSWER_TAKEN = "quorum_answer_taken";
+
+    /**
+     * The event the driver logs, and the field of a run record, when the continuation of an answered decision was
+     * taken and closed by the asking worker over its held {@code pm_wait} before the driver would start a generation
+     * for it ({@link #continuedByHold(String)}): no new generation is started then.
+     */
+    static final String CONTINUED_BY_HOLD = "continued_by_hold";
+
+    /**
+     * A continuation made by hold within the decision: the stub continued the answered decision in a new task, offered
+     * that task over {@code pm_wait} to a generation of the asking worker that still held it, and that generation
+     * closed it before the driver started a generation for it. It happens in a vote run, where the quorum decides
+     * while the asker still holds {@code pm_wait} (established on the second Q6 attempt, run
+     * {@code Q6-claude-fresh-question_apply-answer_he-0-000-4efb702b}: the driver then started generation 2 on the
+     * closed task, which the stub refused, and the run waited out its limit). In the operator path the asker has
+     * exited before the decision is answered, so the continuation is still queued.
+     *
+     * @param decision    the answered decision
+     * @param task        the continuing task
+     * @param worker      the asking worker
+     * @param generation  the generation that took and closed it: the one that asked or a later one
+     * @param outcome     the outcome it closed with ({@code submitted}, or {@code asked} for a further question)
+     * @param closedAt    when it closed (epoch milliseconds)
+     * @param submittedAt when that generation submitted it (epoch milliseconds), {@code -1} without a submission
+     * @param channel     the channel the decision was answered through ({@code quorum} or {@code cli}), empty when
+     *                    the log does not say
+     */
+    record HeldContinuation(String decision, String task, String worker, int generation, String outcome,
+    long closedAt, long submittedAt, String channel) {
+    }
+
+    /**
+     * Whether the continuation of an answered decision was made by hold ({@link HeldContinuation}), read from the
+     * stub's event log, and if so logs it as {@value #CONTINUED_BY_HOLD}. The caller starts no new generation for such
+     * a continuation: the asking worker has continued and closed it.
+     *
+     * @param decisionId the answered decision
+     * @return the continuation made by hold, empty when the stub did not continue the decision in a new task or the
+     *         asking worker did not take and close that task over {@code pm_wait}
+     * @throws IOException if the event log cannot be read
+     */
+    Optional<HeldContinuation> continuedByHold(String decisionId) throws IOException {
+        var held = heldContinuation(QuestionResults.readJsonLines(stub.events()), decisionId);
+        if (held.isPresent()) {
+            var value = held.get();
+            var fields = new LinkedHashMap<String, Object>();
+            fields.put(DECISION, value.decision());
+            fields.put(TASK, value.task());
+            fields.put(WORKER, value.worker());
+            fields.put(GENERATION, value.generation());
+            fields.put("outcome", value.outcome());
+            fields.put("closed_at", value.closedAt());
+            fields.put("submitted_at", value.submittedAt());
+            fields.put("channel", value.channel());
+            stub.event(CONTINUED_BY_HOLD, fields);
+        }
+        return held;
+    }
+
+    /**
+     * The rule of {@link #continuedByHold(String)} over an event log: the decision was asked by a generation of a
+     * worker ({@value #ASKED}), the stub continued it in a new task ({@code continued}), that task was offered over
+     * {@code pm_wait} ({@code offered} without {@code at_spawn}) to a generation of the asking worker no older than
+     * the one that asked, and that generation closed it ({@code closed}, whatever its outcome).
+     *
+     * @param events     the stub's event log
+     * @param decisionId the answered decision
+     * @return the continuation made by hold, empty otherwise
+     */
+    static Optional<HeldContinuation> heldContinuation(List<JsonNode> events, String decisionId) {
+        var asked = first(events, ASKED, event -> decisionId.equals(event.path(DECISION).asText()));
+        var continued = first(events, "continued", event -> decisionId.equals(event.path(DECISION).asText()));
+        if (asked.isEmpty() || continued.isEmpty()) {
+            return Optional.empty();
+        }
+        var worker = asked.get().path(WORKER).asText();
+        var askedIn = asked.get().path(GENERATION).asInt();
+        var task = continued.get().path(TASK).asText();
+        var closed = first(events, "closed", event -> task.equals(event.path(TASK).asText())
+                && worker.equals(event.path(WORKER).asText()) && event.path(GENERATION).asInt() >= askedIn);
+        if (closed.isEmpty()) {
+            return Optional.empty();
+        }
+        var generation = closed.get().path(GENERATION).asInt();
+        var overWait = first(events, "offered", event -> task.equals(event.path(TASK).asText())
+                && worker.equals(event.path(WORKER).asText()) && event.path(GENERATION).asInt() == generation
+                && !event.path("at_spawn").asBoolean());
+        if (overWait.isEmpty()) {
+            return Optional.empty();
+        }
+        var submittedAt = first(events, "submitted", event -> task.equals(event.path(TASK).asText())
+                && worker.equals(event.path(WORKER).asText()) && event.path(GENERATION).asInt() == generation)
+                .map(event -> event.path("at").asLong()).orElse(-1L);
+        var channel = first(events, "answer_recorded", event -> decisionId.equals(event.path(DECISION).asText()))
+                .map(event -> event.path("channel").asText()).orElse("");
+        return Optional.of(new HeldContinuation(decisionId, task, worker, generation,
+                closed.get().path("outcome").asText(), closed.get().path("at").asLong(), submittedAt, channel));
+    }
+
+    private static Optional<JsonNode> first(List<JsonNode> events, String name, Predicate<JsonNode> match) {
+        return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).filter(match).findFirst();
+    }
 
     /**
      * Takes the next decision delivered to the operator, holds it, and answers it; the operator's path of

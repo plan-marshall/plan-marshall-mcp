@@ -404,6 +404,7 @@ final class QuestionResults {
         limitOfRunLimits(result, runs, contributing);
         limitOfEarlyExitsWaitedOut(result, runs);
         limitOfContinuationEarlyExits(result, runs);
+        limitOfContinuationsByHold(result, runs);
         limitOfQuotaErrors(result, runs);
         limitOfReidentifiedGenerations(result, runs);
         switch (item) {
@@ -875,6 +876,37 @@ final class QuestionResults {
                 : VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT + " is the verdict without them, an additional figure, "
                         + "where it reads differently: " + String.join("; ", differing) + ".");
         limit(result, text.toString());
+    }
+
+    /**
+     * Adds a limit naming the runs whose continuation was made by hold within the decision
+     * ({@value QuestionDriver#CONTINUED_BY_HOLD} in the run record, {@link QuestionDriver#continuedByHold(String)}):
+     * the asking worker took the continuing task over its held {@code pm_wait} and closed it before the driver would
+     * have started a generation for it, so none was started. The limit states how such a run is counted; the verdict
+     * logic is unchanged.
+     *
+     * @param result the result
+     * @param runs   its run records
+     */
+    static void limitOfContinuationsByHold(ObjectNode result, List<JsonNode> runs) {
+        var affected = new TreeMap<String, List<String>>();
+        for (var run : runs) {
+            if (run.path(QuestionDriver.CONTINUED_BY_HOLD).asBoolean()) {
+                affected.computeIfAbsent(run.path(HOST).asText(), _ -> new ArrayList<>()).add(runId(run));
+            }
+        }
+        if (affected.isEmpty()) {
+            return;
+        }
+        limit(result, "In these runs the decision was answered while the asking worker still held pm_wait (in a vote "
+                + "run the quorum decided before the asker ended its turn), and the stub offered the continuing task "
+                + "to that generation within the hold; it took the task and closed it before the driver took the "
+                + "answer. The driver started no new generation for it and recorded it as " + QuestionDriver.CONTINUED_BY_HOLD
+                + ", with the generation and the times of the close and the submission. Such a run counts as a "
+                + "continuation by hold: in continued and, with its submission, in submitted, from the stub's events "
+                + "as every run; it ends when its entry is done, a hold still kept being ended with wait: end, and "
+                + "not at its run limit. The verdict logic is unchanged and reads it as any other run: "
+                + namedRuns(affected) + ".");
     }
 
     private static String namedRuns(Map<String, List<String>> perHost) {

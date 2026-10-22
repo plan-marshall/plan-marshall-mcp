@@ -108,6 +108,12 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * taken as answered at once, without an operator, and the task continues with the decided answer as after an
  * operator's answer (hold, resume, or the fallback task with {@code facts.answers}); a set the quorum escalates reaches
  * the operator and is answered so. The consult runs of Q6 have no quorum, and their questions take the operator's path.
+ * When the quorum decides while the asker still holds {@code pm_wait}, the stub offers the continuing task to that
+ * generation within the hold; once the asker has taken and closed it, the driver starts no new generation for it
+ * ({@link QuestionDriver#continuedByHold(String)}): the run records the continuation as made by hold
+ * ({@value QuestionDriver#CONTINUED_BY_HOLD}), counts it as continued and submitted as any continuation by hold, and
+ * ends when its entry is done, a hold still kept being ended with {@code wait: end}. A decision that comes after the
+ * asker exited leaves the continuation queued, and a new generation takes it as before.
  * Each vote task gets one voter, never restarted, and is never offered again: a voter that exits without a vote closes
  * its vote task {@code lost} at once, and the set escalates with {@code role_unavailable}, the decision rule of the
  * specification (a missing vote never counts as agreement). A voter that connected and exited without a single call is
@@ -1028,7 +1034,15 @@ class QuestionLoopExperiment {
             return continuation(decision, current);
         }
 
-        /** Starts a fresh generation of the asking worker on the task that continues the decision. */
+        /**
+         * Starts a fresh generation of the asking worker on the task that continues the decision, unless the asking
+         * worker already took that task over its held {@code pm_wait} and closed it
+         * ({@link QuestionDriver#continuedByHold(String)}): then no generation is started, the run records the
+         * continuation made by hold ({@link #recordContinuedByHold}), and the run goes on as after any continuation
+         * by hold: it ends once its entry is done (a further ask of the continuation is the next round), never at its
+         * run limit for want of a generation, and a hold the worker still keeps is ended with {@code wait: end}
+         * ({@link #endWarm()}).
+         */
         private Worker continuation(String decision, Worker current) throws IOException, InterruptedException {
             var continued = driver.awaitEvent(event -> "continued".equals(event.path(EVENT).asText())
                     && decision.equals(event.path(DECISION).asText()), System.currentTimeMillis()
@@ -1036,11 +1050,38 @@ class QuestionLoopExperiment {
             if (continued.isEmpty()) {
                 return current;
             }
+            var held = driver.continuedByHold(decision);
+            if (held.isPresent()) {
+                recordContinuedByHold(held.get());
+                return current;
+            }
             var host = plan.continueHost() == null ? plan.host() : plan.continueHost();
             var target = host == plan.host() ? driver : sibling(host);
             var launch = launch(current.id(), ++generation, ROLE, host, null);
             return target.startLeased(continued.get().path("task").asText(),
                     continued.get().path("entity").asText(), launch);
+        }
+
+        /**
+         * Records the first continuation made by hold of the run ({@value QuestionDriver#CONTINUED_BY_HOLD}) with its
+         * task, the generation that took and closed it, its outcome, the times of its close and of its submission
+         * ({@code -1} without one, epoch milliseconds), and the channel of the answer. The run counts in
+         * {@code continued} and {@code submitted} from the stub's events as any continuation by hold does.
+         */
+        private void recordContinuedByHold(QuestionDriver.HeldContinuation held) {
+            var field = QuestionDriver.CONTINUED_BY_HOLD;
+            if (record.has(field)) {
+                return;
+            }
+            record.put(field, true);
+            record.put(field + "_decision", held.decision());
+            record.put(field + "_task", held.task());
+            record.put(field + "_worker", held.worker());
+            record.put(field + "_generation", held.generation());
+            record.put(field + "_outcome", held.outcome());
+            record.put(field + "_closed_at", held.closedAt());
+            record.put(field + "_submitted_at", held.submittedAt());
+            record.put(field + "_channel", held.channel());
         }
 
         /**

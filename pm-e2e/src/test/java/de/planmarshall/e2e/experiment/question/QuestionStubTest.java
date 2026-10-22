@@ -96,7 +96,9 @@ import org.junit.jupiter.params.provider.CsvSource;
  * which starts a session under the named id, counted as an exit without failure; and a result that does not record the
  * fixture wording or the OpenCode departure. Beside them Q3's figures: a silence-limit wait reported as the time to the
  * end of the turn instead of the time to the next {@code pm_wait}, and a harness's quota error waited out and counted
- * as a timeout or an early exit. The recipes, corpus items, repositories and executables of these
+ * as a timeout or an early exit. Beside them Q6's vote runs: a continuation that the asker, still holding
+ * {@code pm_wait} when the quorum decided, already took and submitted, given to a new generation that the stub refuses,
+ * so the run waited out its limit. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used.
  */
@@ -559,8 +561,121 @@ class QuestionStubTest {
                     List.of(script(directory.resolve("pm-exec"), exec).toString())));
         }
 
+        @Test
+        @DisplayName("starts no generation for a continuation the holding asker took and submitted before the quorum's "
+                + "answer was taken, and records it as continued by hold")
+        void shouldNotStartGenerationForContinuationSubmittedByHold() throws Exception {
+            try (var driver = driver(QUORUMS, "exit 0")) {
+                var asker = ask(driver);
+                vote(driver, VOTE_A, "quorum-a");
+                vote(driver, VOTE_B, "quorum-b");
+                var offered = asker.call("pm_wait", QuestionStub.JSON.createObjectNode());
+                asker.link("ack", QuestionStub.JSON.createObjectNode());
+                var submitted = asker.link("submit", submission());
+                var answered = assertTimeoutPreemptively(Duration.ofSeconds(10),
+                        () -> driver.awaitAnswer("Q-001", Duration.ofMinutes(15), Duration.ZERO, decision -> {
+                            throw new IllegalStateException("the operator was asked");
+                        }));
+
+                var held = driver.continuedByHold("Q-001");
+
+                var ended = endHold(driver, asker);
+                var events = Files.readString(driver.stub().events());
+                assertAll("the continuation by hold",
+                        () -> assertEquals(Optional.of("Q-001"), answered),
+                        () -> assertTrue(offered.contains("state: task.offered"), offered),
+                        () -> assertTrue(submitted.contains("state: entity.completed"), submitted),
+                        () -> assertTrue(held.isPresent(), events),
+                        () -> assertEquals("T-1-Q-001", held.orElseThrow().task()),
+                        () -> assertEquals(WORKER, held.orElseThrow().worker()),
+                        () -> assertEquals(1, held.orElseThrow().generation()),
+                        () -> assertEquals("submitted", held.orElseThrow().outcome()),
+                        () -> assertTrue(held.orElseThrow().submittedAt() > 0, held.toString()),
+                        () -> assertTrue(held.orElseThrow().closedAt() >= held.orElseThrow().submittedAt(),
+                                held.toString()),
+                        () -> assertEquals("quorum", held.orElseThrow().channel()),
+                        () -> assertEquals(List.of(), driver.workers(), "a generation was started"),
+                        () -> assertEquals(Optional.of("entity.completed"), driver.stub().state("T-1-Q-001")),
+                        () -> assertEquals(Optional.of("task.asked"), driver.stub().state(TASK)),
+                        () -> assertTrue(events.contains("\"event\":\"" + QuestionDriver.CONTINUED_BY_HOLD + "\""),
+                                "no continued_by_hold event"),
+                        () -> assertEquals("wait: end", ended.strip()));
+            }
+        }
+
+        @Test
+        @DisplayName("a quorum that decides after the asker exited leaves the continuation queued, and a new generation "
+                + "takes it as before")
+        void shouldStartGenerationAfterLateQuorumDecision() throws Exception {
+            try (var driver = driver(QUORUMS, "exit 0")) {
+                ask(driver).close();
+                vote(driver, VOTE_A, "quorum-a");
+                vote(driver, VOTE_B, "quorum-b");
+                assertEquals(Optional.of("Q-001"), assertTimeoutPreemptively(Duration.ofSeconds(10),
+                        () -> driver.awaitAnswer("Q-001", Duration.ofMinutes(15), Duration.ZERO, decision -> {
+                            throw new IllegalStateException("the operator was asked");
+                        })));
+
+                var held = driver.continuedByHold("Q-001");
+                var queued = driver.stub().state("T-1-Q-001");
+                var continuation = driver.startLeased("T-1-Q-001", TASK, new Launch(WORKER, 2, ROLE, "Do it.",
+                        false, null, List.of(), null));
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                assertAll("the late decision",
+                        () -> assertEquals(Optional.empty(), held),
+                        () -> assertEquals(Optional.of("task.queued"), queued),
+                        () -> assertEquals(2, continuation.generation()),
+                        () -> assertEquals(List.of(continuation), driver.workers()),
+                        () -> assertTrue(events.stream().anyMatch(event -> "offered".equals(
+                                event.path("event").asText()) && "T-1-Q-001".equals(event.path("task").asText())
+                                && event.path("generation").asInt() == 2 && event.path("at_spawn").asBoolean()),
+                                events.toString()),
+                        () -> assertTrue(events.stream().noneMatch(event -> QuestionDriver.CONTINUED_BY_HOLD
+                                .equals(event.path("event").asText())), events.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("the operator's path of the consult runs is unchanged: a continuation still queued, or taken and "
+                + "not closed, is no continuation by hold")
+        void shouldKeepOperatorPathWithoutContinuationByHold() throws Exception {
+            try (var driver = driver(Map.of(), "exit 0")) {
+                var asker = ask(driver);
+                assertEquals(Optional.of("Q-001"), assertTimeoutPreemptively(Duration.ofSeconds(10),
+                        () -> driver.awaitAnswer("Q-001", Duration.ofMinutes(15), Duration.ZERO,
+                                decision -> List.of(answer("Q-001")))));
+
+                var whileQueued = driver.continuedByHold("Q-001");
+                asker.call("pm_wait", QuestionStub.JSON.createObjectNode());
+                asker.link("ack", QuestionStub.JSON.createObjectNode());
+                var whileActive = driver.continuedByHold("Q-001");
+
+                var events = Files.readString(driver.stub().events());
+                assertAll("the operator's path",
+                        () -> assertEquals(Optional.empty(), whileQueued),
+                        () -> assertEquals(Optional.empty(), whileActive),
+                        () -> assertEquals(Optional.of("entity.active"), driver.stub().state("T-1-Q-001")),
+                        () -> assertTrue(events.contains("\"channel\":\"cli\""), "not answered as the operator"),
+                        () -> assertFalse(events.contains(QuestionDriver.CONTINUED_BY_HOLD), events));
+            }
+        }
+
+        /** Ends the asker's hold as the run's end does ({@code end}, then its next {@code pm_wait}). */
+        private static String endHold(QuestionDriver driver, Client asker) throws IOException {
+            driver.stub().end(WORKER, 1);
+            return asker.call("pm_wait", QuestionStub.JSON.createObjectNode());
+        }
+
+        private static ObjectNode submission() {
+            var args = QuestionStub.JSON.createObjectNode();
+            args.put("answer", "False");
+            args.put("judgment", "Applied the decided reading of the contract.");
+            return args;
+        }
+
         /** The asker leased the task, acknowledged it and asked the example envelope (an interpretation). */
-        private void ask(QuestionDriver driver) throws IOException {
+        private Client ask(QuestionDriver driver) throws IOException {
             driver.stub().queue(task(Form.FALLBACK));
             driver.stub().leaseAtSpawn(TASK, WORKER, 1);
             var asker = Client.connect(socket, WORKER, 1);
@@ -569,6 +684,7 @@ class QuestionStubTest {
             asker.link("ack", QuestionStub.JSON.createObjectNode());
             var asked = asker.ask("ask", validEnvelope());
             assertTrue(asked.contains("state: task.asked"), asked);
+            return asker;
         }
 
         /** A voter leased its vote task, acknowledged it and voted for the description with confidence 95. */
@@ -2249,6 +2365,109 @@ class QuestionStubTest {
             stamped.put("at", 1L);
             stamped.put("line", QuestionStub.JSON.writeValueAsString(result));
             return List.of(stamped);
+        }
+    }
+
+    @Nested
+    @DisplayName("continuation by hold")
+    class ContinuationByHold {
+
+        private static final String CONTINUATION = "T-1-Q-001";
+
+        @Test
+        @DisplayName("reads the sequence of the second Q6 attempt's vote run as a continuation made by hold")
+        void shouldReadDefectRunSequence() {
+            var events = log("w1", 1, false, true);
+
+            var held = QuestionDriver.heldContinuation(events, "Q-001");
+
+            assertEquals(Optional.of(new QuestionDriver.HeldContinuation("Q-001", CONTINUATION, "w1", 1, "submitted",
+                    81_401L, 81_400L, "quorum")), held);
+        }
+
+        @ParameterizedTest(name = "closed by {0} generation {1}, offered at spawn {2} -> by hold {3}")
+        @CsvSource({
+                "w1, 1, false, true",
+                "w1, 2, false, true",
+                "w1, 2, true, false",
+                "w-warm, 1, false, false"})
+        @DisplayName("only a generation of the asking worker that took the continuation over pm_wait and closed it "
+                + "made it by hold")
+        void shouldRecogniseOnlyAskingWorkerOverWait(String worker, int generation, boolean atSpawn,
+                boolean expected) {
+            var events = log(worker, generation, atSpawn, true);
+
+            assertEquals(expected, QuestionDriver.heldContinuation(events, "Q-001").isPresent());
+        }
+
+        @Test
+        @DisplayName("a continuation taken over pm_wait but not closed is not made by hold")
+        void shouldIgnoreOpenContinuation() {
+            var events = log("w1", 1, false, false);
+
+            assertEquals(Optional.empty(), QuestionDriver.heldContinuation(events, "Q-001"));
+        }
+
+        @Test
+        @DisplayName("the result names a run continued by hold in its limits and keeps its verdict logic")
+        void shouldNameContinuationByHoldInLimits() {
+            var held = QuestionStub.JSON.createObjectNode();
+            held.put("host", "claude");
+            held.put("stub_dir", "/tmp/pm-qlv/Q6-claude-fresh-vote-000/stub");
+            held.put(QuestionDriver.CONTINUED_BY_HOLD, true);
+            var other = QuestionStub.JSON.createObjectNode();
+            other.put("host", "claude");
+            other.put("stub_dir", "/tmp/pm-qlv/Q6-claude-fresh-consult-000/stub");
+            var withHeld = QuestionStub.JSON.createObjectNode();
+            var withoutHeld = QuestionStub.JSON.createObjectNode();
+
+            QuestionResults.limitOfContinuationsByHold(withHeld, List.of(held, other));
+            QuestionResults.limitOfContinuationsByHold(withoutHeld, List.of(other));
+
+            var limit = withHeld.path("limits").path(0).asText();
+            assertAll("the limit",
+                    () -> assertTrue(limit.contains("claude 1 (Q6-claude-fresh-vote-000)"), limit),
+                    () -> assertTrue(limit.contains(QuestionDriver.CONTINUED_BY_HOLD), limit),
+                    () -> assertTrue(limit.contains("counts as a continuation by hold"), limit),
+                    () -> assertFalse(limit.contains("consult"), limit),
+                    () -> assertFalse(withoutHeld.has("limits"), withoutHeld.toString()));
+        }
+
+        /**
+         * The stub log of the vote run of the second Q6 attempt, as far as the rule reads it, with the times of that
+         * run in milliseconds from its start: the asker {@code w1} generation 1 asks Q-001 (31.9 s); the quorum
+         * decides and the answer is recorded through it (60.4 s); the continuation is created and offered over
+         * {@code pm_wait} (60.4 s), acknowledged (67.2 s), submitted and closed (81.4 s), here by the given worker and
+         * generation.
+         */
+        private static List<JsonNode> log(String worker, int generation, boolean atSpawn, boolean closed) {
+            var events = new ArrayList<JsonNode>();
+            events.add(event(31_869L, "asked", "w1", 1, Map.of("task", TASK, "decision", "Q-001", "form", "FALLBACK")));
+            events.add(event(60_403L, "adjudicated", null, 0, Map.of("decision", "Q-001", "outcome", "decided")));
+            events.add(event(60_416L, "answer_recorded", null, 0, Map.of("decision", "Q-001", "channel", "quorum")));
+            events.add(event(60_417L, "continued", null, 0, Map.of("decision", "Q-001", "task", CONTINUATION,
+                    "entity", TASK)));
+            events.add(event(60_426L, "offered", worker, generation, Map.of("task", CONTINUATION, "at_spawn",
+                    atSpawn)));
+            events.add(event(67_246L, "acknowledged", worker, generation, Map.of("task", CONTINUATION)));
+            if (closed) {
+                events.add(event(81_400L, "submitted", worker, generation, Map.of("task", CONTINUATION)));
+                events.add(event(81_401L, "closed", worker, generation, Map.of("task", CONTINUATION, "outcome",
+                        "submitted")));
+            }
+            return events;
+        }
+
+        private static JsonNode event(long at, String name, String worker, int generation, Map<String, ?> fields) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put("event", name);
+            if (worker != null) {
+                node.put("worker", worker);
+                node.put("generation", generation);
+            }
+            fields.forEach((key, value) -> node.set(key, QuestionStub.JSON.valueToTree(value)));
+            return node;
         }
     }
 
