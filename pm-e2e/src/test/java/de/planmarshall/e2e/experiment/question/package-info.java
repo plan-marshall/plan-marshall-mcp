@@ -44,6 +44,8 @@
  * whether they ran at the specified scale.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionLoopExperiment}: the entry that runs one item, disabled
  * unless {@code -Dpm.experiment.question=<item>} is set.</li>
+ * <li>{@link de.planmarshall.e2e.experiment.question.QuestionReaggregation}: writes one item's result again from its
+ * existing records without a run, disabled unless {@code -Dpm.experiment.reaggregate=<item>} is set.</li>
  * </ul>
  * Every figure comes from the stub's event log, the relay's host-side log and the worker's output, never from what a
  * model reports about itself.

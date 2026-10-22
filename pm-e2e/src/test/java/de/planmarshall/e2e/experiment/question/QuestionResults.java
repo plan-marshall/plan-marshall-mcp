@@ -14,7 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -23,6 +25,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
 
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -40,7 +44,8 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * verbatim), encoded before the first measured run and not changed by any result. No figure comes from what a model
  * reports about itself. Beside the figures, the result names the invocations whose run records it aggregates and
  * whether they ran at the specified scale ({@link #scale}); a smaller pass keeps its verdict, marked
- * {@value #NOT_AT_SCALE}.
+ * {@value #NOT_AT_SCALE}. Every group also counts its runs that timed out, did not ask, ended early, asked, continued
+ * and submitted, figures no verdict reads; the limits come from every invocation it aggregates ({@link #result}).
  */
 final class QuestionResults {
 
@@ -106,7 +111,21 @@ final class QuestionResults {
     /** The items whose fixtures force the ask: the apply-answer and two-flaw fixtures. */
     static final Set<String> FORCED_ITEMS = Set.of("Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "R3");
 
+    /** The model of a run on the harness's default model, which the launch does not name. */
+    static final String HARNESS_DEFAULT = "harness default";
+    /** The field of an invocation record with its run limit ({@code pm.experiment.run-timeout}, an ISO duration). */
+    static final String RUN_TIMEOUT = "run_timeout";
+    /** The field of an invocation record whose run limit was supplied at re-aggregation, not recorded by it. */
+    static final String RUN_TIMEOUT_SUPPLIED = "run_timeout_supplied";
+    /** The field of a run record of a run whose worker exited without a single call to the stub. */
+    static final String EARLY_EXIT = "early_exit";
+    /** The field of a run record of a run that waited out its run limit. */
+    static final String TIMED_OUT = "timed_out";
+
     private static final String LIMITS = "limits";
+    private static final String NOT_RECORDED = "not recorded";
+    private static final String OPENCODE = "opencode";
+    private static final String MODEL = "model";
     private static final String UNKNOWN_INVOCATION = "unknown";
     private static final String EVENT = "event";
     private static final String WORKER = "worker";
@@ -215,7 +234,8 @@ final class QuestionResults {
      * and of fixtures, and {@code atSpecifiedScale}, true only when every aggregated invocation is recorded and ran at
      * the specified scale ({@link #atSpecifiedScale(String, JsonNode)}) and, for R4, its small and its large work were
      * both run so. A result that is not at the specified scale carries {@code verdict_scale}: {@value #NOT_AT_SCALE}.
-     * The verdict itself is not changed.
+     * The verdict itself is not changed. An invocation with fewer run records than it planned (killed or stopped) is
+     * flagged {@code incomplete: true} with its {@code planned_runs}, and a limit of the result names it.
      *
      * @param item        the item
      * @param result      its result ({@link #evaluate(String, List)})
@@ -223,26 +243,30 @@ final class QuestionResults {
      * @param invocations the invocation records of the item
      */
     static void scale(String item, ObjectNode result, List<JsonNode> runs, List<JsonNode> invocations) {
-        var counts = new LinkedHashMap<String, Integer>();
-        for (var run : runs) {
-            var id = run.path(INVOCATION).asText("");
-            counts.merge(id.isEmpty() ? UNKNOWN_INVOCATION : id, 1, Integer::sum);
-        }
+        var counts = recordsPerInvocation(runs);
         var known = new HashMap<String, JsonNode>();
         invocations.forEach(invocation -> known.put(invocation.path(INVOCATION).asText(), invocation));
         var array = result.putArray("invocations");
         var atScale = !counts.isEmpty();
         var small = false;
         var large = false;
+        var incomplete = new ArrayList<String>();
         for (var entry : counts.entrySet()) {
             var recorded = known.get(entry.getKey());
             var node = array.addObject();
             node.put(INVOCATION, entry.getKey());
             node.put("run_records", entry.getValue());
             if (recorded == null) {
-                node.put("settings", "not recorded");
+                node.put("settings", NOT_RECORDED);
                 atScale = false;
                 continue;
+            }
+            var planned = recorded.path("planned_runs").asInt(-1);
+            if (planned >= 0 && entry.getValue() < planned) {
+                node.put("incomplete", true);
+                node.put("planned_runs", planned);
+                incomplete.add(entry.getKey() + " recorded " + entry.getValue() + " of its " + planned
+                        + " planned runs");
             }
             node.set("settings", recorded);
             var invocationAtScale = atSpecifiedScale(item, recorded);
@@ -253,6 +277,10 @@ final class QuestionResults {
         }
         if ("R4".equals(item)) {
             atScale &= small && large;
+        }
+        if (!incomplete.isEmpty()) {
+            limit(result, "Not every invocation recorded all the runs it planned; it was killed or stopped before the "
+                    + "rest ran, and the missing runs are in no figure: " + String.join("; ", incomplete) + ".");
         }
         result.put("run_records", runs.size());
         result.put("fixtures", runs.stream().map(run -> run.path("fixture").asText()).distinct().count());
@@ -282,6 +310,219 @@ final class QuestionResults {
                     && runs + largeRuns > 0;
         }
         return runs == SPECIFIED_RUNS;
+    }
+
+    /** The count of the scenario recipes R4 does not use, read only when the item is R4. */
+    @FunctionalInterface
+    interface UnusedScenarios {
+        int count() throws IOException;
+    }
+
+    /**
+     * The whole result of an item from its run records and the records of every invocation of it, as the measurement
+     * and the re-aggregation write it: the figures and verdict ({@link #evaluate(String, List)}), the limits of all
+     * invocations that contributed run records (the fixture wording, OpenCode's data home, the run limits, the early
+     * exits waited out, for R4 its own), and the bookkeeping of the invocations ({@link #scale}). The limits come from
+     * the union of the invocations, so a later invocation without OpenCode does not drop the limit of an earlier one
+     * with it.
+     *
+     * @param item        the item
+     * @param runs        its run records
+     * @param invocations its invocation records
+     * @param unused      the count of unused scenario recipes, asked for R4 only
+     * @return the result
+     * @throws IOException if a run's files or the scenario recipes cannot be read
+     */
+    static ObjectNode result(String item, List<JsonNode> runs, List<JsonNode> invocations, UnusedScenarios unused)
+            throws IOException {
+        var result = evaluate(item, runs);
+        var contributing = contributing(runs, invocations);
+        if ("R4".equals(item)) {
+            limitsOfR4(result, unused.count(), max(contributing.values(), "large_runs"), max(contributing.values(),
+                    RUNS));
+        }
+        limitsOfFixtures(result, item);
+        var openCodeModels = openCodeModels(runs, contributing);
+        if (!openCodeModels.isEmpty()) {
+            limitOfOpenCodeDataHome(result, openCodeModels);
+        }
+        limitOfRunLimits(result, runs, contributing);
+        limitOfEarlyExitsWaitedOut(result, runs);
+        scale(item, result, runs, invocations);
+        return result;
+    }
+
+    /**
+     * Supplies the run limit of invocations recorded before the run limit was part of their settings, for a
+     * re-aggregation: each named invocation without {@value #RUN_TIMEOUT} gets it, marked
+     * {@value #RUN_TIMEOUT_SUPPLIED}; a recorded run limit is kept.
+     *
+     * @param invocations the invocation records
+     * @param supplied    {@code <invocation>=<ISO duration>}, comma-separated; empty for none
+     * @return the invocation records, copied where a run limit was supplied
+     * @throws IllegalArgumentException if an entry has no {@code =}, its duration does not parse, or it names no
+     *                                  invocation of the records
+     */
+    static List<JsonNode> supplyRunTimeouts(List<JsonNode> invocations, String supplied) {
+        var values = new LinkedHashMap<String, String>();
+        for (var entry : supplied.split(",")) {
+            if (entry.isBlank()) {
+                continue;
+            }
+            var parts = entry.strip().split("=", 2);
+            if (parts.length != 2) {
+                throw new IllegalArgumentException("run limit without '=': " + entry);
+            }
+            values.put(parts[0].strip(), Duration.parse(parts[1].strip()).toString());
+        }
+        var copies = new ArrayList<JsonNode>();
+        for (var invocation : invocations) {
+            var id = invocation.path(INVOCATION).asText();
+            var value = values.remove(id);
+            if (value == null || invocation.has(RUN_TIMEOUT)) {
+                copies.add(invocation);
+                continue;
+            }
+            var copy = invocation.deepCopy();
+            ((ObjectNode) copy).put(RUN_TIMEOUT, value);
+            ((ObjectNode) copy).put(RUN_TIMEOUT_SUPPLIED, true);
+            copies.add(copy);
+        }
+        if (!values.isEmpty()) {
+            throw new IllegalArgumentException("run limit supplied for no invocation of the records: "
+                    + values.keySet());
+        }
+        return copies;
+    }
+
+    /**
+     * @param run a run record
+     * @return its model, {@value #HARNESS_DEFAULT} when the launch named none (recorded as {@code null} before)
+     */
+    static String model(JsonNode run) {
+        var model = run.path(MODEL).asText("");
+        return model.isEmpty() || "null".equals(model) ? HARNESS_DEFAULT : model;
+    }
+
+    private static Map<String, Integer> recordsPerInvocation(List<JsonNode> runs) {
+        var counts = new LinkedHashMap<String, Integer>();
+        for (var run : runs) {
+            counts.merge(invocationOf(run), 1, Integer::sum);
+        }
+        return counts;
+    }
+
+    private static String invocationOf(JsonNode run) {
+        var id = run.path(INVOCATION).asText("");
+        return id.isEmpty() ? UNKNOWN_INVOCATION : id;
+    }
+
+    /** @return the recorded invocations that contributed run records, by id, in the order of their records */
+    private static Map<String, JsonNode> contributing(List<JsonNode> runs, List<JsonNode> invocations) {
+        var known = new HashMap<String, JsonNode>();
+        invocations.forEach(invocation -> known.put(invocation.path(INVOCATION).asText(), invocation));
+        var contributing = new LinkedHashMap<String, JsonNode>();
+        for (var id : recordsPerInvocation(runs).keySet()) {
+            if (known.containsKey(id)) {
+                contributing.put(id, known.get(id));
+            }
+        }
+        return contributing;
+    }
+
+    private static int max(Collection<JsonNode> invocations, String field) {
+        return invocations.stream().mapToInt(invocation -> invocation.path(field).asInt()).max().orElse(0);
+    }
+
+    /**
+     * The OpenCode models of the invocations on the global data home whose run records start OpenCode: as asker, as
+     * continuing host, or as a voter; the invocation's {@code opencode_models} where it recorded them, else the models
+     * of its OpenCode run records. The harness default is {@code null}.
+     */
+    private static Set<String> openCodeModels(List<JsonNode> runs, Map<String, JsonNode> contributing) {
+        var models = new HashSet<String>();
+        for (var entry : contributing.entrySet()) {
+            var invocation = entry.getValue();
+            if (!"global".equals(invocation.path("opencode_data_home").asText())) {
+                continue;
+            }
+            var own = runs.stream().filter(run -> entry.getKey().equals(invocationOf(run))).toList();
+            var startsOpenCode = own.stream().anyMatch(run -> OPENCODE.equals(run.path(HOST).asText())
+                    || OPENCODE.equals(run.path("continue_host").asText()) || "vote".equals(run.path("kind").asText()));
+            if (!startsOpenCode) {
+                continue;
+            }
+            if (invocation.path("opencode_models").isArray()) {
+                invocation.path("opencode_models").forEach(model -> models.add(model.isNull() ? null : model.asText()));
+            } else {
+                own.stream().filter(run -> OPENCODE.equals(run.path(HOST).asText())).map(QuestionResults::model)
+                        .forEach(model -> models.add(HARNESS_DEFAULT.equals(model) ? null : model));
+            }
+        }
+        return models;
+    }
+
+    /**
+     * Adds the run limits to a result when its invocations ran with different ones, or did not record theirs: the run
+     * limit per host of the run records ({@code pm.experiment.run-timeout}; a run waits that long plus four times its
+     * hold), and which of them were supplied at re-aggregation.
+     *
+     * @param result       the result
+     * @param runs         its run records
+     * @param contributing the recorded invocations that contributed them, by id
+     */
+    static void limitOfRunLimits(ObjectNode result, List<JsonNode> runs, Map<String, JsonNode> contributing) {
+        var perHost = new TreeMap<String, Set<String>>();
+        var values = new TreeSet<String>();
+        var supplied = new TreeSet<String>();
+        for (var run : runs) {
+            var invocation = contributing.get(invocationOf(run));
+            var value = invocation == null ? NOT_RECORDED : invocation.path(RUN_TIMEOUT).asText(NOT_RECORDED);
+            perHost.computeIfAbsent(run.path(HOST).asText(), _ -> new TreeSet<>()).add(value);
+            values.add(value);
+            if (invocation != null && invocation.path(RUN_TIMEOUT_SUPPLIED).asBoolean()) {
+                supplied.add(invocationOf(run));
+            }
+        }
+        if (values.size() < 2 && !values.contains(NOT_RECORDED)) {
+            return;
+        }
+        var named = perHost.entrySet().stream().map(entry -> entry.getKey() + " " + String.join(" and ",
+                entry.getValue())).toList();
+        var text = new StringBuilder(values.size() < 2 ? "The run limit of the invocations is not recorded"
+                : "The invocations ran with different run limits (pm.experiment.run-timeout; a run waits that long "
+                + "plus four times its hold): " + String.join(", ", named));
+        text.append('.');
+        if (!supplied.isEmpty()) {
+            text.append(" The run limits of ").append(String.join(", ", supplied)).append(" were not recorded by the "
+                    + "invocation and are supplied at re-aggregation.");
+        }
+        limit(result, text.toString());
+    }
+
+    /**
+     * Adds a limit when runs whose worker exited without a single call to the stub ({@value #EARLY_EXIT}) were waited
+     * out to their run limit and recorded as {@value #TIMED_OUT} too: the records of invocations before the early exit
+     * ended the wait at once.
+     *
+     * @param result the result
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    private static void limitOfEarlyExitsWaitedOut(ObjectNode result, List<JsonNode> runs) throws IOException {
+        var waitedOut = new TreeMap<String, Integer>();
+        for (var run : runs) {
+            if (run.path(TIMED_OUT).asBoolean() && earlyExit(view(run))) {
+                waitedOut.merge(run.path(HOST).asText(), 1, Integer::sum);
+            }
+        }
+        if (waitedOut.isEmpty()) {
+            return;
+        }
+        var named = waitedOut.entrySet().stream().map(entry -> entry.getKey() + " " + entry.getValue()).toList();
+        limit(result, "Runs whose worker exited without a single call to the stub count as early_exit; those of "
+                + "invocations before the early exit ended the wait at once waited out their run limit and count as "
+                + "timed_out too: " + String.join(", ", named) + ".");
     }
 
     /**
@@ -339,8 +580,9 @@ final class QuestionResults {
 
     private static String groupKey(String item, JsonNode run) {
         var key = new StringBuilder();
-        for (var field : List.of(HOST, "model", "form", "continuation")) {
-            key.append(field).append('=').append(run.path(field).asText()).append(' ');
+        for (var field : List.of(HOST, MODEL, "form", "continuation")) {
+            key.append(field).append('=').append(MODEL.equals(field) ? model(run) : run.path(field).asText())
+                    .append(' ');
         }
         var parameter = switch (item) {
             case "Q4" -> "reply";
@@ -364,15 +606,17 @@ final class QuestionResults {
     private static ObjectNode evaluateGroup(String item, List<RunView> views) throws IOException {
         var group = QuestionStub.JSON.createObjectNode();
         var first = views.getFirst().run();
-        for (var field : List.of(HOST, "model", "form", "continuation", "duration_s", "age_s", "fault", "size")) {
-            if (first.has(field)) {
+        for (var field : List.of(HOST, MODEL, "form", "continuation", "duration_s", "age_s", "fault", "size")) {
+            if (MODEL.equals(field)) {
+                group.put(MODEL, model(first));
+            } else if (first.has(field)) {
                 group.set(field, first.get(field));
             }
         }
         if ("R4".equals(item)) {
             group.set("fixture", first.get("fixture"));
         }
-        group.put(RUNS, views.size());
+        counts(views, group);
         var pass = switch (item) {
             case "Q1" -> q1(views, group);
             case "Q2" -> q2(views, group);
@@ -389,6 +633,71 @@ final class QuestionResults {
         };
         group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
         return group;
+    }
+
+    /**
+     * Adds the counts every group reports beside its item's figures, so that no run leaves the result without a
+     * trace: {@code runs}, {@code timed_out} (the run waited out its run limit), {@code no_ask} (no {@code asked}
+     * event), {@code early_exit} ({@link #earlyExit(RunView)}), {@code asked}, {@code continued} and
+     * {@code submitted} (runs with at least one such event). They are reported figures: no verdict reads them.
+     *
+     * @param views  the group's runs
+     * @param group  the group
+     */
+    private static void counts(List<RunView> views, ObjectNode group) {
+        var timedOut = 0;
+        var asked = 0;
+        var earlyExits = 0;
+        var continued = 0;
+        var submitted = 0;
+        for (var view : views) {
+            timedOut += view.run().path(TIMED_OUT).asBoolean() ? 1 : 0;
+            asked += view.named(ASKED).isEmpty() ? 0 : 1;
+            earlyExits += earlyExit(view) ? 1 : 0;
+            continued += view.named("continued").isEmpty() ? 0 : 1;
+            submitted += view.named(SUBMITTED).isEmpty() ? 0 : 1;
+        }
+        group.put(RUNS, views.size());
+        group.put(TIMED_OUT, timedOut);
+        group.put("no_ask", views.size() - asked);
+        group.put(EARLY_EXIT, earlyExits);
+        group.put(ASKED, asked);
+        group.put("continued", continued);
+        group.put(SUBMITTED, submitted);
+    }
+
+    /**
+     * Whether a run ended early: its record says so ({@value #EARLY_EXIT}), or a worker generation of it connected
+     * and exited without a single call to the stub, was not ended by an injected fault, was not followed by a newer
+     * generation of the same worker, and belongs to a worker that did not ask in an earlier generation (as
+     * {@link QuestionDriver#earlyExit(QuestionDriver.Worker)} decides). The second reading also finds the early exits
+     * of records written before the driver detected them, whose runs waited out their run limit.
+     *
+     * @param view a run
+     * @return whether it ended early
+     */
+    static boolean earlyExit(RunView view) {
+        if (view.run().path(EARLY_EXIT).asBoolean()) {
+            return true;
+        }
+        var latest = new HashMap<String, Integer>();
+        view.named("worker_started").forEach(event -> latest.merge(event.path(WORKER).asText(),
+                event.path(GENERATION).asInt(), Math::max));
+        for (var exited : view.named("worker_exited")) {
+            var worker = exited.path(WORKER).asText();
+            var generation = exited.path(GENERATION).asInt();
+            if (latest.getOrDefault(worker, generation) > generation || view.named(ASKED).stream()
+                    .anyMatch(asked -> worker.equals(asked.path(WORKER).asText()))) {
+                continue;
+            }
+            var own = view.events().stream().filter(event -> same(event, worker, generation))
+                    .map(event -> event.path(EVENT).asText()).collect(Collectors.toSet());
+            if (own.contains(QuestionDriver.CONNECTED) && !own.contains(QuestionDriver.CALL)
+                    && !own.contains(QuestionDriver.FAULT_INJECTED)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean q1(List<RunView> views, ObjectNode group) {
@@ -849,13 +1158,11 @@ final class QuestionResults {
     private static boolean r4(List<RunView> views, ObjectNode group) {
         var tokens = new ArrayList<Long>();
         var times = new ArrayList<Long>();
-        var asked = 0;
         var follows = 0;
         for (var view : views) {
             tokens.add(tokens(view.outputs()));
             times.add(workerTime(view));
             if (!view.named(ASKED).isEmpty()) {
-                asked++;
                 follows += followsReference(view) ? 1 : 0;
             }
         }
@@ -863,8 +1170,6 @@ final class QuestionResults {
         group.put("worker_time_ms_median", median(times));
         group.set("tokens", QuestionStub.JSON.valueToTree(tokens));
         group.set("worker_time_ms", QuestionStub.JSON.valueToTree(times));
-        group.put("asked", asked);
-        group.put("no_ask", views.size() - asked);
         group.put("answer_follows_reference", follows);
         return true;
     }

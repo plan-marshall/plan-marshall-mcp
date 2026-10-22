@@ -19,6 +19,7 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -91,7 +92,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * <p>
  * A worker that exits, or for which {@code pm-exec} reports an error, before its relay connected ends the run at once
  * as {@code launch_failed}, with the exit code and the first line of its {@code stderr}: a failure of the run, never a
- * pass and never a timeout ({@link QuestionDriver#launchFailure()}).
+ * pass and never a timeout ({@link QuestionDriver#launchFailure()}). A worker whose relay connected but that exits
+ * without a single call to the stub ends the run at once as {@code early_exit}, with the exit code and the first
+ * harness line of its {@code stderr} or the last line of its output: never a pass, never a timeout and never counted as
+ * asked ({@link QuestionDriver#earlyExit()}).
  * <p>
  * Antigravity runs without further parameters on the launch verified on 2026-10-21 with agy against the stub
  * ({@link QuestionDriver#AGY_ARGV}, {@link QuestionDriver#AGY_CONFIG}); {@code -Dpm.experiment.agy.argv} (a JSON array
@@ -182,9 +186,12 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * Bookkeeping: {@code runs.jsonl} is append-only and read per item, so the records of an item are cleared by the
  * operator before its first invocation; R4 runs as two invocations that share the item's records. Every invocation
  * appends its settings to {@code invocations.jsonl} (runs, fixtures and their limit, hosts, warmth, large runs,
- * parallel runs, R2 ages) and every run record carries its invocation id, so the result lists the invocations it
- * aggregates, a record of an earlier pass shows up there, and {@code atSpecifiedScale} says whether every invocation
- * ran the specified 20 runs per fixture and host without a fixture limit ({@link QuestionResults#scale}).
+ * parallel runs, R2 ages, run limit, holds, OpenCode models) and every run record carries its invocation id, so the
+ * result lists the invocations it aggregates, a record of an earlier pass shows up there, an invocation with fewer
+ * records than planned is flagged {@code incomplete}, and {@code atSpecifiedScale} says whether every invocation ran the
+ * specified 20 runs per fixture and host without a fixture limit ({@link QuestionResults#scale}). The limits of the
+ * result come from all invocations whose records it aggregates ({@link QuestionResults#result}).
+ * {@link QuestionReaggregation} writes the result again from the existing records, without a run.
  */
 @DisplayName("Question loop experiment: one item with -Dpm.experiment.question=<item>")
 @EnabledIfSystemProperty(named = "pm.experiment.question", matches = ".+")
@@ -365,18 +372,9 @@ class QuestionLoopExperiment {
         var invocation = invocation(item, config, plans);
         QuestionResults.recordInvocation(config.results(), invocation);
         execute(plans, config, invocation.path(QuestionResults.INVOCATION).asText());
-        var runs = QuestionResults.runs(config.results(), item);
-        var result = QuestionResults.evaluate(item, runs);
-        if ("R4".equals(item)) {
-            QuestionResults.limitsOfR4(result, QuestionFixtures.unusedScenarios(telemetry(config)).size(),
-                    config.largeRuns(), config.runs());
-        }
-        QuestionResults.limitsOfFixtures(result, item);
-        var openCodeModels = openCodeModels(plans, config);
-        if (config.openCodeDataHome() == OpenCodeDataHome.GLOBAL && !openCodeModels.isEmpty()) {
-            QuestionResults.limitOfOpenCodeDataHome(result, openCodeModels);
-        }
-        QuestionResults.scale(item, result, runs, QuestionResults.invocations(config.results(), item));
+        var result = QuestionResults.result(item, QuestionResults.runs(config.results(), item),
+                QuestionResults.invocations(config.results(), item),
+                () -> QuestionFixtures.unusedScenarios(telemetry(config)).size());
         var file = QuestionResults.write(item, result);
 
         assertTrue(Files.isRegularFile(file), "no result written for " + item);
@@ -384,7 +382,10 @@ class QuestionLoopExperiment {
 
     /**
      * The record of one invocation of an item: its id, which every run record of it carries, and the settings it ran
-     * with, so the result can say which invocations it aggregates and whether they ran at the specified scale.
+     * with, so the result can say which invocations it aggregates and whether they ran at the specified scale: among
+     * them the run limit ({@value QuestionResults#RUN_TIMEOUT}, {@code pm.experiment.run-timeout}) and the holds of its
+     * runs ({@code holds_s}; a run waits up to the run limit plus four times its hold), and the OpenCode models its
+     * runs start ({@code opencode_models}, the harness default as {@code null}).
      *
      * @param item   the item
      * @param config the configuration
@@ -413,8 +414,14 @@ class QuestionLoopExperiment {
         record.put("parallel", config.parallel());
         record.put("opencode_data_home", config.openCodeDataHome().name().toLowerCase(Locale.ROOT));
         record.put("opencode_serial", serialOpenCode(config) && plans.stream().anyMatch(QuestionLoopExperiment::usesOpenCode));
+        var models = record.putArray("opencode_models");
+        openCodeModels(plans, config).stream().sorted(Comparator.nullsFirst(Comparator.naturalOrder()))
+                .forEach(models::add);
         var ages = record.putArray("r2_ages_s");
         durations(R2_AGES, R2_AGES_DEFAULT).forEach(age -> ages.add(age.toSeconds()));
+        record.put(QuestionResults.RUN_TIMEOUT, config.runTimeout().toString());
+        var holds = record.putArray("holds_s");
+        plans.stream().map(plan -> plan.hold().toSeconds()).distinct().sorted().forEach(holds::add);
         record.put("planned_runs", plans.size());
         return record;
     }
@@ -712,6 +719,20 @@ class QuestionLoopExperiment {
         return QuestionFixtures.telemetry(config.telemetry(), config.telemetryRef());
     }
 
+    /**
+     * @return the telemetry checkout of {@code pm.experiment.telemetry} and {@code pm.experiment.telemetry.ref}, with
+     *         the defaults of {@link Config#load()}, for a re-aggregation of R4 without a configuration
+     * @throws IOException if the default checkout cannot be found
+     */
+    static QuestionFixtures.Source telemetryFromProperties() throws IOException {
+        var telemetry = System.getProperty("pm.experiment.telemetry");
+        var checkout = telemetry == null
+                ? QuestionFixtures.siblingRepositories(ROOT).resolve("plan-marshall-telemetry")
+                : Path.of(telemetry);
+        return QuestionFixtures.telemetry(checkout,
+                System.getProperty("pm.experiment.telemetry.ref", QuestionFixtures.TELEMETRY_REF));
+    }
+
     private static List<Fixture> limit(List<Fixture> fixtures, Config config) {
         return new ArrayList<>(fixtures.subList(0, Math.min(fixtures.size(), config.fixtures())));
     }
@@ -782,7 +803,7 @@ class QuestionLoopExperiment {
         record.put("item", plan.item());
         record.put("run", plan.index());
         record.put("host", plan.host().executable());
-        record.put("model", String.valueOf(plan.model()));
+        record.put("model", plan.model() == null ? QuestionResults.HARNESS_DEFAULT : plan.model());
         record.put("form", plan.warm() ? "warm" : "fresh");
         record.put("continuation", plan.form().name().toLowerCase(Locale.ROOT));
         record.put("fixture", plan.fixture().id());
@@ -815,7 +836,7 @@ class QuestionLoopExperiment {
         private final Set<String> seenDecisions = new HashSet<>();
         private final AtomicBoolean running = new AtomicBoolean(true);
         private int generation = 1;
-        private boolean launchFailed;
+        private boolean ended;
 
         Session(QuestionDriver driver, RunPlan plan, Config config, ObjectNode record) {
             this.driver = driver;
@@ -839,7 +860,7 @@ class QuestionLoopExperiment {
                 var deadline = System.currentTimeMillis() + config.runTimeout().toMillis()
                         + plan.hold().toMillis() * 4;
                 var rounds = 0;
-                while (!launchFailed && !entryDone() && System.currentTimeMillis() < deadline
+                while (!ended && !entryDone() && System.currentTimeMillis() < deadline
                         && rounds <= QuestionStub.QUESTION_BOUND) {
                     var asked = nextAsked(deadline);
                     if (asked.isEmpty()) {
@@ -862,7 +883,7 @@ class QuestionLoopExperiment {
                     current = continueAfter(asked.get(), current);
                 }
                 awaitEntry(deadline);
-                record.put("timed_out", !launchFailed && !entryDone());
+                record.put(QuestionResults.TIMED_OUT, !ended && !entryDone());
             } finally {
                 running.set(false);
                 for (var helper : helpers) {
@@ -992,7 +1013,7 @@ class QuestionLoopExperiment {
          */
         private void negativeResume(Worker current) throws IOException, InterruptedException {
             nextAsked(System.currentTimeMillis() + config.runTimeout().toMillis());
-            if (launchFailed) {
+            if (ended) {
                 return;
             }
             driver.awaitExit(current, plan.host().silenceLimit());
@@ -1013,7 +1034,7 @@ class QuestionLoopExperiment {
         private Optional<JsonNode> nextAsked(long deadline) throws IOException, InterruptedException {
             var asked = driver.awaitEventWhileLaunched(event -> "asked".equals(event.path(EVENT).asText())
                     && !seenDecisions.contains(event.path(DECISION).asText()) || entryDone(), deadline);
-            if (asked.isEmpty() && launchFailed()) {
+            if (asked.isEmpty() && ended()) {
                 return Optional.empty();
             }
             asked.filter(event -> "asked".equals(event.path(EVENT).asText()))
@@ -1023,15 +1044,19 @@ class QuestionLoopExperiment {
 
         /**
          * Records the run as {@code launch_failed} once a worker failed to launch, with its exit code and the first
-         * line of its {@code stderr}: a failure of the run, never a pass and never a timeout.
+         * line of its {@code stderr}, or as {@value QuestionResults#EARLY_EXIT} once a worker exited after its relay
+         * connected without a single call to the stub, with its exit code and the first harness line of its
+         * {@code stderr} or the last line of its output ({@link QuestionDriver#earlyExit()}): either ends the run at
+         * once, a failure of the run, never a pass, never a timeout, and never counted as asked. A worker that
+         * called the stub, an asker among them, and then exited keeps the wait as before.
          *
-         * @return whether a worker of the run failed to launch
+         * @return whether the run ended so
          */
-        private boolean launchFailed() throws IOException, InterruptedException {
-            if (!launchFailed) {
+        private boolean ended() throws IOException, InterruptedException {
+            if (!ended) {
                 var failure = driver.launchFailure();
                 if (failure.isPresent()) {
-                    launchFailed = true;
+                    ended = true;
                     var value = failure.get();
                     record.put("launch_failed", true);
                     record.put("launch_worker", value.worker());
@@ -1043,7 +1068,19 @@ class QuestionLoopExperiment {
                     record.put("error", "launch_failed: exit " + value.exit() + ": " + value.stderr());
                 }
             }
-            return launchFailed;
+            if (!ended) {
+                var early = driver.earlyExit();
+                if (early.isPresent()) {
+                    ended = true;
+                    var value = early.get();
+                    record.put(QuestionResults.EARLY_EXIT, true);
+                    record.put("early_exit_worker", value.worker());
+                    record.put("early_exit_generation", value.generation());
+                    record.put("early_exit_code", value.exit());
+                    record.put("early_exit_detail", value.detail());
+                }
+            }
+            return ended;
         }
 
         /**
@@ -1063,7 +1100,7 @@ class QuestionLoopExperiment {
         }
 
         private void awaitEntry(long deadline) throws IOException, InterruptedException {
-            while (!entryDone() && System.currentTimeMillis() < deadline && !launchFailed()) {
+            while (!entryDone() && System.currentTimeMillis() < deadline && !ended()) {
                 Thread.sleep(POLL);
             }
         }

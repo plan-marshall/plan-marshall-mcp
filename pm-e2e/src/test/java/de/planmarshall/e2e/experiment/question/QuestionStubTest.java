@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.EarlyExit;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Fault;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Launch;
@@ -841,6 +842,87 @@ class QuestionStubTest {
             }
         }
 
+        @Test
+        @DisplayName("ends the wait at once for a worker that connected and exited without a call, as an early exit")
+        void shouldEndEarlyExitAtOnce() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_LAUNCHED + "' >&2\n"
+                    + "echo 'the plan-marshall tools are unavailable' >&2\nexit 3");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+                var deadline = System.currentTimeMillis() + Duration.ofMinutes(20).toMillis();
+
+                var asked = assertTimeoutPreemptively(Duration.ofSeconds(30),
+                        () -> driver.awaitEventWhileLaunched(event -> "asked".equals(event.path("event").asText()),
+                                deadline));
+
+                var early = driver.earlyExit();
+                assertAll("the early exit",
+                        () -> assertTrue(asked.isEmpty()),
+                        () -> assertEquals(Optional.of(new EarlyExit(WORKER, 1, 3,
+                                "the plan-marshall tools are unavailable")), early),
+                        () -> assertEquals(Optional.empty(), driver.launchFailure()),
+                        () -> assertTrue(Files.readString(driver.stub().events())
+                                .contains("\"event\":\"early_exit\""), "no early_exit event"));
+            }
+        }
+
+        @Test
+        @DisplayName("a worker that called the stub before it exited has not ended early")
+        void shouldNotEndEarlyAfterCall() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "exit 0");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                driver.stub().event(QuestionDriver.CALL, Map.of("worker", WORKER, "generation", 1, "tool", "pm_state"));
+                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+
+                var early = driver.earlyExit();
+
+                assertAll("the exited asker",
+                        () -> assertEquals(Optional.empty(), early),
+                        () -> assertEquals(Optional.empty(), driver.launchFailure()));
+            }
+        }
+
+        @Test
+        @DisplayName("a generation that exits without a call after its worker asked in an earlier one keeps the wait")
+        void shouldNotEndEarlyAfterEarlierAsk() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "exit 0");
+            try (var driver = driver(exec)) {
+                driver.stub().event(QuestionDriver.ASKED, Map.of("worker", WORKER, "generation", 0, "decision", "d1"));
+                var worker = launch(driver);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+
+                var early = driver.earlyExit();
+
+                assertEquals(Optional.empty(), early);
+            }
+        }
+
+        @Test
+        @DisplayName("the detail of an early exit is the harness's stderr line, else the last output line")
+        void shouldNameEarlyExitDetail() throws Exception {
+            var output = List.<JsonNode>of(stamped("{\"type\":\"step_start\"}"),
+                    stamped("{\"type\":\"text\",\"part\":{\"text\":\"tools unavailable\"}}"));
+
+            assertAll("the details",
+                    () -> assertEquals("harness line", QuestionDriver.earlyExitDetail(PM_EXEC_LAUNCHED
+                            + "\nharness line\n", output)),
+                    () -> assertEquals("{\"type\":\"text\",\"part\":{\"text\":\"tools unavailable\"}}",
+                            QuestionDriver.earlyExitDetail(PM_EXEC_LAUNCHED + "\n", output)),
+                    () -> assertEquals("", QuestionDriver.earlyExitDetail("", List.of())));
+        }
+
+        private static JsonNode stamped(String line) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", 1L);
+            node.put("line", line);
+            return node;
+        }
+
         private QuestionDriver driver(Path exec) throws IOException {
             var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(Duration.ofMillis(300));
             return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
@@ -1113,7 +1195,8 @@ class QuestionStubTest {
         }
 
         @Test
-        @DisplayName("records an invocation's settings: runs, fixtures and their limit, hosts, warmth, R4 large runs")
+        @DisplayName("records an invocation's settings: runs, fixtures and their limit, hosts, warmth, R4 large runs, "
+                + "run limit and holds")
         void shouldRecordInvocationSettings() throws Exception {
             var config = config(2, 0, QuestionLoopExperiment.Warmth.FRESH);
             var plans = QuestionLoopExperiment.r4(config, NOT_READ);
@@ -1130,6 +1213,9 @@ class QuestionStubTest {
                     () -> assertEquals("fresh", invocation.path("warmth").asText()),
                     () -> assertEquals(1, invocation.path("parallel").asInt()),
                     () -> assertEquals("[300,3600,86400]", invocation.path("r2_ages_s").toString()),
+                    () -> assertEquals("PT20M", invocation.path(QuestionResults.RUN_TIMEOUT).asText()),
+                    () -> assertEquals("[60]", invocation.path("holds_s").toString()),
+                    () -> assertEquals("[]", invocation.path("opencode_models").toString()),
                     () -> assertEquals(plans.size(), invocation.path("planned_runs").asInt()));
         }
 
@@ -1287,6 +1373,175 @@ class QuestionStubTest {
 
             assertEquals(List.of("q1-a"), read.stream().map(node -> node.path(QuestionResults.INVOCATION).asText())
                     .toList());
+        }
+
+        @Test
+        @DisplayName("a result from two invocations keeps the limits of both, names their run limits, flags the "
+                + "incomplete one, and counts the early exit without changing the verdicts")
+        void shouldBuildResultFromTwoInvocations() throws Exception {
+            var openCode = invocation("oc", "Q1", 3, 3, 2);
+            openCode.put("opencode_data_home", "global");
+            openCode.put(QuestionResults.RUN_TIMEOUT, "PT6M");
+            openCode.put("planned_runs", 1);
+            var claude = invocation("cl", "Q1", 3, 3, 2);
+            claude.put("opencode_data_home", "global");
+            claude.put(QuestionResults.RUN_TIMEOUT, "PT20M");
+            claude.put("planned_runs", 3);
+            claude.putArray("opencode_models");
+            var runs = List.of(
+                    fixtureRun("oc", "opencode", "opencode/gpt-5.4-nano", true, EARLY_EXIT_EVENTS, false),
+                    fixtureRun("cl", "claude", "claude-haiku-4-5", false, ASKING_EVENTS, true),
+                    fixtureRun("cl", "claude", "claude-haiku-4-5", false, ASKING_EVENTS, true));
+
+            var result = QuestionResults.result("Q1", runs, List.of(openCode, claude), () -> {
+                throw new IllegalStateException("Q1 read the scenario recipes");
+            });
+
+            var groups = result.path("groups");
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            var invocations = result.path("invocations");
+            assertAll("the result",
+                    () -> assertEquals("fail", result.path("verdict").asText()),
+                    () -> assertEquals("pass", groups.get(0).path("verdict").asText()),
+                    () -> assertEquals("fail", groups.get(1).path("verdict").asText()),
+                    () -> assertEquals(List.of(2, 0, 0, 0, 2, 2, 2), counts(groups.get(0))),
+                    () -> assertEquals(List.of(1, 1, 1, 1, 0, 0, 0), counts(groups.get(1))),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.startsWith(
+                            "OpenCode ran on the global data home with opencode/gpt-5.4-nano")), limits.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains(QuestionFixtures.FORCE_ASK)),
+                            limits.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains("claude PT20M, opencode PT6M")),
+                            limits.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains(
+                            "cl recorded 2 of its 3 planned runs")), limits.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.endsWith("timed_out too: opencode 1.")),
+                            limits.toString()),
+                    () -> assertTrue(invocations.get(0).path("incomplete").isMissingNode(), invocations.toString()),
+                    () -> assertTrue(invocations.get(1).path("incomplete").asBoolean()),
+                    () -> assertEquals(3, invocations.get(1).path("planned_runs").asInt()),
+                    () -> assertEquals(2, invocations.get(1).path("run_records").asInt()));
+        }
+
+        @Test
+        @DisplayName("a continuation that exits without a call after its worker asked is no early exit; one of a "
+                + "worker that never asked is")
+        void shouldKeepAskedWorkerOutOfEarlyExits() throws Exception {
+            var askedThenSilent = new ArrayList<>(ASKING_EVENTS);
+            askedThenSilent.addAll(List.of("worker_started@2", QuestionDriver.CONNECTED + "@2", "worker_exited@2"));
+            var faulted = List.of("worker_started", QuestionDriver.CONNECTED, QuestionDriver.FAULT_INJECTED,
+                    "worker_exited");
+            var superseded = new ArrayList<>(EARLY_EXIT_EVENTS);
+            superseded.addAll(List.of("worker_started@2", QuestionDriver.CONNECTED + "@2", QuestionDriver.CALL + "@2",
+                    "worker_exited@2"));
+
+            var result = QuestionResults.evaluate("Q1", List.of(
+                    fixtureRun("i1", "opencode", "m", true, askedThenSilent, true),
+                    fixtureRun("i1", "opencode", "m", true, faulted, false),
+                    fixtureRun("i1", "opencode", "m", true, superseded, false),
+                    fixtureRun("i1", "opencode", "m", true, EARLY_EXIT_EVENTS, false)));
+
+            assertEquals(List.of(4, 4, 3, 1, 1, 1, 1), counts(result.path("groups").get(0)));
+        }
+
+        @Test
+        @DisplayName("names the harness default as such, also for records that wrote null")
+        void shouldNameHarnessDefault() throws Exception {
+            var runs = List.of(fixtureRun("i1", "agy", "null", false, ASKING_EVENTS, true),
+                    fixtureRun("i1", "agy", QuestionResults.HARNESS_DEFAULT, false, ASKING_EVENTS, true));
+
+            var result = QuestionResults.evaluate("Q1", runs);
+
+            var group = result.path("groups").get(0);
+            assertAll("the group",
+                    () -> assertEquals(1, result.path("groups").size()),
+                    () -> assertEquals(QuestionResults.HARNESS_DEFAULT, group.path("model").asText()),
+                    () -> assertTrue(group.path("group").asText().contains("model=harness default"),
+                            group.toString()));
+        }
+
+        @Test
+        @DisplayName("names no run limit when every invocation recorded the same")
+        void shouldNameNoEqualRunLimit() throws Exception {
+            var first = invocation("a", "Q1", 3, 3, null);
+            first.put(QuestionResults.RUN_TIMEOUT, "PT20M");
+            var second = invocation("b", "Q1", 3, 3, null);
+            second.put(QuestionResults.RUN_TIMEOUT, "PT20M");
+            var runs = List.of(fixtureRun("a", "claude", "claude-haiku-4-5", false, ASKING_EVENTS, true),
+                    fixtureRun("b", "agy", "null", false, ASKING_EVENTS, true));
+
+            var result = QuestionResults.result("Q1", runs, List.of(first, second), () -> 0);
+
+            result.path("limits").forEach(limit -> assertFalse(limit.asText().contains("run limit"), limit.asText()));
+        }
+
+        @Test
+        @DisplayName("supplies the run limit of an invocation that did not record it, marked, and keeps a recorded one")
+        void shouldSupplyRunTimeouts() {
+            var old = invocation("old", "Q1", 3, 3, null);
+            var recorded = invocation("new", "Q1", 3, 3, null);
+            recorded.put(QuestionResults.RUN_TIMEOUT, "PT20M");
+            List<JsonNode> invocations = List.of(old, recorded);
+
+            var supplied = QuestionResults.supplyRunTimeouts(invocations, "old=PT6M, new=PT1M");
+
+            assertAll("the invocations",
+                    () -> assertEquals("PT6M", supplied.get(0).path(QuestionResults.RUN_TIMEOUT).asText()),
+                    () -> assertTrue(supplied.get(0).path(QuestionResults.RUN_TIMEOUT_SUPPLIED).asBoolean()),
+                    () -> assertFalse(old.has(QuestionResults.RUN_TIMEOUT), "the record itself was changed"),
+                    () -> assertEquals("PT20M", supplied.get(1).path(QuestionResults.RUN_TIMEOUT).asText()),
+                    () -> assertFalse(supplied.get(1).has(QuestionResults.RUN_TIMEOUT_SUPPLIED)),
+                    () -> assertThrows(IllegalArgumentException.class,
+                            () -> QuestionResults.supplyRunTimeouts(invocations, "typo=PT6M")));
+        }
+
+        private static final List<String> ASKING_EVENTS = List.of("worker_started", QuestionDriver.CONNECTED,
+                QuestionDriver.CALL, "asked", "continued", "submitted", "worker_exited");
+        private static final List<String> EARLY_EXIT_EVENTS = List.of("worker_started", QuestionDriver.CONNECTED,
+                "disconnected", "worker_exited");
+
+        private static List<Integer> counts(JsonNode group) {
+            return List.of("runs", "timed_out", "no_ask", "early_exit", "asked", "continued", "submitted").stream()
+                    .map(field -> group.path(field).asInt(-1)).toList();
+        }
+
+        /**
+         * A run record of Q1 with the stub's events of {@code w1}, written by the test: each event of generation 1,
+         * or of the generation after its {@code @} ({@code worker_exited@2}).
+         */
+        private JsonNode fixtureRun(String invocation, String host, String model, boolean timedOut,
+                List<String> events, boolean recordedAsk) throws IOException {
+            var stub = Files.createDirectories(directory.resolve("stub-" + UUID.randomUUID()));
+            var lines = new StringBuilder();
+            var at = 1_000L;
+            for (var named : events) {
+                var parts = named.split("@", 2);
+                var event = parts[0];
+                var node = QuestionStub.JSON.createObjectNode();
+                node.put("at", at++);
+                node.put("event", event);
+                node.put("worker", WORKER);
+                node.put("generation", parts.length > 1 ? Integer.parseInt(parts[1]) : 1);
+                if ("asked".equals(event)) {
+                    node.put("decision", "d1");
+                }
+                lines.append(QuestionStub.JSON.writeValueAsString(node)).append('\n');
+            }
+            Files.writeString(stub.resolve("events.jsonl"), lines);
+            Files.writeString(stub.resolve("questions.jsonl"), recordedAsk ? "{\"line\":\"asked\"}\n" : "");
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put(QuestionResults.INVOCATION, invocation);
+            run.put("item", "Q1");
+            run.put("host", host);
+            run.put("model", model);
+            run.put("form", "fresh");
+            run.put("continuation", "fallback");
+            run.put("fixture", "f1");
+            run.put("kind", "entity");
+            run.put(QuestionResults.TIMED_OUT, timedOut);
+            run.put("stub_dir", stub.toString());
+            run.putArray("workers");
+            return run;
         }
 
         private static ObjectNode verdict(String verdict) {

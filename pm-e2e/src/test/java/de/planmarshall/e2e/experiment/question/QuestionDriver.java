@@ -24,6 +24,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -116,9 +117,14 @@ final class QuestionDriver implements AutoCloseable {
 
     /** The event the stub logs when a generation's relay connects: the first event the generation causes itself. */
     static final String CONNECTED = "connected";
+    /** The event the stub logs for every tool call of a generation. */
+    static final String CALL = "call";
+    /** The event the stub logs for every ask it records. */
+    static final String ASKED = "asked";
+    /** The event the driver logs when it injects a fault into a generation. */
+    static final String FAULT_INJECTED = "fault_injected";
 
     private static final SecureRandom RANDOM = new SecureRandom();
-    private static final String FAULT_INJECTED = "fault_injected";
     private static final Duration TERMINATION_GRACE = Duration.ofSeconds(10);
     private static final Duration POLL = Duration.ofMillis(100);
     private static final boolean LINUX = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("linux");
@@ -351,12 +357,27 @@ final class QuestionDriver implements AutoCloseable {
     /** How many of the harness's last {@code stderr} lines a launch failure records. */
     static final int STDERR_TAIL = 5;
 
+    /**
+     * A worker generation that ended early: its relay connected, but its process exited without a single call to the
+     * stub (OpenCode with {@code opencode/gpt-5.4-nano} said the plan-marshall tools were unavailable and exited within
+     * seconds in 15 of 24 runs of the Q1 smoke pass).
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param exit       the exit code of its process
+     * @param detail     the first line of {@code stderr} that is not a line of {@code pm-exec}'s own, else the last
+     *                   line of its output ({@link #earlyExitDetail(String, List)}), empty when none
+     */
+    record EarlyExit(String worker, int generation, int exit, String detail) {
+    }
+
     private final QuestionStub.Settings stubSettings;
     private final Settings settings;
     private final boolean ownsStub;
     private final List<Worker> workers = new CopyOnWriteArrayList<>();
     private final List<QuestionDriver> siblings = new CopyOnWriteArrayList<>();
     private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
+    private final Map<String, EarlyExit> earlyExits = new ConcurrentHashMap<>();
     private volatile QuestionStub stub;
 
     private QuestionDriver(QuestionStub.Settings stubSettings, Settings settings, QuestionStub stub,
@@ -707,12 +728,12 @@ final class QuestionDriver implements AutoCloseable {
 
     /**
      * Waits for an event of the stub's log as {@link #awaitEvent(Predicate, long)} does, but ends the wait at once
-     * when a worker of this driver or of a sibling failed to launch ({@link #launchFailure()}), instead of at the
-     * deadline.
+     * when a worker of this driver or of a sibling failed to launch ({@link #launchFailure()}) or ended early
+     * ({@link #earlyExit()}), instead of at the deadline.
      *
      * @param match       the event
      * @param untilMillis the deadline (epoch milliseconds)
-     * @return the first matching event, empty at the deadline or on a launch failure
+     * @return the first matching event, empty at the deadline, on a launch failure or on an early exit
      * @throws IOException          if the log cannot be read
      * @throws InterruptedException if interrupted
      */
@@ -720,11 +741,90 @@ final class QuestionDriver implements AutoCloseable {
             throws IOException, InterruptedException {
         while (true) {
             var found = awaitEvent(match, 0);
-            if (found.isPresent() || launchFailure().isPresent() || System.currentTimeMillis() >= untilMillis) {
+            if (found.isPresent() || launchFailure().isPresent() || earlyExit().isPresent()
+                    || System.currentTimeMillis() >= untilMillis) {
                 return found;
             }
             Thread.sleep(POLL);
         }
+    }
+
+    /**
+     * @return the first worker of this driver or of its siblings that ended early ({@link #earlyExit(Worker)}), empty
+     *         when none did
+     * @throws IOException if the event log or a worker's output cannot be read
+     */
+    Optional<EarlyExit> earlyExit() throws IOException {
+        for (var worker : workers) {
+            var early = earlyExit(worker);
+            if (early.isPresent()) {
+                return early;
+            }
+        }
+        for (var sibling : siblings) {
+            var early = sibling.earlyExit();
+            if (early.isPresent()) {
+                return early;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a worker generation ended early: its process exited after its relay connected
+     * ({@value #CONNECTED}) without a single call to the stub ({@value #CALL}), no fault was injected into it, no
+     * newer generation of the same worker was started, and the worker did not ask in an earlier generation (its run
+     * keeps the wait as before). A generation whose relay never connected failed to launch instead
+     * ({@link #launchFailure(Worker)}); one that called the stub, an asker among them, did not end early. The first
+     * detection is logged as the event {@code early_exit}.
+     *
+     * @param worker a worker
+     * @return its early exit, empty when it still runs or did not end early
+     * @throws IOException if the event log or the worker's output cannot be read
+     */
+    Optional<EarlyExit> earlyExit(Worker worker) throws IOException {
+        var key = worker.id() + "#" + worker.generation();
+        var known = earlyExits.get(key);
+        if (known != null) {
+            return Optional.of(known);
+        }
+        var superseded = workers.stream().anyMatch(other -> other.id().equals(worker.id())
+                && other.generation() > worker.generation());
+        if (worker.process().isAlive() || superseded) {
+            return Optional.empty();
+        }
+        var own = new HashSet<String>();
+        var askedBefore = false;
+        for (var event : QuestionResults.readJsonLines(stub.events())) {
+            if (matches(event, worker)) {
+                own.add(event.path(EVENT).asText());
+            }
+            askedBefore |= ASKED.equals(event.path(EVENT).asText())
+                    && worker.id().equals(event.path(WORKER).asText());
+        }
+        if (!own.contains(CONNECTED) || own.contains(CALL) || own.contains(FAULT_INJECTED) || askedBefore) {
+            return Optional.empty();
+        }
+        var early = new EarlyExit(worker.id(), worker.generation(), worker.process().exitValue(),
+                earlyExitDetail(stderr(worker), QuestionResults.readJsonLines(worker.output())));
+        if (earlyExits.putIfAbsent(key, early) == null) {
+            var fields = identity(worker);
+            fields.put("exit", early.exit());
+            fields.put("detail", early.detail());
+            stub.event("early_exit", fields);
+        }
+        return Optional.of(earlyExits.get(key));
+    }
+
+    /**
+     * @param stderr  what a worker wrote to {@code stderr}
+     * @param outputs its arrival-stamped output lines
+     * @return the first line of {@code stderr} that is not a line of {@code pm-exec}'s own, else the last line of its
+     *         output, empty when it wrote neither
+     */
+    static String earlyExitDetail(String stderr, List<JsonNode> outputs) {
+        return stderr.lines().filter(line -> !line.isBlank() && !pmExecLine(line)).findFirst()
+                .orElseGet(() -> outputs.isEmpty() ? "" : outputs.getLast().path("line").asText());
     }
 
     /**
@@ -1337,7 +1437,7 @@ final class QuestionDriver implements AutoCloseable {
                         && "answer".equals(event.path("kind").asText())) {
                     return false;
                 }
-                if ("call".equals(name) && matches(event, worker)) {
+                if (CALL.equals(name) && matches(event, worker)) {
                     lastCall = event.path("at").asLong();
                 }
             }
