@@ -46,10 +46,12 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * verbatim), encoded before the first measured run and not changed by any result. No figure comes from what a model
  * reports about itself. Beside the figures, the result names the invocations whose run records it aggregates and
  * whether they ran at the specified scale ({@link #scale}); a smaller pass keeps its verdict, marked
- * {@value #NOT_AT_SCALE}. Every group also counts its runs that timed out, did not ask, ended early, met a quota error
- * of the harness, asked, continued and submitted, figures no verdict reads; where a group has quota errors, it also
- * reports its verdict without them ({@code verdict_without_quota_error}), an additional figure that does not replace
- * the verdict. The limits come from every invocation it aggregates ({@link #result}).
+ * {@value #NOT_AT_SCALE}. Every group also counts its runs that timed out, did not ask, ended early, ended early in a
+ * continuation generation ({@value #CONTINUATION_EARLY_EXIT}), met a quota error of the harness, asked, continued and
+ * submitted, figures no verdict reads; where a group has quota errors, it also reports its verdict without them
+ * ({@code verdict_without_quota_error}), and where its verdict without its continuation early exits reads differently,
+ * that verdict ({@value #VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT}): additional figures that do not replace the
+ * verdict. The limits come from every invocation it aggregates ({@link #result}).
  */
 final class QuestionResults {
 
@@ -123,6 +125,20 @@ final class QuestionResults {
     static final String RUN_TIMEOUT_SUPPLIED = "run_timeout_supplied";
     /** The field of a run record of a run whose worker exited without a single call to the stub. */
     static final String EARLY_EXIT = "early_exit";
+    /**
+     * The field of a run record, and the group column, of a run whose continuation generation (a generation of the
+     * asking worker after the one that asked) connected and exited without a single call to the stub
+     * ({@link #continuationExit(RunView)}).
+     */
+    static final String CONTINUATION_EARLY_EXIT = "continuation_early_exit";
+    /**
+     * The verdict of a group or an item without its {@value #CONTINUATION_EARLY_EXIT} runs, reported only where it
+     * reads differently from the verdict (and, for a group, where runs remain to judge without them): an additional
+     * figure, not the verdict.
+     */
+    static final String VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT = "verdict_without_continuation_early_exit";
+    /** The exit codes of a process the driver ended ({@code SIGTERM}, {@code SIGKILL}): no exit of its own. */
+    static final Set<Integer> TERMINATED_EXITS = Set.of(143, 137);
     /** The field of a run record of a run that waited out its run limit. */
     static final String TIMED_OUT = "timed_out";
     /**
@@ -350,7 +366,7 @@ final class QuestionResults {
      * The whole result of an item from its run records and the records of every invocation of it, as the measurement
      * and the re-aggregation write it: the figures and verdict ({@link #evaluate(String, List)}), the limits of all
      * invocations that contributed run records (the fixture wording, OpenCode's data home, the run limits, the early
-     * exits waited out, for R4 its own), and the bookkeeping of the invocations ({@link #scale}). The limits come from
+     * exits waited out, the continuation early exits, for R4 its own), and the bookkeeping of the invocations ({@link #scale}). The limits come from
      * the union of the invocations, so a later invocation without OpenCode does not drop the limit of an earlier one
      * with it.
      *
@@ -376,6 +392,7 @@ final class QuestionResults {
         }
         limitOfRunLimits(result, runs, contributing);
         limitOfEarlyExitsWaitedOut(result, runs);
+        limitOfContinuationEarlyExits(result, runs);
         limitOfQuotaErrors(result, runs);
         if ("Q3".equals(item)) {
             limitOfQ3Times(result);
@@ -605,6 +622,151 @@ final class QuestionResults {
     }
 
     /**
+     * Adds a limit when runs have a continuation generation that connected and exited without a call
+     * ({@link #continuationExit(RunView)}, quota-error runs aside): they count as {@value #CONTINUATION_EARLY_EXIT},
+     * not as early_exit or timed_out. The limit names the runs of records written before the driver ended the wait
+     * on such an exit, which waited out their run limit and were recorded as timed_out: reclassified where the stub
+     * log shows the generation's own exit ({@link ContinuationExit#EXITED}), kept as timed_out and marked as
+     * waited-out continuation exits where it does not ({@link ContinuationExit#UNCLEAR}). It also states how the
+     * verdict reads them: as before, the verdict logic being unchanged, with
+     * {@value #VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT} where a group's verdict without them reads differently.
+     *
+     * @param result the result, its groups evaluated
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    static void limitOfContinuationEarlyExits(ObjectNode result, List<JsonNode> runs) throws IOException {
+        var counted = new TreeMap<String, Integer>();
+        var recorded = new TreeMap<String, Integer>();
+        var reclassified = new TreeMap<String, List<String>>();
+        var waitedOut = new TreeMap<String, List<String>>();
+        for (var run : runs) {
+            var view = view(run);
+            if (quotaError(view)) {
+                continue;
+            }
+            var host = run.path(HOST).asText();
+            var exit = continuationExit(view);
+            if (exit == ContinuationExit.EXITED) {
+                counted.merge(host, 1, Integer::sum);
+            }
+            if (run.path(CONTINUATION_EARLY_EXIT).asBoolean()) {
+                recorded.merge(host, 1, Integer::sum);
+            } else if (exit == ContinuationExit.EXITED && run.path(TIMED_OUT).asBoolean()) {
+                reclassified.computeIfAbsent(host, _ -> new ArrayList<>()).add(runId(run));
+            } else if (exit == ContinuationExit.UNCLEAR) {
+                waitedOut.computeIfAbsent(host, _ -> new ArrayList<>()).add(runId(run));
+            }
+        }
+        if (counted.isEmpty() && waitedOut.isEmpty()) {
+            return;
+        }
+        var text = new StringBuilder("A continuation generation (a generation of the asking worker after the one "
+                + "that asked) that connected and exited without a single call to the stub counts as "
+                + "continuation_early_exit, not as early_exit and not as timed_out; its run keeps its ask, counts in "
+                + "continued (the stub continued the task after the answer), and not in submitted");
+        if (!counted.isEmpty()) {
+            text.append(": ").append(String.join(", ", counted.entrySet().stream()
+                    .map(entry -> entry.getKey() + " " + entry.getValue()).toList()));
+        }
+        text.append(". The driver ends the wait at once on such an exit");
+        if (!recorded.isEmpty()) {
+            text.append(" (recorded so: ").append(String.join(", ", recorded.entrySet().stream()
+                    .map(entry -> entry.getKey() + " " + entry.getValue()).toList())).append(')');
+        }
+        text.append('.');
+        if (!reclassified.isEmpty()) {
+            text.append(" Records written before it waited out their run limit and were recorded as timed_out; where "
+                    + "the stub log shows the generation's own exit (worker_exited with an exit code other than the "
+                    + "driver's termination, 143 or 137) they are reclassified as continuation_early_exit: ")
+                    .append(namedRuns(reclassified)).append('.');
+        }
+        if (!waitedOut.isEmpty()) {
+            text.append(" Records whose stub log shows no such exit of the continuation generation stay timed_out and "
+                    + "are marked here as waited-out continuation exits: ").append(namedRuns(waitedOut)).append('.');
+        }
+        var differing = new ArrayList<String>();
+        result.path("groups").forEach(group -> {
+            if (group.has(VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT)) {
+                differing.add(group.path("group").asText());
+            }
+        });
+        text.append(" The verdict logic is unchanged and reads these runs as before; ").append(differing.isEmpty()
+                ? "no group's verdict reads differently without them."
+                : VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT + " is the verdict without them, an additional figure, "
+                        + "where it reads differently: " + String.join("; ", differing) + ".");
+        limit(result, text.toString());
+    }
+
+    private static String namedRuns(Map<String, List<String>> perHost) {
+        return String.join("; ", perHost.entrySet().stream().map(entry -> entry.getKey() + " "
+                + entry.getValue().size() + " (" + String.join(", ", entry.getValue()) + ")").toList());
+    }
+
+    /** How a run's continuation generation ended ({@link #continuationExit(RunView)}). */
+    enum ContinuationExit {
+        /** No continuation generation connected and ended without a call. */
+        NONE,
+        /** A continuation generation connected and exited without a call, by its own exit. */
+        EXITED,
+        /**
+         * A continuation generation connected and made no call, but the stub log shows no exit of its own: no
+         * {@code worker_exited}, or one with the exit code of the driver's termination ({@link #TERMINATED_EXITS}).
+         * Counted only for a run recorded as timed out.
+         */
+        UNCLEAR
+    }
+
+    /**
+     * How a run's continuation generation ended: {@link ContinuationExit#EXITED} when its record says
+     * {@value #CONTINUATION_EARLY_EXIT}, or when a generation of a worker after the generation in which that worker
+     * first asked, and the newest generation of that worker, connected, made no call to the stub, had no fault
+     * injected, and exited by itself ({@code worker_exited} with an exit code not in {@link #TERMINATED_EXITS});
+     * {@link ContinuationExit#UNCLEAR} when such a generation shows no exit of its own and the run timed out;
+     * {@link ContinuationExit#NONE} otherwise, and always for the negative resume of R2, which continues no task. The
+     * second reading also finds the continuation exits of records written before the driver ended the wait on them.
+     *
+     * @param view a run
+     * @return how its continuation generation ended
+     */
+    static ContinuationExit continuationExit(RunView view) {
+        if (view.run().path(CONTINUATION_EARLY_EXIT).asBoolean()) {
+            return ContinuationExit.EXITED;
+        }
+        if (view.run().path("negative").asBoolean()) {
+            return ContinuationExit.NONE;
+        }
+        var firstAsk = new HashMap<String, Integer>();
+        view.named(ASKED).forEach(event -> firstAsk.merge(event.path(WORKER).asText(),
+                event.path(GENERATION).asInt(), Math::min));
+        var latest = new HashMap<String, Integer>();
+        view.named("worker_started").forEach(event -> latest.merge(event.path(WORKER).asText(),
+                event.path(GENERATION).asInt(), Math::max));
+        var unclear = false;
+        for (var entry : latest.entrySet()) {
+            var worker = entry.getKey();
+            var generation = entry.getValue();
+            var asked = firstAsk.get(worker);
+            if (asked == null || generation <= asked) {
+                continue;
+            }
+            var own = view.events().stream().filter(event -> same(event, worker, generation)).toList();
+            var names = own.stream().map(event -> event.path(EVENT).asText()).collect(Collectors.toSet());
+            if (!names.contains(QuestionDriver.CONNECTED) || names.contains(QuestionDriver.CALL)
+                    || names.contains(QuestionDriver.FAULT_INJECTED)) {
+                continue;
+            }
+            var exitedByItself = own.stream().filter(event -> "worker_exited".equals(event.path(EVENT).asText()))
+                    .anyMatch(event -> !TERMINATED_EXITS.contains(event.path("exit").asInt(0)));
+            if (exitedByItself) {
+                return ContinuationExit.EXITED;
+            }
+            unclear = true;
+        }
+        return unclear && view.run().path(TIMED_OUT).asBoolean() ? ContinuationExit.UNCLEAR : ContinuationExit.NONE;
+    }
+
+    /**
      * Evaluates an item: groups its runs by host, model, form, continuation and the item's measured parameter, and
      * computes each group's figures and verdict.
      *
@@ -628,6 +790,7 @@ final class QuestionResults {
         var quotaErrors = false;
         var passWithoutQuota = true;
         var judgedWithoutQuota = false;
+        var passWithoutContinuationExits = !groups.isEmpty();
         for (var entry : groups.entrySet()) {
             var group = evaluateGroup(item, entry.getValue());
             group.put("group", entry.getKey());
@@ -637,11 +800,16 @@ final class QuestionResults {
             var without = group.path(VERDICT_WITHOUT_QUOTA_ERROR).asText(group.path(VERDICT).asText());
             passWithoutQuota &= !"fail".equals(without);
             judgedWithoutQuota |= !"none".equals(without);
+            passWithoutContinuationExits &= !"fail".equals(group.path(VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT)
+                    .asText(group.path(VERDICT).asText()));
         }
         result.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
         if (quotaErrors) {
             result.put(VERDICT_WITHOUT_QUOTA_ERROR, "R4".equals(item) || !judgedWithoutQuota ? "none"
                     : passWithoutQuota ? "pass" : "fail");
+        }
+        if (!"R4".equals(item) && passWithoutContinuationExits != pass) {
+            result.put(VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT, passWithoutContinuationExits ? "pass" : "fail");
         }
         if ("R1".equals(item) || "R2".equals(item)) {
             result.set("R1".equals(item) ? "max_hold_seconds" : "max_age_seconds", longestPassing(array,
@@ -725,6 +893,15 @@ final class QuestionResults {
                 group.set(VERDICT_BY_NEXT_PM_WAIT + "_without_quota_error", scratch.get(VERDICT_BY_NEXT_PM_WAIT));
             }
         }
+        var withoutContinuationExits = views.stream()
+                .filter(view -> continuationExit(view) != ContinuationExit.EXITED).toList();
+        if (withoutContinuationExits.size() < views.size() && !withoutContinuationExits.isEmpty()
+                && !"R4".equals(item)) {
+            var verdict = judge(item, withoutContinuationExits, QuestionStub.JSON.createObjectNode()) ? "pass" : "fail";
+            if (!verdict.equals(group.path(VERDICT).asText())) {
+                group.put(VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT, verdict);
+            }
+        }
         return group;
     }
 
@@ -748,10 +925,13 @@ final class QuestionResults {
     /**
      * Adds the counts every group reports beside its item's figures, so that no run leaves the result without a
      * trace: {@code runs}, {@code timed_out} (the run waited out its run limit), {@code no_ask} (no {@code asked}
-     * event), {@code early_exit} ({@link #earlyExit(RunView)}), {@value #QUOTA_ERROR} ({@link #quotaError(RunView)}),
-     * {@code asked}, {@code continued} and {@code submitted} (runs with at least one such event). A quota-error run
-     * counts in {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask} or {@code early_exit}. They are
-     * reported figures: no verdict reads them.
+     * event), {@code early_exit} ({@link #earlyExit(RunView)}), {@value #CONTINUATION_EARLY_EXIT}
+     * ({@link #continuationExit(RunView)} is {@link ContinuationExit#EXITED}), {@value #QUOTA_ERROR}
+     * ({@link #quotaError(RunView)}), {@code asked}, {@code continued} and {@code submitted} (runs with at least one
+     * such event). A quota-error run counts in {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask},
+     * {@code early_exit} or {@value #CONTINUATION_EARLY_EXIT}; a continuation early exit not in {@code timed_out}, even
+     * where its record, written before the driver ended the wait on it, says timed out. They are reported figures: no
+     * verdict reads them.
      *
      * @param views  the group's runs
      * @param group  the group
@@ -762,6 +942,7 @@ final class QuestionResults {
         var noAsk = 0;
         var asked = 0;
         var earlyExits = 0;
+        var continuationEarlyExits = 0;
         var quotaErrors = 0;
         var continued = 0;
         var submitted = 0;
@@ -771,7 +952,9 @@ final class QuestionResults {
             if (quotaError(view)) {
                 quotaErrors++;
             } else {
-                timedOut += view.run().path(TIMED_OUT).asBoolean() ? 1 : 0;
+                var continuationExited = continuationExit(view) == ContinuationExit.EXITED;
+                continuationEarlyExits += continuationExited ? 1 : 0;
+                timedOut += view.run().path(TIMED_OUT).asBoolean() && !continuationExited ? 1 : 0;
                 noAsk += askedHere ? 0 : 1;
                 earlyExits += earlyExit(view) ? 1 : 0;
             }
@@ -782,6 +965,7 @@ final class QuestionResults {
         group.put(TIMED_OUT, timedOut);
         group.put("no_ask", noAsk);
         group.put(EARLY_EXIT, earlyExits);
+        group.put(CONTINUATION_EARLY_EXIT, continuationEarlyExits);
         group.put(QUOTA_ERROR, quotaErrors);
         group.put(ASKED, asked);
         group.put("continued", continued);
@@ -791,8 +975,9 @@ final class QuestionResults {
     /**
      * Whether a run ended early: its record says so ({@value #EARLY_EXIT}), or a worker generation of it connected
      * and exited without a single call to the stub, was not ended by an injected fault, was not followed by a newer
-     * generation of the same worker, and belongs to a worker that did not ask in an earlier generation (as
-     * {@link QuestionDriver#earlyExit(QuestionDriver.Worker)} decides). The second reading also finds the early exits
+     * generation of the same worker, and belongs to a worker that did not ask (the generation of a worker that asked
+     * before is a continuation generation, read by {@link #continuationExit(RunView)}, as
+     * {@link QuestionDriver#earlyExit(QuestionDriver.Worker)} marks it). The second reading also finds the early exits
      * of records written before the driver detected them, whose runs waited out their run limit.
      *
      * @param view a run

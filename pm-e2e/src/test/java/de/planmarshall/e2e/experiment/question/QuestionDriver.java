@@ -360,15 +360,18 @@ final class QuestionDriver implements AutoCloseable {
     /**
      * A worker generation that ended early: its relay connected, but its process exited without a single call to the
      * stub (OpenCode with {@code opencode/gpt-5.4-nano} said the plan-marshall tools were unavailable and exited within
-     * seconds in 15 of 24 runs of the Q1 smoke pass).
+     * seconds in 15 of 24 runs of the Q1 smoke pass). A continuation generation, one after the generation in which its
+     * worker asked, ends so too (OpenCode continuations in three of four runs of the Q4 smoke pass); it is recorded
+     * apart, as {@value QuestionResults#CONTINUATION_EARLY_EXIT}, because its run did ask.
      *
-     * @param worker     the worker id
-     * @param generation its generation
-     * @param exit       the exit code of its process
-     * @param detail     the first line of {@code stderr} that is not a line of {@code pm-exec}'s own, else the last
-     *                   line of its output ({@link #earlyExitDetail(String, List)}), empty when none
+     * @param worker       the worker id
+     * @param generation   its generation
+     * @param exit         the exit code of its process
+     * @param detail       the first line of {@code stderr} that is not a line of {@code pm-exec}'s own, else the last
+     *                     line of its output ({@link #earlyExitDetail(String, List)}), empty when none
+     * @param continuation whether it is a continuation generation: its worker asked in an earlier generation
      */
-    record EarlyExit(String worker, int generation, int exit, String detail) {
+    record EarlyExit(String worker, int generation, int exit, String detail, boolean continuation) {
     }
 
     /**
@@ -845,11 +848,14 @@ final class QuestionDriver implements AutoCloseable {
 
     /**
      * Whether a worker generation ended early: its process exited after its relay connected
-     * ({@value #CONNECTED}) without a single call to the stub ({@value #CALL}), no fault was injected into it, no
-     * newer generation of the same worker was started, and the worker did not ask in an earlier generation (its run
-     * keeps the wait as before). A generation whose relay never connected failed to launch instead
-     * ({@link #launchFailure(Worker)}); one that called the stub, an asker among them, did not end early. The first
-     * detection is logged as the event {@code early_exit}.
+     * ({@value #CONNECTED}) without a single call to the stub ({@value #CALL}) of its own generation, no fault was
+     * injected into it, and no newer generation of the same worker was started. The test is per generation: a
+     * generation that called the stub, an asker among them, did not end early, whatever its worker did before or
+     * after. A continuation generation, one after a generation of the same worker that asked (a continuation reuses
+     * the asker's worker id), ends early so as well and is marked {@link EarlyExit#continuation()}: its run did ask,
+     * and the wait ends at once instead of at the run limit. A generation whose relay never connected failed to launch
+     * instead ({@link #launchFailure(Worker)}). The first detection is logged as the event {@code early_exit}, for a
+     * continuation generation as {@value QuestionResults#CONTINUATION_EARLY_EXIT}.
      *
      * @param worker a worker
      * @return its early exit, empty when it still runs or did not end early
@@ -867,24 +873,25 @@ final class QuestionDriver implements AutoCloseable {
             return Optional.empty();
         }
         var own = new HashSet<String>();
-        var askedBefore = false;
+        var askedEarlier = false;
         for (var event : QuestionResults.readJsonLines(stub.events())) {
             if (matches(event, worker)) {
                 own.add(event.path(EVENT).asText());
             }
-            askedBefore |= ASKED.equals(event.path(EVENT).asText())
-                    && worker.id().equals(event.path(WORKER).asText());
+            askedEarlier |= ASKED.equals(event.path(EVENT).asText())
+                    && worker.id().equals(event.path(WORKER).asText())
+                    && event.path(GENERATION).asInt() < worker.generation();
         }
-        if (!own.contains(CONNECTED) || own.contains(CALL) || own.contains(FAULT_INJECTED) || askedBefore) {
+        if (!own.contains(CONNECTED) || own.contains(CALL) || own.contains(FAULT_INJECTED)) {
             return Optional.empty();
         }
         var early = new EarlyExit(worker.id(), worker.generation(), worker.process().exitValue(),
-                earlyExitDetail(stderr(worker), QuestionResults.readJsonLines(worker.output())));
+                earlyExitDetail(stderr(worker), QuestionResults.readJsonLines(worker.output())), askedEarlier);
         if (earlyExits.putIfAbsent(key, early) == null) {
             var fields = identity(worker);
             fields.put("exit", early.exit());
             fields.put("detail", early.detail());
-            stub.event("early_exit", fields);
+            stub.event(early.continuation() ? QuestionResults.CONTINUATION_EARLY_EXIT : "early_exit", fields);
         }
         return Optional.of(earlyExits.get(key));
     }

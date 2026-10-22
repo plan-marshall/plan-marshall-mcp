@@ -95,7 +95,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * pass and never a timeout ({@link QuestionDriver#launchFailure()}). A worker whose relay connected but that exits
  * without a single call to the stub ends the run at once as {@code early_exit}, with the exit code and the first
  * harness line of its {@code stderr} or the last line of its output: never a pass, never a timeout and never counted as
- * asked ({@link QuestionDriver#earlyExit()}). A worker whose harness answers with a quota or limit error
+ * asked ({@link QuestionDriver#earlyExit()}). A continuation generation, started after its worker asked, that
+ * connects and exits without a call of its own ends the run at once as {@code continuation_early_exit} with the same
+ * detail: the ask stays counted, and the run counts neither as {@code early_exit} nor as a timeout. A worker whose
+ * harness answers with a quota or limit error
  * ({@link QuestionResults#QUOTA_PATTERN} in its own output or {@code stderr}) ends the run at once as
  * {@code quota_error}, before either of these and whether or not it called the stub
  * ({@link QuestionDriver#quotaError()}).
@@ -1050,8 +1053,12 @@ class QuestionLoopExperiment {
          * line of its {@code stderr}, or as {@value QuestionResults#EARLY_EXIT} once a worker exited after its relay
          * connected without a single call to the stub, with its exit code and the first harness line of its
          * {@code stderr} or the last line of its output ({@link QuestionDriver#earlyExit()}): either ends the run at
-         * once, a failure of the run, never a pass, never a timeout, and never counted as asked. A worker that
-         * called the stub, an asker among them, and then exited keeps the wait as before. A quota or limit error of a
+         * once, a failure of the run, never a pass, never a timeout, and never counted as asked. A continuation
+         * generation (one after the generation in which its worker asked) that exits so ends the run at once as
+         * {@value QuestionResults#CONTINUATION_EARLY_EXIT}, with the same fields under that prefix: the earlier ask
+         * stays counted, and the run counts neither as {@value QuestionResults#EARLY_EXIT} nor as timed out. A
+         * generation that called the stub, an asker among them, and then exited keeps the wait as before. A quota or
+         * limit error of a
          * worker's harness ({@link QuestionDriver#quotaError()}) comes first: it ends the run at once as
          * {@value QuestionResults#QUOTA_ERROR}, with the worker and the matching line, whether or not the worker
          * called the stub.
@@ -1090,11 +1097,13 @@ class QuestionLoopExperiment {
                 if (early.isPresent()) {
                     ended = true;
                     var value = early.get();
-                    record.put(QuestionResults.EARLY_EXIT, true);
-                    record.put("early_exit_worker", value.worker());
-                    record.put("early_exit_generation", value.generation());
-                    record.put("early_exit_code", value.exit());
-                    record.put("early_exit_detail", value.detail());
+                    var field = value.continuation() ? QuestionResults.CONTINUATION_EARLY_EXIT
+                            : QuestionResults.EARLY_EXIT;
+                    record.put(field, true);
+                    record.put(field + "_worker", value.worker());
+                    record.put(field + "_generation", value.generation());
+                    record.put(field + "_code", value.exit());
+                    record.put(field + "_detail", value.detail());
                 }
             }
             return ended;

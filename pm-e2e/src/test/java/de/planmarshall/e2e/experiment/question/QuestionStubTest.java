@@ -866,7 +866,7 @@ class QuestionStubTest {
                 assertAll("the early exit",
                         () -> assertTrue(asked.isEmpty()),
                         () -> assertEquals(Optional.of(new EarlyExit(WORKER, 1, 3,
-                                "the plan-marshall tools are unavailable")), early),
+                                "the plan-marshall tools are unavailable", false)), early),
                         () -> assertEquals(Optional.empty(), driver.launchFailure()),
                         () -> assertTrue(Files.readString(driver.stub().events())
                                 .contains("\"event\":\"early_exit\""), "no early_exit event"));
@@ -892,14 +892,47 @@ class QuestionStubTest {
         }
 
         @Test
-        @DisplayName("a generation that exits without a call after its worker asked in an earlier one keeps the wait")
-        void shouldNotEndEarlyAfterEarlierAsk() throws Exception {
+        @DisplayName("ends the wait at once for a continuation generation that exits without a call after its worker "
+                + "asked, as a continuation early exit")
+        void shouldEndContinuationEarlyExitAtOnce() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_LAUNCHED + "' >&2\n"
+                    + "echo 'the pm_state, pm_wait and pm_do tools are not available' >&2\nexit 0");
+            try (var driver = driver(exec)) {
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                driver.stub().event(QuestionDriver.CALL, Map.of("worker", WORKER, "generation", 1, "tool", "pm_do"));
+                driver.stub().event(QuestionDriver.ASKED, Map.of("worker", WORKER, "generation", 1, "decision", "d1"));
+                var continuation = launch(driver, 2);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 2));
+                var deadline = System.currentTimeMillis() + Duration.ofMinutes(20).toMillis();
+
+                var asked = assertTimeoutPreemptively(Duration.ofSeconds(30),
+                        () -> driver.awaitEventWhileLaunched(event -> "asked".equals(event.path("event").asText())
+                                && "d2".equals(event.path("decision").asText()), deadline));
+
+                var early = driver.earlyExit();
+                var events = Files.readString(driver.stub().events());
+                assertAll("the continuation early exit",
+                        () -> assertTrue(asked.isEmpty()),
+                        () -> assertFalse(continuation.process().isAlive()),
+                        () -> assertEquals(Optional.of(new EarlyExit(WORKER, 2, 0,
+                                "the pm_state, pm_wait and pm_do tools are not available", true)), early),
+                        () -> assertEquals(Optional.empty(), driver.launchFailure()),
+                        () -> assertTrue(events.contains("\"event\":\"continuation_early_exit\""),
+                                "no continuation_early_exit event"),
+                        () -> assertFalse(events.contains("\"event\":\"early_exit\""), "an early_exit event"));
+            }
+        }
+
+        @Test
+        @DisplayName("a continuation generation that called the stub before it exited has not ended early")
+        void shouldNotEndContinuationEarlyAfterCall() throws Exception {
             var exec = script(directory.resolve("pm-exec"), "exit 0");
             try (var driver = driver(exec)) {
-                driver.stub().event(QuestionDriver.ASKED, Map.of("worker", WORKER, "generation", 0, "decision", "d1"));
-                var worker = launch(driver);
-                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
-                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+                driver.stub().event(QuestionDriver.ASKED, Map.of("worker", WORKER, "generation", 1, "decision", "d1"));
+                var continuation = launch(driver, 2);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 2));
+                driver.stub().event(QuestionDriver.CALL, Map.of("worker", WORKER, "generation", 2, "tool", "pm_state"));
+                assertTrue(driver.awaitExit(continuation, Duration.ofSeconds(30)).isPresent());
 
                 var early = driver.earlyExit();
 
@@ -976,7 +1009,11 @@ class QuestionStubTest {
         }
 
         private static Worker launch(QuestionDriver driver) throws IOException {
-            return driver.startFresh(task(Form.FALLBACK), new Launch(WORKER, 1, ROLE, "Do it.", false, null,
+            return launch(driver, 1);
+        }
+
+        private static Worker launch(QuestionDriver driver, int generation) throws IOException {
+            return driver.startFresh(task(Form.FALLBACK), new Launch(WORKER, generation, ROLE, "Do it.", false, null,
                     List.of(), null));
         }
     }
@@ -1470,8 +1507,8 @@ class QuestionStubTest {
         }
 
         @Test
-        @DisplayName("a continuation that exits without a call after its worker asked is no early exit; one of a "
-                + "worker that never asked is")
+        @DisplayName("a continuation that exits without a call after its worker asked is a continuation early exit, "
+                + "not an early exit and not timed out; one of a worker that never asked is an early exit")
         void shouldKeepAskedWorkerOutOfEarlyExits() throws Exception {
             var askedThenSilent = new ArrayList<>(ASKING_EVENTS);
             askedThenSilent.addAll(List.of("worker_started@2", QuestionDriver.CONNECTED + "@2", "worker_exited@2"));
@@ -1487,7 +1524,96 @@ class QuestionStubTest {
                     fixtureRun("i1", "opencode", "m", true, superseded, false),
                     fixtureRun("i1", "opencode", "m", true, EARLY_EXIT_EVENTS, false)));
 
-            assertEquals(List.of(4, 4, 3, 1, 1, 1, 1), counts(result.path("groups").get(0)));
+            var group = result.path("groups").get(0);
+            assertAll("the group",
+                    () -> assertEquals(List.of(4, 3, 3, 1, 1, 1, 1), counts(group)),
+                    () -> assertEquals(1, group.path(QuestionResults.CONTINUATION_EARLY_EXIT).asInt()));
+        }
+
+        @Test
+        @DisplayName("an old record whose continuation exited without a call is reclassified and named in the limits")
+        void shouldReclassifyWaitedOutContinuationExit() throws Exception {
+            var exited = q3Run("exited", "fresh", true, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(2_000, "worker_exited"),
+                    event(2_100, "worktree_digest").put("digest", "d1"),
+                    event(3_000, "worker_started").put("generation", 2),
+                    event(3_100, QuestionDriver.CONNECTED).put("generation", 2),
+                    event(9_000, "worker_exited").put("generation", 2).put("exit", 0));
+            var recorded = q3Run("recorded", "fresh", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(2_000, "worker_exited"),
+                    event(2_100, "worktree_digest").put("digest", "d1"));
+            ((ObjectNode) recorded).put(QuestionResults.CONTINUATION_EARLY_EXIT, true);
+
+            var result = QuestionResults.result("Q3", List.of(exited, recorded), List.of(invocation("i1", "Q3", 3, 3,
+                    2)), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals(List.of(2, 0, 0, 0, 2, 0, 0), counts(group)),
+                    () -> assertEquals(2, group.path(QuestionResults.CONTINUATION_EARLY_EXIT).asInt()),
+                    () -> assertEquals("pass", group.path("verdict").asText()),
+                    () -> assertTrue(group.path(QuestionResults.VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT)
+                            .isMissingNode(), group.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains("(recorded so: claude 1)")
+                            && limit.contains("reclassified as continuation_early_exit: claude 1 (exited)")
+                            && limit.endsWith("no group's verdict reads differently without them.")),
+                            limits.toString()));
+        }
+
+        @Test
+        @DisplayName("a continuation without an exit of its own stays timed out and is marked as waited out")
+        void shouldMarkContinuationWithoutOwnExit() throws Exception {
+            var terminated = q3Run("terminated", "fresh", true, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(2_000, "worker_exited"),
+                    event(2_100, "worktree_digest").put("digest", "d1"),
+                    event(3_000, "worker_started").put("generation", 2),
+                    event(3_100, QuestionDriver.CONNECTED).put("generation", 2),
+                    event(1_200_000, "worker_exited").put("generation", 2).put("exit", 143));
+
+            var result = QuestionResults.result("Q3", List.of(terminated), List.of(invocation("i1", "Q3", 3, 3, 2)),
+                    () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals(1, group.path("timed_out").asInt()),
+                    () -> assertEquals(0, group.path(QuestionResults.CONTINUATION_EARLY_EXIT).asInt()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains(
+                            "marked here as waited-out continuation exits: claude 1 (terminated)")), limits.toString()));
+        }
+
+        @Test
+        @DisplayName("reports the verdict without the continuation early exits only where it reads differently")
+        void shouldReportVerdictWithoutContinuationExitsWhereDifferent() throws Exception {
+            var passing = q3Run("passing", "fresh", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(2_000, "worker_exited"),
+                    event(2_100, "worktree_digest").put("digest", "d1"));
+            var unstopped = q3Run("unstopped", "fresh", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"),
+                    event(2_100, "worktree_digest").put("digest", "d1"),
+                    event(3_000, "worker_started").put("generation", 2),
+                    event(3_100, QuestionDriver.CONNECTED).put("generation", 2),
+                    event(9_000, "worker_exited").put("generation", 2).put("exit", 0));
+
+            var result = QuestionResults.result("Q3", List.of(passing, unstopped),
+                    List.of(invocation("i1", "Q3", 3, 3, 2)), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals("fail", group.path("verdict").asText()),
+                    () -> assertEquals("pass", group.path(QuestionResults.VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT)
+                            .asText()),
+                    () -> assertEquals("fail", result.path("verdict").asText()),
+                    () -> assertEquals("pass", result.path(QuestionResults.VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT)
+                            .asText()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains(
+                            "is the verdict without them, an additional figure, where it reads differently: "
+                                    + group.path("group").asText())), limits.toString()));
         }
 
         @Test
