@@ -103,6 +103,19 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * {@code quota_error}, before either of these and whether or not it called the stub
  * ({@link QuestionDriver#quotaError()}).
  * <p>
+ * The answer of an ask is awaited alike in every run ({@link QuestionDriver#awaitAnswer}): a decision delivered to the
+ * operator is answered on the operator's behalf after the run's hold; in a vote run of Q6 a set its quorum decided is
+ * taken as answered at once, without an operator, and the task continues with the decided answer as after an
+ * operator's answer (hold, resume, or the fallback task with {@code facts.answers}); a set the quorum escalates reaches
+ * the operator and is answered so. The consult runs of Q6 have no quorum, and their questions take the operator's path.
+ * Each vote task gets one voter, never restarted, and is never offered again: a voter that exits without a vote closes
+ * its vote task {@code lost} at once, and the set escalates with {@code role_unavailable}, the decision rule of the
+ * specification (a missing vote never counts as agreement). A voter that connected and exited without a single call is
+ * recorded as {@value QuestionResults#VOTER_EARLY_EXIT} ({@link QuestionDriver#voterEarlyExits()}); it does not end the
+ * run, which keeps its ask. Before a newer generation of a worker is launched into the worker directory its generations
+ * share, the driver ends the older generations that still run, so that none reaches the stub under the newer
+ * generation's identity ({@link QuestionDriver#SUPERSEDED_ENDED}).
+ * <p>
  * Antigravity runs without further parameters on the launch verified on 2026-10-21 with agy against the stub
  * ({@link QuestionDriver#AGY_ARGV}, {@link QuestionDriver#AGY_CONFIG}); {@code -Dpm.experiment.agy.argv} (a JSON array
  * with {@code {prompt}}, {@code {model}}, {@code {session_id}}, {@code {mcp_config}}) and
@@ -522,6 +535,20 @@ class QuestionLoopExperiment {
                 toolTimeout, workTools(host), null);
     }
 
+    /**
+     * The launch of a voter of Q6: a fresh worker of the vote task's role, its worker id the vote task's id, with the
+     * contract of its role and the vote instruction, no work tools and no stored session.
+     *
+     * @param voteTask the vote task ({@value QuestionStub#VOTE_PREFIX}{@code <question_set>-<role>})
+     * @param role     its role
+     * @return the launch
+     */
+    static Launch voterLaunch(String voteTask, String role) {
+        return new Launch(voteTask, 1, role, QuestionDriver.contract(role, "You vote blind on the questions in "
+                + "facts.questions: follow submit:vote with answers, one item per question: {question_id, choice (a "
+                + "branch_key), confidence (0..100), rationale}."), false, null, List.of(), null);
+    }
+
     private static List<String> workTools(Host host) {
         return switch (host) {
             case CLAUDE -> List.of("Read", "Write", "Edit", "Glob", "Grep");
@@ -883,7 +910,7 @@ class QuestionLoopExperiment {
                     if (plan.fault() == Fault.STOP_BEFORE_ANSWER) {
                         driver.inject(current, Fault.STOP_BEFORE_ANSWER);
                     }
-                    if (!answer()) {
+                    if (!answer(asked.get())) {
                         break;
                     }
                     current = continueAfter(asked.get(), current);
@@ -895,6 +922,7 @@ class QuestionLoopExperiment {
                 for (var helper : helpers) {
                     helper.join(POLL.toMillis() * 5);
                 }
+                recordVoterEarlyExits();
                 endWarm();
                 record.set("workers", workers());
                 for (var sibling : siblings) {
@@ -931,14 +959,19 @@ class QuestionLoopExperiment {
             return workerLaunch(worker, launchGeneration, role, host, plan.form() == Form.RESUME, toolTimeout);
         }
 
-        private boolean answer() throws InterruptedException, IOException {
+        /**
+         * Waits for the answer of the asked decision ({@link QuestionDriver#awaitAnswer}): the operator's, after the
+         * plan's hold, or, in a vote run, its quorum's decision without an operator; an escalated vote reaches the
+         * operator and is answered as such. The caller then continues the task alike for both.
+         */
+        private boolean answer(JsonNode asked) throws InterruptedException, IOException {
             var hold = plan.hold();
             if (plan.restart()) {
                 Thread.sleep(hold.dividedBy(2));
                 driver.restartStub();
                 hold = hold.dividedBy(2);
             }
-            var answered = driver.answerNext(ANSWER_WAIT, hold,
+            var answered = driver.awaitAnswer(asked.path(DECISION).asText(), ANSWER_WAIT, hold,
                     decision -> QuestionFixtures.answer(plan.fixture(), decision, plan.reply()));
             return answered.isPresent();
         }
@@ -1157,24 +1190,23 @@ class QuestionLoopExperiment {
             return helpers;
         }
 
-        /** Starts a fresh worker on every vote task, on the harness and model of its role. */
+        /**
+         * Starts a fresh worker on every vote task, on the harness and model of its role, once: a voter that exits
+         * without a vote is not restarted, and its vote task is not offered again ({@link QuestionStub#lost}).
+         */
         private void serveVotes() {
             var started = new HashSet<String>();
             try {
                 while (running.get()) {
                     var stub = driver.stub();
                     for (var id : stub.taskIds()) {
-                        if (id.startsWith("vote-") && "task.queued".equals(stub.state(id).orElse(""))
+                        if (QuestionDriver.voter(id) && "task.queued".equals(stub.state(id).orElse(""))
                                 && started.add(id)) {
                             var role = id.substring(id.lastIndexOf("quorum-"));
                             var assignment = q6Assignment(role).split(":", 2);
                             var host = Host.of(assignment[0]);
                             var voter = sibling(host, assignment.length > 1 ? assignment[1] : null);
-                            var launch = new Launch(id, 1, role, QuestionDriver.contract(role, "You vote blind on the "
-                                            + "questions in facts.questions: follow submit:vote with answers, one item per "
-                                            + "question: {question_id, choice (a branch_key), confidence (0..100), rationale}."),
-                                    false, null, List.of(), null);
-                            voter.startLeased(id, id, launch);
+                            voter.startLeased(id, id, voterLaunch(id, role));
                         }
                     }
                     Thread.sleep(POLL);
@@ -1183,6 +1215,34 @@ class QuestionLoopExperiment {
                 record.put("vote_error", String.valueOf(e.getMessage()));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            }
+        }
+
+        /**
+         * Records the voters that connected and exited without a call ({@link QuestionDriver#voterEarlyExits()}) in
+         * the run record: {@value QuestionResults#VOTER_EARLY_EXIT} with the first one's worker, generation, exit code
+         * and detail, and every one in {@code voter_early_exits}. The run is not ended by them: the missing vote
+         * escalates the set to the operator.
+         */
+        private void recordVoterEarlyExits() throws IOException {
+            var exits = driver.voterEarlyExits();
+            if (exits.isEmpty()) {
+                return;
+            }
+            var first = exits.getFirst();
+            var field = QuestionResults.VOTER_EARLY_EXIT;
+            record.put(field, true);
+            record.put(field + "_worker", first.worker());
+            record.put(field + "_generation", first.generation());
+            record.put(field + "_code", first.exit());
+            record.put(field + "_detail", first.detail());
+            var all = record.putArray(field + "s");
+            for (var exit : exits) {
+                var node = all.addObject();
+                node.put("worker", exit.worker());
+                node.put("generation", exit.generation());
+                node.put("code", exit.exit());
+                node.put("detail", exit.detail());
             }
         }
 

@@ -47,8 +47,10 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * reports about itself. Beside the figures, the result names the invocations whose run records it aggregates and
  * whether they ran at the specified scale ({@link #scale}); a smaller pass keeps its verdict, marked
  * {@value #NOT_AT_SCALE}. Every group also counts its runs that timed out, did not ask, ended early, ended early in a
- * continuation generation ({@value #CONTINUATION_EARLY_EXIT}), met a quota error of the harness, asked, continued and
- * submitted, figures no verdict reads; where a group has quota errors, it also reports its verdict without them
+ * continuation generation ({@value #CONTINUATION_EARLY_EXIT}), had a voter that ended early
+ * ({@value #VOTER_EARLY_EXIT}), met a quota error of the harness, asked, continued and submitted, and a Q4 group its
+ * runs that continued on another host ({@value #CROSS_HOST_RUNS}), figures no verdict reads; where a group has quota
+ * errors, it also reports its verdict without them
  * ({@code verdict_without_quota_error}), and where its verdict without its continuation early exits reads differently,
  * that verdict ({@value #VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT}): additional figures that do not replace the
  * verdict. The limits come from every invocation it aggregates ({@link #result}).
@@ -131,6 +133,15 @@ final class QuestionResults {
      * ({@link #continuationExit(RunView)}).
      */
     static final String CONTINUATION_EARLY_EXIT = "continuation_early_exit";
+    /**
+     * The field of a run record, and the group column, of a run in which a voter (the worker of a vote task of Q6)
+     * connected and exited without a single call to the stub ({@link #voterEarlyExit(RunView)}): the vote of its role
+     * is missing. Such a voter counts neither as {@value #EARLY_EXIT} nor as {@value #CONTINUATION_EARLY_EXIT}, and its
+     * run keeps its ask.
+     */
+    static final String VOTER_EARLY_EXIT = "voter_early_exit";
+    /** The Q4 group figure of its runs whose continuing task ran on another host than the asker's. */
+    static final String CROSS_HOST_RUNS = "cross_host_runs";
     /**
      * The verdict of a group or an item without its {@value #CONTINUATION_EARLY_EXIT} runs, reported only where it
      * reads differently from the verdict (and, for a group, where runs remain to judge without them): an additional
@@ -394,11 +405,179 @@ final class QuestionResults {
         limitOfEarlyExitsWaitedOut(result, runs);
         limitOfContinuationEarlyExits(result, runs);
         limitOfQuotaErrors(result, runs);
-        if ("Q3".equals(item)) {
-            limitOfQ3Times(result);
+        limitOfReidentifiedGenerations(result, runs);
+        switch (item) {
+            case "Q3" -> limitOfQ3Times(result);
+            case "Q4" -> limitOfQ4CrossHost(result, runs);
+            case "Q5" -> limitOfQ5Bound(result);
+            case "Q6" -> limitOfQ6Votes(result, runs);
+            default -> {
+                // no limit of its own
+            }
         }
         scale(item, result, runs, invocations);
         return result;
+    }
+
+    /**
+     * Adds the limit of Q4's continuation on another host: it is no group of its own but the figure
+     * {@value #CROSS_HOST_RUNS} of each group, and at smoke scale it is mixed with the reply, both being set by the run
+     * index; the limit names the replies of the cross-host and the same-host runs.
+     *
+     * @param result the result of Q4
+     * @param runs   its run records
+     */
+    static void limitOfQ4CrossHost(ObjectNode result, List<JsonNode> runs) {
+        var cross = new TreeMap<String, Integer>();
+        var same = new TreeMap<String, Integer>();
+        var hosts = new TreeSet<String>();
+        for (var run : runs) {
+            if (crossHost(run)) {
+                cross.merge(run.path("reply").asText(), 1, Integer::sum);
+                hosts.add(run.path(HOST).asText() + "->" + run.path("continue_host").asText());
+            } else {
+                same.merge(run.path("reply").asText(), 1, Integer::sum);
+            }
+        }
+        if (cross.isEmpty()) {
+            return;
+        }
+        limit(result, "The continuation on another host (pm.experiment.q4.other-host) is no group of its own: the "
+                + "groups are keyed by host, model, form, continuation and reply, and " + CROSS_HOST_RUNS + " reports "
+                + "a group's runs whose continuing task ran on another host than the asker's, with their asked, "
+                + "continued and submitted counts. The plan continues on the other host at the odd run indices and "
+                + "sets the reply by the run index modulo 3, so at smoke scale the other host and the reply are mixed: "
+                + "the cross-host runs (" + String.join(", ", hosts) + ") had the replies " + counted(cross)
+                + ", the same-host runs " + counted(same) + ".");
+    }
+
+    /**
+     * Adds the limit of Q5's {@code bound_reached}: the planned flag of the run's form, not a measurement.
+     *
+     * @param result the result of Q5
+     */
+    static void limitOfQ5Bound(ObjectNode result) {
+        limit(result, "bound_reached is the planned flag of the group's form (the bound form, whose replies only "
+                + "restate the question's options so that the flaw stays open until the question bound), set when "
+                + "the run was planned, not a measurement: no figure reads from the stub log whether a run reached the "
+                + "bound (the ask link withdrawn).");
+    }
+
+    /**
+     * Adds the limit of Q6's votes: how the stub decides a vote whose voter is missing, and the runs in which a voter
+     * exited without a call ({@value #VOTER_EARLY_EXIT}).
+     *
+     * @param result the result of Q6
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    static void limitOfQ6Votes(ObjectNode result, List<JsonNode> runs) throws IOException {
+        var affected = new ArrayList<String>();
+        for (var run : runs) {
+            if (voterEarlyExit(view(run))) {
+                affected.add(runId(run));
+            }
+        }
+        limit(result, "A vote task is served by one voter and never offered again: the stub has no re-offer budget "
+                + "and the driver does not restart a voter. When a voter's process exits without a vote (among them a "
+                + "voter that connected and exited without a single call, counted as " + VOTER_EARLY_EXIT + "), its "
+                + "vote task closes lost at once, and the decision rule of the specification decides the set: a listed "
+                + "role without a vote escalates it with the reason role_unavailable, never as agreement. The driver "
+                + "then answers the decision as the operator, and the task continues as after an operator's answer; a "
+                + "decided set is taken without waiting for an operator. Such a vote counts in votes and not in "
+                + "valid_votes, and its run keeps its ask" + (affected.isEmpty() ? "." : ": " + String.join(", ",
+                        affected) + "."));
+    }
+
+    /**
+     * Adds a limit naming the runs in which a generation of a worker connected twice while an older generation of the
+     * same worker still ran ({@link #reidentified(RunView)}): the older harness reached the stub with the newer
+     * generation's identity, so the stub log attributes its calls to the newer generation.
+     *
+     * @param result the result
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    static void limitOfReidentifiedGenerations(ObjectNode result, List<JsonNode> runs) throws IOException {
+        var affected = new TreeMap<String, List<String>>();
+        for (var run : runs) {
+            if (reidentified(view(run))) {
+                affected.computeIfAbsent(run.path(HOST).asText(), _ -> new ArrayList<>()).add(runId(run));
+            }
+        }
+        if (affected.isEmpty()) {
+            return;
+        }
+        limit(result, "In these runs a worker generation connected twice while an older generation of the same worker "
+                + "still ran. That is the signature of a defect of the driver established for "
+                + "Q4-claude-fresh-question_apply-answer_he-0-001-d799cea0 from OpenCode's session ids and the relay "
+                + "log: the older OpenCode process, fenced but not ended, restarted its MCP server when the launch of "
+                + "the newer generation rewrote the shared worker directory's opencode.json, and reached the stub with "
+                + "the newer generation's identity, so the stub log attributes the older generation's calls to the "
+                + "newer one; the other runs are read by the same signature. Their figures of the newer generation "
+                + "(continued, submitted, continuation_early_exit, timed_out) may count the older generation's calls; "
+                + "the records are kept as written. The driver now ends the older generations of a worker before it "
+                + "launches a newer one: " + namedRuns(affected) + ".");
+    }
+
+    /**
+     * Whether a generation of a worker connected more than once while an older generation of the same worker still ran
+     * (its {@code worker_exited} after the newer generation's first {@code connected}, or none).
+     *
+     * @param view a run
+     * @return whether a generation of it was re-identified
+     */
+    static boolean reidentified(RunView view) {
+        var connections = new HashMap<String, List<Long>>();
+        view.named(QuestionDriver.CONNECTED).forEach(event -> connections.computeIfAbsent(event.path(WORKER).asText()
+                + "#" + event.path(GENERATION).asInt(), _ -> new ArrayList<>()).add(event.path("at").asLong()));
+        for (var entry : connections.entrySet()) {
+            if (entry.getValue().size() < 2) {
+                continue;
+            }
+            var worker = entry.getKey().substring(0, entry.getKey().lastIndexOf('#'));
+            var generation = Integer.parseInt(entry.getKey().substring(entry.getKey().lastIndexOf('#') + 1));
+            var first = entry.getValue().stream().mapToLong(Long::longValue).min().orElseThrow();
+            var olderRunning = view.named("worker_started").stream()
+                    .filter(event -> worker.equals(event.path(WORKER).asText())
+                            && event.path(GENERATION).asInt() < generation)
+                    .anyMatch(started -> view.named("worker_exited").stream()
+                            .filter(exited -> same(exited, worker, started.path(GENERATION).asInt()))
+                            .noneMatch(exited -> exited.path("at").asLong() < first));
+            if (olderRunning) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean crossHost(JsonNode run) {
+        var other = run.path("continue_host").asText("");
+        return !other.isEmpty() && !other.equals(run.path(HOST).asText());
+    }
+
+    private static String counted(Map<String, Integer> counts) {
+        return counts.isEmpty() ? "none" : String.join(", ", counts.entrySet().stream()
+                .map(entry -> entry.getKey() + " " + entry.getValue()).toList());
+    }
+
+    /**
+     * Adds Q4's {@value #CROSS_HOST_RUNS} to a group: its runs whose continuing task ran on another host than the
+     * asker's, with the hosts they continued on and their asked, continued and submitted counts; a reported figure,
+     * no verdict reads it.
+     *
+     * @param views the group's runs
+     * @param group the group
+     */
+    static void crossHostRuns(List<RunView> views, ObjectNode group) {
+        var cross = views.stream().filter(view -> crossHost(view.run())).toList();
+        var node = group.putObject(CROSS_HOST_RUNS);
+        node.put(RUNS, cross.size());
+        var hosts = node.putArray("continue_hosts");
+        cross.stream().map(view -> view.run().path("continue_host").asText()).distinct().sorted().forEach(hosts::add);
+        node.put(ASKED, cross.stream().filter(view -> !view.named(ASKED).isEmpty()).count());
+        node.put("continued", cross.stream().filter(view -> !view.named("continued").isEmpty()).count());
+        node.put(SUBMITTED, cross.stream().filter(view -> !view.named(SUBMITTED).isEmpty()).count());
     }
 
     /**
@@ -875,6 +1054,9 @@ final class QuestionResults {
             group.set("fixture", first.get("fixture"));
         }
         counts(views, group);
+        if ("Q4".equals(item)) {
+            crossHostRuns(views, group);
+        }
         var pass = judge(item, views, group);
         group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
         var withoutQuota = new ArrayList<RunView>();
@@ -926,7 +1108,8 @@ final class QuestionResults {
      * Adds the counts every group reports beside its item's figures, so that no run leaves the result without a
      * trace: {@code runs}, {@code timed_out} (the run waited out its run limit), {@code no_ask} (no {@code asked}
      * event), {@code early_exit} ({@link #earlyExit(RunView)}), {@value #CONTINUATION_EARLY_EXIT}
-     * ({@link #continuationExit(RunView)} is {@link ContinuationExit#EXITED}), {@value #QUOTA_ERROR}
+     * ({@link #continuationExit(RunView)} is {@link ContinuationExit#EXITED}), {@value #VOTER_EARLY_EXIT}
+     * ({@link #voterEarlyExit(RunView)}), {@value #QUOTA_ERROR}
      * ({@link #quotaError(RunView)}), {@code asked}, {@code continued} and {@code submitted} (runs with at least one
      * such event). A quota-error run counts in {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask},
      * {@code early_exit} or {@value #CONTINUATION_EARLY_EXIT}; a continuation early exit not in {@code timed_out}, even
@@ -943,6 +1126,7 @@ final class QuestionResults {
         var asked = 0;
         var earlyExits = 0;
         var continuationEarlyExits = 0;
+        var voterEarlyExits = 0;
         var quotaErrors = 0;
         var continued = 0;
         var submitted = 0;
@@ -957,6 +1141,7 @@ final class QuestionResults {
                 timedOut += view.run().path(TIMED_OUT).asBoolean() && !continuationExited ? 1 : 0;
                 noAsk += askedHere ? 0 : 1;
                 earlyExits += earlyExit(view) ? 1 : 0;
+                voterEarlyExits += voterEarlyExit(view) ? 1 : 0;
             }
             continued += view.named("continued").isEmpty() ? 0 : 1;
             submitted += view.named(SUBMITTED).isEmpty() ? 0 : 1;
@@ -966,6 +1151,7 @@ final class QuestionResults {
         group.put("no_ask", noAsk);
         group.put(EARLY_EXIT, earlyExits);
         group.put(CONTINUATION_EARLY_EXIT, continuationEarlyExits);
+        group.put(VOTER_EARLY_EXIT, voterEarlyExits);
         group.put(QUOTA_ERROR, quotaErrors);
         group.put(ASKED, asked);
         group.put("continued", continued);
@@ -977,8 +1163,9 @@ final class QuestionResults {
      * and exited without a single call to the stub, was not ended by an injected fault, was not followed by a newer
      * generation of the same worker, and belongs to a worker that did not ask (the generation of a worker that asked
      * before is a continuation generation, read by {@link #continuationExit(RunView)}, as
-     * {@link QuestionDriver#earlyExit(QuestionDriver.Worker)} marks it). The second reading also finds the early exits
-     * of records written before the driver detected them, whose runs waited out their run limit.
+     * {@link QuestionDriver#earlyExit(QuestionDriver.Worker)} marks it), and is no voter (a voter that exits so is a
+     * {@value #VOTER_EARLY_EXIT}, {@link #voterEarlyExit(RunView)}). The second reading also finds the early exits of
+     * records written before the driver detected them, whose runs waited out their run limit.
      *
      * @param view a run
      * @return whether it ended early
@@ -987,9 +1174,35 @@ final class QuestionResults {
         if (view.run().path(EARLY_EXIT).asBoolean()) {
             return true;
         }
+        return silentExits(view).stream().anyMatch(worker -> !QuestionDriver.voter(worker));
+    }
+
+    /**
+     * Whether a voter of the run (the worker of a vote task, {@link QuestionDriver#voter(String)}) connected and exited
+     * without a single call to the stub: its record says so ({@value #VOTER_EARLY_EXIT}), or its stub log shows it,
+     * read as {@link #earlyExit(RunView)} reads a worker. A reported figure, no verdict reads it; its vote task closes
+     * {@code lost} and counts among the votes, not among the valid ones.
+     *
+     * @param view a run
+     * @return whether a voter of it ended early
+     */
+    static boolean voterEarlyExit(RunView view) {
+        if (view.run().path(VOTER_EARLY_EXIT).asBoolean()) {
+            return true;
+        }
+        return silentExits(view).stream().anyMatch(QuestionDriver::voter);
+    }
+
+    /**
+     * @return the workers of a run with a generation that connected and exited without a call to the stub, was not
+     *         ended by an injected fault, was not followed by a newer generation of the same worker, and belongs to a
+     *         worker that did not ask
+     */
+    private static List<String> silentExits(RunView view) {
         var latest = new HashMap<String, Integer>();
         view.named("worker_started").forEach(event -> latest.merge(event.path(WORKER).asText(),
                 event.path(GENERATION).asInt(), Math::max));
+        var silent = new ArrayList<String>();
         for (var exited : view.named("worker_exited")) {
             var worker = exited.path(WORKER).asText();
             var generation = exited.path(GENERATION).asInt();
@@ -1001,10 +1214,10 @@ final class QuestionResults {
                     .map(event -> event.path(EVENT).asText()).collect(Collectors.toSet());
             if (own.contains(QuestionDriver.CONNECTED) && !own.contains(QuestionDriver.CALL)
                     && !own.contains(QuestionDriver.FAULT_INJECTED)) {
-                return true;
+                silent.add(worker);
             }
         }
-        return false;
+        return silent;
     }
 
     /**

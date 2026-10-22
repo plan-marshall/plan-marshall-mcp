@@ -57,6 +57,7 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Worker;
 import de.planmarshall.e2e.experiment.question.QuestionStub.AnswerResult;
 import de.planmarshall.e2e.experiment.question.QuestionStub.Form;
 import de.planmarshall.e2e.experiment.question.QuestionStub.PartAnswer;
+import de.planmarshall.e2e.experiment.question.QuestionStub.Quorum;
 import de.planmarshall.e2e.experiment.question.QuestionStub.Settings;
 import de.planmarshall.e2e.experiment.question.QuestionStub.TaskSpec;
 import org.junit.jupiter.api.AfterEach;
@@ -392,6 +393,199 @@ class QuestionStubTest {
                     () -> assertTrue(beforeBound.contains("submit,ask,submit,"), beforeBound),
                     () -> assertFalse(atBound.contains("submit,ask,submit,"), atBound),
                     () -> assertTrue(atBound.contains("submit,submit,submit,"), atBound));
+        }
+    }
+
+    @Nested
+    @DisplayName("vote and answer path")
+    class VoteAndAnswerPath {
+
+        private static final String VOTE_A = "vote-Q-001-quorum-a";
+        private static final String VOTE_B = "vote-Q-001-quorum-b";
+        private static final String CLAUDE_PROPERTY = QuestionDriver.EXECUTABLE_PROPERTY + "claude";
+        private static final Map<String, Quorum> QUORUMS = Map.of("interpretation",
+                new Quorum(List.of("quorum-a", "quorum-b"), 90));
+
+        private String previous;
+
+        @BeforeEach
+        void claudeExecutable() throws IOException {
+            var claude = script(directory.resolve("bin").resolve("claude"), "exit 0");
+            previous = System.getProperty(CLAUDE_PROPERTY);
+            System.setProperty(CLAUDE_PROPERTY, claude.toString());
+        }
+
+        @AfterEach
+        void restoreProperty() {
+            if (previous == null) {
+                System.clearProperty(CLAUDE_PROPERTY);
+            } else {
+                System.setProperty(CLAUDE_PROPERTY, previous);
+            }
+        }
+
+        @Test
+        @DisplayName("takes a decision its quorum decided at once, without an operator, and the task continues")
+        void shouldTakeQuorumDecisionWithoutOperator() throws Exception {
+            try (var driver = driver(QUORUMS, "exit 0")) {
+                ask(driver);
+                vote(driver, VOTE_A, "quorum-a");
+                vote(driver, VOTE_B, "quorum-b");
+
+                var answered = assertTimeoutPreemptively(Duration.ofSeconds(10),
+                        () -> driver.awaitAnswer("Q-001", Duration.ofMinutes(15), Duration.ZERO, decision -> {
+                            throw new IllegalStateException("the operator was asked");
+                        }));
+
+                var events = Files.readString(driver.stub().events());
+                assertAll("the quorum's answer",
+                        () -> assertEquals(Optional.of("Q-001"), answered),
+                        () -> assertTrue(events.contains("\"event\":\"" + QuestionDriver.QUORUM_ANSWER_TAKEN + "\""),
+                                "no quorum_answer_taken event"),
+                        () -> assertTrue(events.contains("\"channel\":\"quorum\""), "not answered by the quorum"),
+                        () -> assertFalse(events.contains("\"event\":\"decision_seen\""), "the operator saw it"),
+                        () -> assertTrue(driver.stub().operatorDecisions().isEmpty()),
+                        () -> assertTrue(driver.stub().taskIds().contains("T-1-Q-001"),
+                                driver.stub().taskIds().toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("answers a question without a quorum as the operator, the path of the consult runs")
+        void shouldAnswerWithoutQuorumAsOperator() throws Exception {
+            try (var driver = driver(Map.of(), "exit 0")) {
+                ask(driver);
+
+                var answered = assertTimeoutPreemptively(Duration.ofSeconds(10),
+                        () -> driver.awaitAnswer("Q-001", Duration.ofMinutes(15), Duration.ZERO,
+                                decision -> List.of(answer("Q-001"))));
+
+                var events = Files.readString(driver.stub().events());
+                assertAll("the operator's answer",
+                        () -> assertEquals(Optional.of("Q-001"), answered),
+                        () -> assertTrue(events.contains("\"event\":\"decision_seen\""), "no decision_seen event"),
+                        () -> assertTrue(events.contains("\"result\":\"ANSWERED\""), "not answered"),
+                        () -> assertFalse(events.contains(QuestionDriver.QUORUM_ANSWER_TAKEN), events),
+                        () -> assertTrue(driver.stub().taskIds().contains("T-1-Q-001"),
+                                driver.stub().taskIds().toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("a vote task whose voter exits closes lost at once, and the set escalates role_unavailable to "
+                + "the operator")
+        void shouldEscalateMissingVote() throws Exception {
+            try (var driver = driver(QUORUMS, "exit 0")) {
+                ask(driver);
+                vote(driver, VOTE_A, "quorum-a");
+                driver.stub().leaseAtSpawn(VOTE_B, VOTE_B, 1);
+
+                driver.stub().workerExited(VOTE_B, 1, false);
+                var answered = assertTimeoutPreemptively(Duration.ofSeconds(10),
+                        () -> driver.awaitAnswer("Q-001", Duration.ofMinutes(15), Duration.ZERO,
+                                decision -> List.of(answer("Q-001"))));
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var adjudicated = events.stream().filter(event -> "adjudicated".equals(event.path("event").asText()))
+                        .findFirst().orElseThrow();
+                assertAll("the escalation",
+                        () -> assertEquals(Optional.of("task.lost"), driver.stub().state(VOTE_B)),
+                        () -> assertEquals("escalated", adjudicated.path("outcome").asText()),
+                        () -> assertEquals("role_unavailable", adjudicated.path("reason").asText()),
+                        () -> assertEquals(Optional.of("Q-001"), answered),
+                        () -> assertTrue(events.stream().anyMatch(event -> "decision_seen".equals(
+                                event.path("event").asText())), "the operator did not see it"),
+                        () -> assertTrue(driver.stub().taskIds().contains("T-1-Q-001"),
+                                driver.stub().taskIds().toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("a voter that connects and exits without a call is a voter early exit: the run goes on, and its "
+                + "vote is missing")
+        void shouldRecordVoterEarlyExitWithoutEndingRun() throws Exception {
+            try (var driver = driver(QUORUMS, "echo 'the plan-marshall tools are unavailable' >&2\nexit 3")) {
+                ask(driver);
+                var voter = driver.sibling(Host.CLAUDE, null).startLeased(VOTE_B, VOTE_B,
+                        QuestionLoopExperiment.voterLaunch(VOTE_B, "quorum-b"));
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", VOTE_B, "generation", 1));
+                assertTrue(driver.awaitExit(voter, Duration.ofSeconds(30)).isPresent());
+                var lost = driver.awaitEvent(event -> "lost".equals(event.path("event").asText())
+                        && VOTE_B.equals(event.path("task").asText()), System.currentTimeMillis() + 10_000);
+
+                var voters = driver.voterEarlyExits();
+
+                assertAll("the voter early exit",
+                        () -> assertEquals(List.of(new EarlyExit(VOTE_B, 1, 3,
+                                "the plan-marshall tools are unavailable", false, true)), voters),
+                        () -> assertEquals(Optional.empty(), driver.earlyExit()),
+                        () -> assertEquals(Optional.empty(), driver.launchFailure()),
+                        () -> assertTrue(lost.isPresent(), "the vote task was not closed lost"),
+                        () -> assertTrue(Files.readString(driver.stub().events())
+                                .contains("\"event\":\"" + QuestionResults.VOTER_EARLY_EXIT + "\""),
+                                "no voter_early_exit event"));
+            }
+        }
+
+        @Test
+        @DisplayName("the launch of a newer generation ends the older one that still runs in the shared directory")
+        void shouldEndOlderGenerationAtLaunch() throws Exception {
+            try (var driver = driver(Map.of(), "exec sleep 30")) {
+                var older = driver.startFresh(task(Form.FALLBACK), new Launch(WORKER, 1, ROLE, "Do it.", false,
+                        null, List.of(), null));
+
+                var newer = driver.startLeased(TASK, TASK, new Launch(WORKER, 2, ROLE, "Do it.", false, null,
+                        List.of(), null));
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var ended = events.stream().filter(event -> QuestionDriver.SUPERSEDED_ENDED.equals(
+                        event.path("event").asText())).toList();
+                assertAll("the ended generation",
+                        () -> assertFalse(older.process().isAlive()),
+                        () -> assertTrue(newer.process().isAlive()),
+                        () -> assertEquals(1, ended.size(), events.toString()),
+                        () -> assertEquals(1, ended.getFirst().path("generation").asInt()),
+                        () -> assertEquals(2, ended.getFirst().path("by").asInt()),
+                        () -> assertEquals(Optional.empty(), driver.launchFailure()),
+                        () -> assertEquals(Optional.empty(), driver.earlyExit()));
+            }
+        }
+
+        private QuestionDriver driver(Map<String, Quorum> quorums, String exec) throws IOException {
+            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(Duration.ofMillis(300))
+                    .withQuorums(quorums);
+            return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
+                    directory.resolve("workers"), directory.resolve("run"),
+                    List.of(script(directory.resolve("pm-exec"), exec).toString())));
+        }
+
+        /** The asker leased the task, acknowledged it and asked the example envelope (an interpretation). */
+        private void ask(QuestionDriver driver) throws IOException {
+            driver.stub().queue(task(Form.FALLBACK));
+            driver.stub().leaseAtSpawn(TASK, WORKER, 1);
+            var asker = Client.connect(socket, WORKER, 1);
+            clients.add(asker);
+            asker.state();
+            asker.link("ack", QuestionStub.JSON.createObjectNode());
+            var asked = asker.ask("ask", validEnvelope());
+            assertTrue(asked.contains("state: task.asked"), asked);
+        }
+
+        /** A voter leased its vote task, acknowledged it and voted for the description with confidence 95. */
+        private void vote(QuestionDriver driver, String voteTask, String role) throws IOException {
+            driver.stub().leaseAtSpawn(voteTask, voteTask, 1);
+            var voter = Client.connect(socket, voteTask, 1, role);
+            clients.add(voter);
+            voter.state(voteTask);
+            voter.link(voteTask, "ack", QuestionStub.JSON.createObjectNode());
+            var args = QuestionStub.JSON.createObjectNode();
+            var item = args.putArray("answers").addObject();
+            item.put("question_id", "Q-001");
+            item.put("choice", "description");
+            item.put("confidence", 95);
+            item.put("rationale", "The text states the intent of the function.");
+            var voted = voter.link(voteTask, "submit:vote", args);
+            assertTrue(voted.contains("state: entity.completed"), voted);
         }
     }
 
@@ -866,7 +1060,7 @@ class QuestionStubTest {
                 assertAll("the early exit",
                         () -> assertTrue(asked.isEmpty()),
                         () -> assertEquals(Optional.of(new EarlyExit(WORKER, 1, 3,
-                                "the plan-marshall tools are unavailable", false)), early),
+                                "the plan-marshall tools are unavailable", false, false)), early),
                         () -> assertEquals(Optional.empty(), driver.launchFailure()),
                         () -> assertTrue(Files.readString(driver.stub().events())
                                 .contains("\"event\":\"early_exit\""), "no early_exit event"));
@@ -915,7 +1109,7 @@ class QuestionStubTest {
                         () -> assertTrue(asked.isEmpty()),
                         () -> assertFalse(continuation.process().isAlive()),
                         () -> assertEquals(Optional.of(new EarlyExit(WORKER, 2, 0,
-                                "the pm_state, pm_wait and pm_do tools are not available", true)), early),
+                                "the pm_state, pm_wait and pm_do tools are not available", true, false)), early),
                         () -> assertEquals(Optional.empty(), driver.launchFailure()),
                         () -> assertTrue(events.contains("\"event\":\"continuation_early_exit\""),
                                 "no continuation_early_exit event"),
@@ -1762,6 +1956,102 @@ class QuestionStubTest {
                     () -> assertEquals(0, result.path("groups").get(0).path(QuestionResults.QUOTA_ERROR).asInt(-1)));
         }
 
+        @Test
+        @DisplayName("a voter that exits without a call counts as voter_early_exit, not as early_exit, and the run "
+                + "keeps its ask; the limits of Q6 state how the missing vote is decided")
+        void shouldCountVoterEarlyExitApart() throws Exception {
+            var voter = "vote-Q-001-quorum-b";
+            var run = (ObjectNode) q3Run("voter", "fresh", false, "", event(500, "worker_started"),
+                    event(600, QuestionDriver.CONNECTED), event(700, QuestionDriver.CALL), event(1_000, "asked"),
+                    event(1_100, "worker_started").put("worker", voter), event(1_200, QuestionDriver.CONNECTED)
+                            .put("worker", voter), event(1_300, "worker_exited").put("worker", voter).put("exit", 3),
+                    event(1_400, "lost").put("task", voter), event(1_500, "closed").put("task", voter)
+                            .put("outcome", "lost"), event(2_000, "continued"), event(3_000, "worker_exited"));
+            run.put("item", "Q6");
+            run.put("kind", "vote");
+
+            var result = QuestionResults.result("Q6", List.of(run), List.of(invocation("i1", "Q6", 3, 3, 2)),
+                    () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals(1, group.path(QuestionResults.VOTER_EARLY_EXIT).asInt()),
+                    () -> assertEquals(0, group.path(QuestionResults.EARLY_EXIT).asInt()),
+                    () -> assertEquals(1, group.path("asked").asInt()),
+                    () -> assertEquals(1, group.path("votes").asInt()),
+                    () -> assertEquals(0, group.path("valid_votes").asInt()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains("escalates it with the reason "
+                            + "role_unavailable, never as agreement") && limit.endsWith(": voter.")),
+                            limits.toString()));
+        }
+
+        @Test
+        @DisplayName("Q4 reports its cross-host runs per group and names the mixing of host and reply in its limits")
+        void shouldReportCrossHostRuns() throws Exception {
+            var cross = (ObjectNode) q3Run("cross", "fresh", false, "", event(1_000, "asked"),
+                    event(2_000, "continued"), event(3_000, "submitted"));
+            cross.put("continue_host", "opencode");
+            cross.put("reply", "text");
+            var same = (ObjectNode) q3Run("same", "fresh", false, "", event(1_000, "asked"),
+                    event(2_000, "continued"));
+            same.put("continue_host", "");
+            same.put("reply", "option");
+
+            var result = QuestionResults.result("Q4", List.of(cross, same), List.of(invocation("i1", "Q4", 3, 3,
+                    2)), () -> 0);
+
+            var groups = result.path("groups");
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            var option = groups.get(0).path(QuestionResults.CROSS_HOST_RUNS);
+            var text = groups.get(1).path(QuestionResults.CROSS_HOST_RUNS);
+            assertAll("the result",
+                    () -> assertEquals(0, option.path("runs").asInt(-1)),
+                    () -> assertEquals(1, text.path("runs").asInt()),
+                    () -> assertEquals("[\"opencode\"]", text.path("continue_hosts").toString()),
+                    () -> assertEquals(List.of(1, 1, 1), List.of(text.path("asked").asInt(),
+                            text.path("continued").asInt(), text.path("submitted").asInt())),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.endsWith("the cross-host runs "
+                            + "(claude->opencode) had the replies text 1, the same-host runs option 1.")),
+                            limits.toString()));
+        }
+
+        @Test
+        @DisplayName("Q5 states that bound_reached is the planned flag of the form")
+        void shouldStateBoundIsPlanned() {
+            var result = verdict("pass");
+
+            QuestionResults.limitOfQ5Bound(result);
+
+            assertTrue(result.path("limits").get(0).asText().startsWith("bound_reached is the planned flag"),
+                    result.toString());
+        }
+
+        @Test
+        @DisplayName("a generation that connected twice while an older one still ran is re-identified; one after the "
+                + "older exited is not")
+        void shouldFindReidentifiedGeneration() throws Exception {
+            var reidentified = q3Run("twice", "fresh", false, "", event(0, "worker_started"),
+                    event(100, "worker_started").put("generation", 2),
+                    event(110, QuestionDriver.CONNECTED).put("generation", 2),
+                    event(120, QuestionDriver.CONNECTED).put("generation", 2),
+                    event(200, "worker_exited").put("generation", 2), event(300, "worker_exited"));
+            var afterExit = q3Run("after", "fresh", false, "", event(0, "worker_started"),
+                    event(100, "worker_started").put("generation", 2), event(105, "worker_exited"),
+                    event(110, QuestionDriver.CONNECTED).put("generation", 2),
+                    event(120, QuestionDriver.CONNECTED).put("generation", 2));
+            var result = verdict("pass");
+
+            QuestionResults.limitOfReidentifiedGenerations(result, List.of(reidentified, afterExit));
+
+            var limit = result.path("limits").get(0).asText();
+            assertAll("the limit",
+                    () -> assertEquals(1, result.path("limits").size()),
+                    () -> assertTrue(limit.endsWith(": claude 1 (twice)."), limit));
+        }
+
         private static ObjectNode event(long at, String name) {
             var node = QuestionStub.JSON.createObjectNode();
             node.put("at", at);
@@ -2049,12 +2339,31 @@ class QuestionStubTest {
         }
 
         static Client connect(Path socket, String worker, int generation) throws IOException {
+            return connect(socket, worker, generation, ROLE);
+        }
+
+        static Client connect(Path socket, String worker, int generation, String role) throws IOException {
             var channel = SocketChannel.open(StandardProtocolFamily.UNIX);
             channel.connect(UnixDomainSocketAddress.of(socket));
             var client = new Client(channel);
-            client.send("{\"worker\":\"" + worker + "\",\"generation\":" + generation + ",\"role\":\"" + ROLE
+            client.send("{\"worker\":\"" + worker + "\",\"generation\":" + generation + ",\"role\":\"" + role
                     + "\",\"harness\":\"test\"}");
             return client;
+        }
+
+        String state(String entity) throws IOException {
+            var arguments = QuestionStub.JSON.createObjectNode();
+            arguments.put("entity", entity);
+            return call("pm_state", arguments);
+        }
+
+        String link(String entity, String link, ObjectNode args) throws IOException {
+            var arguments = QuestionStub.JSON.createObjectNode();
+            arguments.put("plan_id", QuestionStub.PLAN_ID);
+            arguments.put("entity", entity);
+            arguments.put("link", link);
+            arguments.set("args", args);
+            return call("pm_do", arguments);
         }
 
         void initialize() throws IOException {

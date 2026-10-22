@@ -14,6 +14,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -362,7 +364,10 @@ final class QuestionDriver implements AutoCloseable {
      * stub (OpenCode with {@code opencode/gpt-5.4-nano} said the plan-marshall tools were unavailable and exited within
      * seconds in 15 of 24 runs of the Q1 smoke pass). A continuation generation, one after the generation in which its
      * worker asked, ends so too (OpenCode continuations in three of four runs of the Q4 smoke pass); it is recorded
-     * apart, as {@value QuestionResults#CONTINUATION_EARLY_EXIT}, because its run did ask.
+     * apart, as {@value QuestionResults#CONTINUATION_EARLY_EXIT}, because its run did ask. A voter, the worker of a
+     * vote task ({@value QuestionStub#VOTE_PREFIX}{@code <question_set>-<role>}), ends so too (OpenCode with
+     * {@code opencode/gpt-5.4-nano} in run 1 of the first Q6 attempt); it is recorded apart, as
+     * {@value QuestionResults#VOTER_EARLY_EXIT}, and does not end the run: its vote is missing.
      *
      * @param worker       the worker id
      * @param generation   its generation
@@ -370,8 +375,9 @@ final class QuestionDriver implements AutoCloseable {
      * @param detail       the first line of {@code stderr} that is not a line of {@code pm-exec}'s own, else the last
      *                     line of its output ({@link #earlyExitDetail(String, List)}), empty when none
      * @param continuation whether it is a continuation generation: its worker asked in an earlier generation
+     * @param voter        whether it is a voter
      */
-    record EarlyExit(String worker, int generation, int exit, String detail, boolean continuation) {
+    record EarlyExit(String worker, int generation, int exit, String detail, boolean continuation, boolean voter) {
     }
 
     /**
@@ -390,6 +396,9 @@ final class QuestionDriver implements AutoCloseable {
     private final Settings settings;
     private final boolean ownsStub;
     private final List<Worker> workers = new CopyOnWriteArrayList<>();
+    /** The workers of this driver and of every driver of the same stub (its siblings and its root). */
+    private final List<Worker> family;
+    private final Set<String> endedOnLaunch;
     private final List<QuestionDriver> siblings = new CopyOnWriteArrayList<>();
     private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
     private final Map<String, EarlyExit> earlyExits = new ConcurrentHashMap<>();
@@ -397,11 +406,13 @@ final class QuestionDriver implements AutoCloseable {
     private volatile QuestionStub stub;
 
     private QuestionDriver(QuestionStub.Settings stubSettings, Settings settings, QuestionStub stub,
-            boolean ownsStub) {
+            boolean ownsStub, List<Worker> family, Set<String> endedOnLaunch) {
         this.stubSettings = stubSettings;
         this.settings = settings;
         this.stub = stub;
         this.ownsStub = ownsStub;
+        this.family = family;
+        this.endedOnLaunch = endedOnLaunch;
     }
 
     /**
@@ -414,7 +425,7 @@ final class QuestionDriver implements AutoCloseable {
      */
     QuestionDriver sibling(Host host, String model) {
         var sibling = new QuestionDriver(stubSettings, new Settings(host, model, settings.workspace(),
-                settings.runDir(), settings.exec(), settings.openCodeDataHome()), stub, false);
+                settings.runDir(), settings.exec(), settings.openCodeDataHome()), stub, false, family, endedOnLaunch);
         siblings.add(sibling);
         return sibling;
     }
@@ -450,7 +461,8 @@ final class QuestionDriver implements AutoCloseable {
     static QuestionDriver start(QuestionStub.Settings stubSettings, Settings settings) throws IOException {
         Files.createDirectories(settings.workspace());
         Files.createDirectories(settings.runDir());
-        return new QuestionDriver(stubSettings, settings, QuestionStub.start(stubSettings), true);
+        return new QuestionDriver(stubSettings, settings, QuestionStub.start(stubSettings), true,
+                new CopyOnWriteArrayList<>(), ConcurrentHashMap.newKeySet());
     }
 
     /** @return the running stub */
@@ -637,7 +649,50 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
-     * Takes the next decision delivered to the operator, holds it, and answers it.
+     * Waits until the decision a worker asked is answered, as the loop takes the answer: the next decision delivered
+     * to the operator is held and answered on the operator's behalf ({@code decision_seen}, {@code answer_sent});
+     * a decision its quorum decided ({@code adjudicated} {@code decided}, answered with {@code channel: quorum}) is
+     * taken as it is, without waiting for an operator, and logged as {@value #QUORUM_ANSWER_TAKEN}. Either way the
+     * caller continues the task the same way afterwards (hold, resume, or the fallback task with
+     * {@code facts.answers}). A quorum that escalates (a disagreement, a confidence below the score, a missing vote)
+     * delivers the decision to the operator, who answers it. The wait ends early, empty, when a worker of this driver
+     * or of a sibling failed to launch, ended early, or met a quota error ({@link #awaitEventWhileLaunched}).
+     *
+     * @param decisionId the decision the worker asked
+     * @param timeout    how long to wait for the answer
+     * @param hold       how long the operator takes to answer
+     * @param reply      the operator's answer per part, from the decision's snapshot
+     * @return the decision answered (the one delivered to the operator, or the asked one decided by its quorum), or
+     *         empty when none was answered in time or the run ended
+     * @throws IOException          if the event log or a worker's output cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    Optional<String> awaitAnswer(String decisionId, Duration timeout, Duration hold,
+            Function<ObjectNode, List<PartAnswer>> reply) throws IOException, InterruptedException {
+        var deadline = System.currentTimeMillis() + timeout.toMillis();
+        while (true) {
+            var operators = answerNext(POLL, hold, reply);
+            if (operators.isPresent()) {
+                return operators;
+            }
+            var answered = stub.decision(decisionId).filter(decision -> decision.path("answered").asBoolean());
+            if (answered.isPresent()) {
+                stub.event(QUORUM_ANSWER_TAKEN, Map.of("decision", decisionId));
+                return Optional.of(decisionId);
+            }
+            if (quotaError().isPresent() || launchFailure().isPresent() || earlyExit().isPresent()
+                    || System.currentTimeMillis() >= deadline) {
+                return Optional.empty();
+            }
+        }
+    }
+
+    /** The event the driver logs when it takes a decision its quorum answered, without an operator. */
+    static final String QUORUM_ANSWER_TAKEN = "quorum_answer_taken";
+
+    /**
+     * Takes the next decision delivered to the operator, holds it, and answers it; the operator's path of
+     * {@link #awaitAnswer}.
      *
      * @param timeout how long to wait for a decision
      * @param hold    how long the operator takes to answer
@@ -826,24 +881,46 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
-     * @return the first worker of this driver or of its siblings that ended early ({@link #earlyExit(Worker)}), empty
-     *         when none did
+     * @return the first worker of this driver or of its siblings that ended early ({@link #earlyExit(Worker)}) and is
+     *         no voter, empty when none did; a voter that ended early is detected and logged here too, but does not
+     *         end the run ({@link #voterEarlyExits()})
      * @throws IOException if the event log or a worker's output cannot be read
      */
     Optional<EarlyExit> earlyExit() throws IOException {
+        return allEarlyExits().stream().filter(early -> !early.voter()).findFirst();
+    }
+
+    /**
+     * The voters of this driver and of its siblings that ended early: connected and exited without a single call to
+     * the stub. Such a voter does not end the run: the stub closes its vote task {@code lost} when its process exits,
+     * and the decision rule escalates the set with {@code role_unavailable} (Model Work § Decision Rule), so the
+     * driver answers it as the operator ({@link #awaitAnswer}); it is recorded as
+     * {@value QuestionResults#VOTER_EARLY_EXIT}.
+     *
+     * @return the voters that ended early, in the order they were started
+     * @throws IOException if the event log or a worker's output cannot be read
+     */
+    List<EarlyExit> voterEarlyExits() throws IOException {
+        return allEarlyExits().stream().filter(EarlyExit::voter).toList();
+    }
+
+    private List<EarlyExit> allEarlyExits() throws IOException {
+        var found = new ArrayList<EarlyExit>();
         for (var worker : workers) {
-            var early = earlyExit(worker);
-            if (early.isPresent()) {
-                return early;
-            }
+            earlyExit(worker).ifPresent(found::add);
         }
         for (var sibling : siblings) {
-            var early = sibling.earlyExit();
-            if (early.isPresent()) {
-                return early;
-            }
+            found.addAll(sibling.allEarlyExits());
         }
-        return Optional.empty();
+        return found;
+    }
+
+    /**
+     * @param worker a worker
+     * @return whether it is a voter, the worker of a vote task ({@value QuestionStub#VOTE_PREFIX}...)
+     */
+    static boolean voter(String worker) {
+        return worker.startsWith(QuestionStub.VOTE_PREFIX);
     }
 
     /**
@@ -853,9 +930,11 @@ final class QuestionDriver implements AutoCloseable {
      * generation that called the stub, an asker among them, did not end early, whatever its worker did before or
      * after. A continuation generation, one after a generation of the same worker that asked (a continuation reuses
      * the asker's worker id), ends early so as well and is marked {@link EarlyExit#continuation()}: its run did ask,
-     * and the wait ends at once instead of at the run limit. A generation whose relay never connected failed to launch
+     * and the wait ends at once instead of at the run limit. A voter ends early so too and is marked
+     * {@link EarlyExit#voter()} ({@link #voterEarlyExits()}). A generation whose relay never connected failed to launch
      * instead ({@link #launchFailure(Worker)}). The first detection is logged as the event {@code early_exit}, for a
-     * continuation generation as {@value QuestionResults#CONTINUATION_EARLY_EXIT}.
+     * continuation generation as {@value QuestionResults#CONTINUATION_EARLY_EXIT}, for a voter as
+     * {@value QuestionResults#VOTER_EARLY_EXIT}.
      *
      * @param worker a worker
      * @return its early exit, empty when it still runs or did not end early
@@ -867,7 +946,7 @@ final class QuestionDriver implements AutoCloseable {
         if (known != null) {
             return Optional.of(known);
         }
-        var superseded = workers.stream().anyMatch(other -> other.id().equals(worker.id())
+        var superseded = family.stream().anyMatch(other -> other.id().equals(worker.id())
                 && other.generation() > worker.generation());
         if (worker.process().isAlive() || superseded) {
             return Optional.empty();
@@ -886,12 +965,19 @@ final class QuestionDriver implements AutoCloseable {
             return Optional.empty();
         }
         var early = new EarlyExit(worker.id(), worker.generation(), worker.process().exitValue(),
-                earlyExitDetail(stderr(worker), QuestionResults.readJsonLines(worker.output())), askedEarlier);
+                earlyExitDetail(stderr(worker), QuestionResults.readJsonLines(worker.output())), askedEarlier,
+                voter(worker.id()));
         if (earlyExits.putIfAbsent(key, early) == null) {
             var fields = identity(worker);
             fields.put("exit", early.exit());
             fields.put("detail", early.detail());
-            stub.event(early.continuation() ? QuestionResults.CONTINUATION_EARLY_EXIT : "early_exit", fields);
+            String name;
+            if (early.voter()) {
+                name = QuestionResults.VOTER_EARLY_EXIT;
+            } else {
+                name = early.continuation() ? QuestionResults.CONTINUATION_EARLY_EXIT : QuestionResults.EARLY_EXIT;
+            }
+            stub.event(name, fields);
         }
         return Optional.of(earlyExits.get(key));
     }
@@ -930,9 +1016,10 @@ final class QuestionDriver implements AutoCloseable {
 
     /**
      * Whether a worker failed to launch: its process exited, or {@code pm-exec} reported an error line, before the
-     * stub saw its relay connect ({@value #CONNECTED}). A worker into which a fault was injected has not failed to
-     * launch. A worker that still runs after {@code pm-exec} reported an error is ended. The first detection is logged
-     * as the event {@code launch_failed}.
+     * stub saw its relay connect ({@value #CONNECTED}). A worker into which a fault was injected, or which the launch
+     * of a newer generation of its worker ended ({@value #SUPERSEDED_ENDED}), has not failed to launch. A worker that
+     * still runs after {@code pm-exec} reported an error is ended. The first detection is logged as the event
+     * {@code launch_failed}.
      *
      * @param worker a worker
      * @return its launch failure, empty when it launched or still may
@@ -949,7 +1036,8 @@ final class QuestionDriver implements AutoCloseable {
         var stderr = stderr(worker);
         var reported = stderr.lines().anyMatch(QuestionDriver::pmExecError) || outputLines(worker.output()).stream()
                 .anyMatch(line -> "error".equals(line.path("pm_exec").asText()));
-        if (alive && !reported || sawEvent(worker, CONNECTED) || sawEvent(worker, FAULT_INJECTED)) {
+        if (alive && !reported || endedOnLaunch.contains(key) || sawEvent(worker, CONNECTED)
+                || sawEvent(worker, FAULT_INJECTED)) {
             return Optional.empty();
         }
         if (alive) {
@@ -1042,7 +1130,42 @@ final class QuestionDriver implements AutoCloseable {
                 launch.toolTimeout(), launch.workTools(), launch.sessionId());
     }
 
+    /**
+     * Ends the older generations of a worker that still run before a newer generation is launched into their shared
+     * worker directory, as the server ends a fenced worker (Model Work § Ending a Worker), and logs each as
+     * {@value #SUPERSEDED_ENDED}. Without it an older OpenCode generation, fenced but still running, restarted its MCP
+     * server when the launch rewrote the directory's {@code opencode.json} and reached the stub with the newer
+     * generation's identity, so the stub attributed its calls to the newer generation (established on the Q4 smoke
+     * pass, 2026-10-22: run {@code Q4-claude-fresh-question_apply-answer_he-0-001-d799cea0}, whose generation 3
+     * connected twice).
+     *
+     * @param launch the newer generation's launch
+     * @throws IOException if interrupted while an older generation is ended
+     */
+    private void endOlderGenerations(Launch launch) throws IOException {
+        for (var older : family) {
+            if (older.id().equals(launch.worker()) && older.generation() < launch.generation()
+                    && older.process().isAlive()) {
+                endedOnLaunch.add(older.id() + "#" + older.generation());
+                var fields = identity(older);
+                fields.put("by", launch.generation());
+                stub.event(SUPERSEDED_ENDED, fields);
+                try {
+                    terminate(older);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedIOException("interrupted while ending " + older.id() + " generation "
+                            + older.generation());
+                }
+            }
+        }
+    }
+
+    /** The event the driver logs when the launch of a newer generation ends an older one that still runs. */
+    static final String SUPERSEDED_ENDED = "superseded_ended";
+
     private Worker launch(Launch launch) throws IOException {
+        endOlderGenerations(launch);
         var host = settings.host();
         var directory = Files.createDirectories(settings.workspace().resolve(launch.worker()));
         var label = launch.worker() + "-g" + launch.generation();
@@ -1066,6 +1189,7 @@ final class QuestionDriver implements AutoCloseable {
         var process = builder.start();
         var worker = new Worker(launch, host, process, directory, output, relayLog);
         workers.add(worker);
+        family.add(worker);
         Thread.ofPlatform().daemon().start(() -> stamp(process.getInputStream(), output));
         process.onExit().thenRun(() -> exited(worker));
         var fields = identity(worker);

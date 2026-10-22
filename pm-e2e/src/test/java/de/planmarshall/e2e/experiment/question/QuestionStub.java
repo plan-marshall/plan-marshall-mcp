@@ -93,6 +93,11 @@ final class QuestionStub implements AutoCloseable {
     static final String WAIT_AGAIN = "wait: again\n";
     /** The text of a wait that ends the worker. */
     static final String WAIT_END = "wait: end\n";
+    /**
+     * The prefix of a vote task, its entity and the worker that serves it: {@code vote-<question_set>-<role>}
+     * (Model Work § The Adjudication).
+     */
+    static final String VOTE_PREFIX = "vote-";
 
     private static final Set<String> DECISION_KINDS = Set.of("interpretation", "approach", "granularity",
             "placement", "test_strategy", "scope", "product_behaviour", "assurance", "external_fact");
@@ -602,7 +607,11 @@ final class QuestionStub implements AutoCloseable {
     /**
      * Ends a worker as lost (its acknowledgement missing, its silence, its fence): every task leased to the
      * generation is released and offered again; a task whose answer was delivered and not acknowledged continues in
-     * a new task with {@code facts.answers}, or, where its session was stored, is resumed again.
+     * a new task with {@code facts.answers}, or, where its session was stored, is resumed again. A vote task is never
+     * offered again (the stub has no re-offer budget, and the driver starts one voter per vote task): it closes
+     * {@code lost} at once, its role has no vote, and the decision rule of the specification settles the set
+     * (Model Work § Decision Rule): a listed role without a vote escalates it to the operator with the reason
+     * {@code role_unavailable}, never as agreement.
      *
      * @param worker     the worker
      * @param generation its generation
@@ -1322,7 +1331,7 @@ final class QuestionStub implements AutoCloseable {
             roles.addAll(quorum.roles());
         }
         for (var role : roles) {
-            var entity = "vote-" + decision.id + "-" + role;
+            var entity = VOTE_PREFIX + decision.id + "-" + role;
             var facts = JSON.createObjectNode();
             facts.set("questions", blindQuestions(decision, role));
             var spec = new TaskSpec(entity, entity, role, Kind.VOTE, entity, "Vote on the questions of "
@@ -1658,6 +1667,12 @@ final class QuestionStub implements AutoCloseable {
         task.worker = null;
         if (STATE_SUSPENDED.equals(task.state) || STATE_RESUMABLE.equals(task.state)) {
             event("released", fields);
+            return;
+        }
+        if (task.spec.kind() == Kind.VOTE) {
+            close(task, OUTCOME_LOST);
+            event(OUTCOME_LOST, fields);
+            settleVote(voteDecision.get(task.spec.taskId()), task.spec.taskId());
             return;
         }
         var decision = task.openDecision == null ? null : decisions.get(task.openDecision);
