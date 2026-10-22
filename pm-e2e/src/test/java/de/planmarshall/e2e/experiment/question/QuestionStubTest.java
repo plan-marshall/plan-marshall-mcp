@@ -52,6 +52,7 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Launch;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.LaunchFailure;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.OpenCodeDataHome;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.QuotaError;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Worker;
 import de.planmarshall.e2e.experiment.question.QuestionStub.AnswerResult;
 import de.planmarshall.e2e.experiment.question.QuestionStub.Form;
@@ -92,7 +93,9 @@ import org.junit.jupiter.params.provider.CsvSource;
  * already answered, so the worker submits without asking; a Q2 control that is forced too; OpenCode on a data home
  * without the operator's login, or its runs in parallel on the one global database; OpenCode's missing-session resume,
  * which starts a session under the named id, counted as an exit without failure; and a result that does not record the
- * fixture wording or the OpenCode departure. The recipes, corpus items, repositories and executables of these
+ * fixture wording or the OpenCode departure. Beside them Q3's figures: a silence-limit wait reported as the time to the
+ * end of the turn instead of the time to the next {@code pm_wait}, and a harness's quota error waited out and counted
+ * as a timeout or an early exit. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used.
  */
@@ -694,6 +697,8 @@ class QuestionStubTest {
                 + "\"message\":\"program needs an absolute path: claude\"}";
         private static final String PM_EXEC_LAUNCHED = "{\"pm_exec\":\"launched\",\"pid\":96187,"
                 + "\"confinement\":\"unavailable\",\"landlock_abi\":null,\"no_new_privs\":false}";
+        private static final String QUOTA_LINE = "error: Individual quota reached. Please upgrade your subscription "
+                + "to increase your limits. Resets in 42h26m24s.";
 
         private String previous;
         private Path claude;
@@ -900,6 +905,47 @@ class QuestionStubTest {
 
                 assertEquals(Optional.empty(), early);
             }
+        }
+
+        @Test
+        @DisplayName("ends the wait at once for a worker whose harness answers with a quota error, also after a call")
+        void shouldEndQuotaErrorAtOnce() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_LAUNCHED + "' >&2\n"
+                    + "echo '" + QUOTA_LINE + "' >&2\nexit 1");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                driver.stub().event(QuestionDriver.CALL, Map.of("worker", WORKER, "generation", 1, "tool", "pm_state"));
+                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+                var deadline = System.currentTimeMillis() + Duration.ofMinutes(20).toMillis();
+
+                var asked = assertTimeoutPreemptively(Duration.ofSeconds(30),
+                        () -> driver.awaitEventWhileLaunched(event -> "asked".equals(event.path("event").asText()),
+                                deadline));
+
+                assertAll("the quota error",
+                        () -> assertTrue(asked.isEmpty()),
+                        () -> assertEquals(Optional.of(new QuotaError(WORKER, 1, QUOTA_LINE)), driver.quotaError()),
+                        () -> assertEquals(Optional.empty(), driver.earlyExit()),
+                        () -> assertTrue(Files.readString(driver.stub().events())
+                                .contains("\"event\":\"quota_error\""), "no quota_error event"));
+            }
+        }
+
+        @Test
+        @DisplayName("a quota error is a harness line of stderr, else an output line, never pm-exec's own")
+        void shouldFindQuotaDetail() {
+            var output = List.<JsonNode>of(stamped("{\"type\":\"step_start\"}"),
+                    stamped("{\"status\":\"ERROR\",\"error\":\"Individual Quota reached.\"}"));
+
+            assertAll("the details",
+                    () -> assertEquals(Optional.of(QUOTA_LINE), QuestionResults.quotaDetail(PM_EXEC_LAUNCHED + "\n"
+                            + QUOTA_LINE + "\n", List.of())),
+                    () -> assertEquals(Optional.of("{\"status\":\"ERROR\",\"error\":\"Individual Quota reached.\"}"),
+                            QuestionResults.quotaDetail("harness line\n", output)),
+                    () -> assertEquals(Optional.empty(), QuestionResults.quotaDetail(
+                            "{\"pm_exec\":\"error\",\"message\":\"quota\"}\n", List.of())),
+                    () -> assertEquals(Optional.empty(), QuestionResults.quotaDetail("", List.of())));
         }
 
         @Test
@@ -1493,6 +1539,143 @@ class QuestionStubTest {
                     () -> assertFalse(supplied.get(1).has(QuestionResults.RUN_TIMEOUT_SUPPLIED)),
                     () -> assertThrows(IllegalArgumentException.class,
                             () -> QuestionResults.supplyRunTimeouts(invocations, "typo=PT6M")));
+        }
+
+        @Test
+        @DisplayName("Q3 reports the time to the next pm_wait and to the exit beside the stop event the verdict reads")
+        void shouldReportTimeToNextPmWait() throws Exception {
+            var waited = q3Run("waited", "fresh", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"),
+                    event(3_000, QuestionDriver.CALL).put("tool", "pm_wait"), event(3_001, "wait_started"),
+                    event(271_000, "answer_sent"), event(271_100, "worktree_digest").put("digest", "d1"),
+                    event(300_000, "worker_exited"));
+            var ended = q3Run("ended", "fresh", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"),
+                    event(4_000, "worktree_digest").put("digest", "d1"), event(5_000, "worker_exited"));
+            var late = q3Run("late", "fresh", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(271_000, "answer_sent"),
+                    event(271_100, "worktree_digest").put("digest", "d1"), event(290_000, "worker_exited"));
+
+            var group = QuestionResults.evaluate("Q3", List.of(waited, ended, late)).path("groups").get(0);
+
+            var perRun = group.path("per_run");
+            assertAll("the group",
+                    () -> assertEquals("pass", group.path("verdict").asText()),
+                    () -> assertEquals(3, group.path("stopped").asInt()),
+                    () -> assertEquals(299_000, group.path("ask_to_stop_event_ms_max").asLong()),
+                    () -> assertTrue(group.path("ask_to_end_ms_median").isMissingNode(), group.toString()),
+                    () -> assertEquals(1, group.path("asked_then_pm_wait").asInt()),
+                    () -> assertEquals(2_000, group.path("ask_to_next_pm_wait_ms_median").asLong()),
+                    () -> assertEquals(2_000, group.path("ask_to_next_pm_wait_ms_max").asLong()),
+                    () -> assertEquals(3, group.path("exits_observed").asInt()),
+                    () -> assertEquals(1, group.path("exits_before_answer").asInt()),
+                    () -> assertEquals(2, group.path("stopped_by_next_pm_wait_or_end").asInt()),
+                    () -> assertEquals("fail", group.path(QuestionResults.VERDICT_BY_NEXT_PM_WAIT).asText()),
+                    () -> assertEquals("waited", perRun.get(0).path("run").asText()),
+                    () -> assertEquals(2_000, perRun.get(0).path(QuestionResults.ASK_TO_NEXT_PM_WAIT_MS).asLong()),
+                    () -> assertEquals(299_000, perRun.get(0).path(QuestionResults.ASK_TO_EXIT_MS).asLong()),
+                    () -> assertFalse(perRun.get(0).path("exit_before_answer").asBoolean(true)),
+                    () -> assertTrue(perRun.get(1).path(QuestionResults.ASK_TO_NEXT_PM_WAIT_MS).isNull()),
+                    () -> assertEquals(4_000, perRun.get(1).path(QuestionResults.ASK_TO_EXIT_MS).asLong()));
+        }
+
+        @Test
+        @DisplayName("a pm_wait of another generation or before the ask is not the next pm_wait")
+        void shouldReadOnlyAskersNextPmWait() throws Exception {
+            var run = q3Run("other", "warm", false, "", event(500, "wait_started"), event(1_000, "asked"),
+                    event(2_000, QuestionDriver.CALL).put("tool", "pm_state"),
+                    event(3_000, "wait_started").put("generation", 2));
+            var view = new QuestionResults.RunView(run, QuestionResults.readJsonLines(Path.of(run.path("stub_dir")
+                    .asText()).resolve("events.jsonl")), List.of(), List.of());
+
+            var next = QuestionResults.nextPmWait(view, view.named("asked").getFirst());
+
+            assertEquals(Optional.empty(), next);
+        }
+
+        @Test
+        @DisplayName("a quota error counts in its own column, and the verdict without it is reported beside the verdict")
+        void shouldCountQuotaErrorApart() throws Exception {
+            var passing = q3Run("passing", "warm", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(2_000, "wait_started"),
+                    event(3_000, "worktree_digest").put("digest", "d1"));
+            var quota = q3Run("quota", "warm", true, "error: Individual quota reached.",
+                    event(900, "worker_started"), event(1_000, QuestionDriver.CONNECTED),
+                    event(1_500, QuestionDriver.CALL).put("tool", "pm_wait"), event(2_000, "worker_exited"));
+            var invocation = invocation("i1", "Q3", 3, 3, 2);
+
+            var result = QuestionResults.result("Q3", List.of(passing, quota), List.of(invocation), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals(List.of(2, 0, 0, 0, 1, 0, 0), counts(group)),
+                    () -> assertEquals(1, group.path(QuestionResults.QUOTA_ERROR).asInt()),
+                    () -> assertEquals("fail", group.path("verdict").asText()),
+                    () -> assertEquals("pass", group.path(QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR).asText()),
+                    () -> assertEquals(1, group.path("runs_without_quota_error").asInt()),
+                    () -> assertEquals("fail", result.path("verdict").asText()),
+                    () -> assertEquals("pass", result.path(QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR).asText()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.startsWith("Runs whose harness answered "
+                            + "with a quota") && limit.endsWith(": quota.")), limits.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.startsWith("ask_to_stop_event_ms "
+                            + "(formerly ask_to_end_ms)")), limits.toString()));
+        }
+
+        @Test
+        @DisplayName("a group without a quota error reports no verdict without it")
+        void shouldReportNoVerdictWithoutQuotaErrorWhenNone() throws Exception {
+            var result = QuestionResults.evaluate("Q1", List.of(fixtureRun("i1", "claude", "m", false,
+                    ASKING_EVENTS, true)));
+
+            assertAll("the result",
+                    () -> assertTrue(result.path(QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR).isMissingNode()),
+                    () -> assertTrue(result.path("groups").get(0).path(QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR)
+                            .isMissingNode()),
+                    () -> assertEquals(0, result.path("groups").get(0).path(QuestionResults.QUOTA_ERROR).asInt(-1)));
+        }
+
+        private static ObjectNode event(long at, String name) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put("event", name);
+            node.put("worker", WORKER);
+            node.put("generation", 1);
+            return node;
+        }
+
+        /**
+         * A run record of Q3 with the stub's events written by the test, its run named by its stub's directory, and
+         * the {@code stderr} of {@code w1} beside its output, where a record of an earlier pass does not name it.
+         */
+        private JsonNode q3Run(String id, String form, boolean timedOut, String stderr, ObjectNode... events)
+                throws IOException {
+            var base = Files.createDirectories(directory.resolve(id));
+            var stub = Files.createDirectories(base.resolve("stub"));
+            var lines = new StringBuilder();
+            for (var event : events) {
+                lines.append(QuestionStub.JSON.writeValueAsString(event)).append('\n');
+            }
+            Files.writeString(stub.resolve("events.jsonl"), lines);
+            var runDir = Files.createDirectories(base.resolve("run"));
+            Files.writeString(QuestionDriver.stderrFile(runDir, WORKER, 1), stderr);
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put(QuestionResults.INVOCATION, "i1");
+            run.put("item", "Q3");
+            run.put("host", "claude");
+            run.put("model", "m");
+            run.put("form", form);
+            run.put("continuation", "fallback");
+            run.put("fixture", "f1");
+            run.put("kind", "entity");
+            run.put(QuestionResults.TIMED_OUT, timedOut);
+            run.put("stub_dir", stub.toString());
+            var worker = run.putArray("workers").addObject();
+            worker.put("worker", WORKER);
+            worker.put("generation", 1);
+            worker.put("output", runDir.resolve("output-w1-g1.jsonl").toString());
+            return run;
         }
 
         private static final List<String> ASKING_EVENTS = List.of("worker_started", QuestionDriver.CONNECTED,

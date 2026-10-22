@@ -371,6 +371,18 @@ final class QuestionDriver implements AutoCloseable {
     record EarlyExit(String worker, int generation, int exit, String detail) {
     }
 
+    /**
+     * A worker generation whose harness answered with a quota or limit error ({@link QuestionResults#QUOTA_PATTERN}
+     * in its own output or {@code stderr}): Antigravity said {@code Individual quota reached} in the last three
+     * Antigravity runs of the Q3 smoke pass.
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param detail     the matching line ({@link QuestionResults#quotaDetail(String, List)})
+     */
+    record QuotaError(String worker, int generation, String detail) {
+    }
+
     private final QuestionStub.Settings stubSettings;
     private final Settings settings;
     private final boolean ownsStub;
@@ -378,6 +390,7 @@ final class QuestionDriver implements AutoCloseable {
     private final List<QuestionDriver> siblings = new CopyOnWriteArrayList<>();
     private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
     private final Map<String, EarlyExit> earlyExits = new ConcurrentHashMap<>();
+    private final Map<String, QuotaError> quotaErrors = new ConcurrentHashMap<>();
     private volatile QuestionStub stub;
 
     private QuestionDriver(QuestionStub.Settings stubSettings, Settings settings, QuestionStub stub,
@@ -550,8 +563,18 @@ final class QuestionDriver implements AutoCloseable {
      * @throws IOException if the file cannot be read
      */
     String stderr(Worker worker) throws IOException {
-        var file = settings.runDir().resolve("stderr-" + worker.id() + "-g" + worker.generation() + ".log");
+        var file = stderrFile(settings.runDir(), worker.id(), worker.generation());
         return Files.exists(file) ? Files.readString(file, StandardCharsets.UTF_8) : "";
+    }
+
+    /**
+     * @param runDir     the run directory of a worker's files
+     * @param worker     the worker id
+     * @param generation its generation
+     * @return the file its {@code stderr} goes to
+     */
+    static Path stderrFile(Path runDir, String worker, int generation) {
+        return runDir.resolve("stderr-" + worker + "-g" + generation + ".log");
     }
 
     /**
@@ -728,12 +751,12 @@ final class QuestionDriver implements AutoCloseable {
 
     /**
      * Waits for an event of the stub's log as {@link #awaitEvent(Predicate, long)} does, but ends the wait at once
-     * when a worker of this driver or of a sibling failed to launch ({@link #launchFailure()}) or ended early
-     * ({@link #earlyExit()}), instead of at the deadline.
+     * when a worker of this driver or of a sibling failed to launch ({@link #launchFailure()}), ended early
+     * ({@link #earlyExit()}) or met a quota error of its harness ({@link #quotaError()}), instead of at the deadline.
      *
      * @param match       the event
      * @param untilMillis the deadline (epoch milliseconds)
-     * @return the first matching event, empty at the deadline, on a launch failure or on an early exit
+     * @return the first matching event, empty at the deadline, on a launch failure, an early exit or a quota error
      * @throws IOException          if the log cannot be read
      * @throws InterruptedException if interrupted
      */
@@ -741,12 +764,62 @@ final class QuestionDriver implements AutoCloseable {
             throws IOException, InterruptedException {
         while (true) {
             var found = awaitEvent(match, 0);
-            if (found.isPresent() || launchFailure().isPresent() || earlyExit().isPresent()
-                    || System.currentTimeMillis() >= untilMillis) {
+            if (found.isPresent() || quotaError().isPresent() || launchFailure().isPresent()
+                    || earlyExit().isPresent() || System.currentTimeMillis() >= untilMillis) {
                 return found;
             }
             Thread.sleep(POLL);
         }
+    }
+
+    /**
+     * @return the first worker of this driver or of its siblings whose harness met a quota error
+     *         ({@link #quotaError(Worker)}), empty when none did
+     * @throws IOException if a worker's output or {@code stderr} cannot be read
+     */
+    Optional<QuotaError> quotaError() throws IOException {
+        for (var worker : workers) {
+            var quota = quotaError(worker);
+            if (quota.isPresent()) {
+                return quota;
+            }
+        }
+        for (var sibling : siblings) {
+            var quota = sibling.quotaError();
+            if (quota.isPresent()) {
+                return quota;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a worker generation's harness answered with a quota or limit error: a line of its own {@code stderr}
+     * (not one of {@code pm-exec}'s) or of its output matches {@link QuestionResults#QUOTA_PATTERN}, whether or not it
+     * still runs and whether or not it called the stub. The first detection is logged as the event
+     * {@code quota_error}.
+     *
+     * @param worker a worker
+     * @return its quota error, empty when none
+     * @throws IOException if its output or {@code stderr} cannot be read
+     */
+    Optional<QuotaError> quotaError(Worker worker) throws IOException {
+        var key = worker.id() + "#" + worker.generation();
+        var known = quotaErrors.get(key);
+        if (known != null) {
+            return Optional.of(known);
+        }
+        var detail = QuestionResults.quotaDetail(stderr(worker), QuestionResults.readJsonLines(worker.output()));
+        if (detail.isEmpty()) {
+            return Optional.empty();
+        }
+        var quota = new QuotaError(worker.id(), worker.generation(), detail.get());
+        if (quotaErrors.putIfAbsent(key, quota) == null) {
+            var fields = identity(worker);
+            fields.put("detail", quota.detail());
+            stub.event(QuestionResults.QUOTA_ERROR, fields);
+        }
+        return Optional.of(quotaErrors.get(key));
     }
 
     /**
@@ -980,7 +1053,7 @@ final class QuestionDriver implements AutoCloseable {
         command.addAll(harnessCommand(host, launch, directory, environment));
         var builder = new ProcessBuilder(command).directory(directory.toFile())
                 .redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")))
-                .redirectError(settings.runDir().resolve("stderr-" + label + ".log").toFile());
+                .redirectError(stderrFile(settings.runDir(), launch.worker(), launch.generation()).toFile());
         builder.environment().clear();
         builder.environment().putAll(environment);
         var process = builder.start();

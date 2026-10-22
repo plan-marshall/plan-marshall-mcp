@@ -95,7 +95,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * pass and never a timeout ({@link QuestionDriver#launchFailure()}). A worker whose relay connected but that exits
  * without a single call to the stub ends the run at once as {@code early_exit}, with the exit code and the first
  * harness line of its {@code stderr} or the last line of its output: never a pass, never a timeout and never counted as
- * asked ({@link QuestionDriver#earlyExit()}).
+ * asked ({@link QuestionDriver#earlyExit()}). A worker whose harness answers with a quota or limit error
+ * ({@link QuestionResults#QUOTA_PATTERN} in its own output or {@code stderr}) ends the run at once as
+ * {@code quota_error}, before either of these and whether or not it called the stub
+ * ({@link QuestionDriver#quotaError()}).
  * <p>
  * Antigravity runs without further parameters on the launch verified on 2026-10-21 with agy against the stub
  * ({@link QuestionDriver#AGY_ARGV}, {@link QuestionDriver#AGY_CONFIG}); {@code -Dpm.experiment.agy.argv} (a JSON array
@@ -1048,11 +1051,25 @@ class QuestionLoopExperiment {
          * connected without a single call to the stub, with its exit code and the first harness line of its
          * {@code stderr} or the last line of its output ({@link QuestionDriver#earlyExit()}): either ends the run at
          * once, a failure of the run, never a pass, never a timeout, and never counted as asked. A worker that
-         * called the stub, an asker among them, and then exited keeps the wait as before.
+         * called the stub, an asker among them, and then exited keeps the wait as before. A quota or limit error of a
+         * worker's harness ({@link QuestionDriver#quotaError()}) comes first: it ends the run at once as
+         * {@value QuestionResults#QUOTA_ERROR}, with the worker and the matching line, whether or not the worker
+         * called the stub.
          *
          * @return whether the run ended so
          */
         private boolean ended() throws IOException, InterruptedException {
+            if (!ended) {
+                var quota = driver.quotaError();
+                if (quota.isPresent()) {
+                    ended = true;
+                    var value = quota.get();
+                    record.put(QuestionResults.QUOTA_ERROR, true);
+                    record.put("quota_error_worker", value.worker());
+                    record.put("quota_error_generation", value.generation());
+                    record.put("quota_error_detail", value.detail());
+                }
+            }
             if (!ended) {
                 var failure = driver.launchFailure();
                 if (failure.isPresent()) {
@@ -1238,6 +1255,8 @@ class QuestionLoopExperiment {
                 node.put("generation", worker.generation());
                 node.put("host", worker.host().executable());
                 node.put("output", worker.output().toString());
+                node.put("stderr", QuestionDriver.stderrFile(worker.output().getParent(), worker.id(),
+                        worker.generation()).toString());
                 node.put("relay_log", worker.relayLog().toString());
             }
             return array;

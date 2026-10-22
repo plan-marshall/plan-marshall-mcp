@@ -23,9 +23,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 
@@ -44,8 +46,10 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * verbatim), encoded before the first measured run and not changed by any result. No figure comes from what a model
  * reports about itself. Beside the figures, the result names the invocations whose run records it aggregates and
  * whether they ran at the specified scale ({@link #scale}); a smaller pass keeps its verdict, marked
- * {@value #NOT_AT_SCALE}. Every group also counts its runs that timed out, did not ask, ended early, asked, continued
- * and submitted, figures no verdict reads; the limits come from every invocation it aggregates ({@link #result}).
+ * {@value #NOT_AT_SCALE}. Every group also counts its runs that timed out, did not ask, ended early, met a quota error
+ * of the harness, asked, continued and submitted, figures no verdict reads; where a group has quota errors, it also
+ * reports its verdict without them ({@code verdict_without_quota_error}), an additional figure that does not replace
+ * the verdict. The limits come from every invocation it aggregates ({@link #result}).
  */
 final class QuestionResults {
 
@@ -121,6 +125,30 @@ final class QuestionResults {
     static final String EARLY_EXIT = "early_exit";
     /** The field of a run record of a run that waited out its run limit. */
     static final String TIMED_OUT = "timed_out";
+    /**
+     * The field of a run record, and the group column, of a run whose harness answered with a quota or limit error
+     * ({@link #QUOTA_PATTERN}).
+     */
+    static final String QUOTA_ERROR = "quota_error";
+    /**
+     * A harness's quota or limit error in its own output or {@code stderr}: the text {@code quota} in any case.
+     * Antigravity answered {@code error: Individual quota reached. Please upgrade your subscription to increase your
+     * limits. Resets in 42h26m24s.} on {@code stderr} and as the {@code error} of its result object in the last three
+     * Antigravity runs of the Q3 smoke pass (2026-10-22). Lines of {@code pm-exec}'s own do not count.
+     */
+    static final Pattern QUOTA_PATTERN = Pattern.compile("quota", Pattern.CASE_INSENSITIVE);
+    /** The per-run figure of Q3: the milliseconds from the ask to the asking generation's next {@code pm_wait}. */
+    static final String ASK_TO_NEXT_PM_WAIT_MS = "ask_to_next_pm_wait_ms";
+    /** The per-run figure of Q3: the milliseconds from the ask to the exit of the asking generation's process. */
+    static final String ASK_TO_EXIT_MS = "ask_to_exit_ms";
+    /** The verdict of a group or an item without its quota-error runs: an additional figure, not the verdict. */
+    static final String VERDICT_WITHOUT_QUOTA_ERROR = "verdict_without_quota_error";
+    /**
+     * The verdict of a Q3 group with the stop read as the criterion names it, warm or fresh: the asking generation's
+     * next {@code pm_wait}, or the end of its turn (its process exit before the answer was sent); an additional
+     * figure, not the verdict.
+     */
+    static final String VERDICT_BY_NEXT_PM_WAIT = "verdict_by_next_pm_wait_or_end";
 
     private static final String LIMITS = "limits";
     private static final String NOT_RECORDED = "not recorded";
@@ -348,8 +376,58 @@ final class QuestionResults {
         }
         limitOfRunLimits(result, runs, contributing);
         limitOfEarlyExitsWaitedOut(result, runs);
+        limitOfQuotaErrors(result, runs);
+        if ("Q3".equals(item)) {
+            limitOfQ3Times(result);
+        }
         scale(item, result, runs, invocations);
         return result;
+    }
+
+    /**
+     * Adds a limit naming the runs whose harness answered with a quota or limit error ({@link #quotaError(RunView)}):
+     * they count as {@value #QUOTA_ERROR}, not as timed out, early exit or no ask; the verdict reads them as before,
+     * and {@code verdict_without_quota_error} is the verdict without them.
+     *
+     * @param result the result
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    static void limitOfQuotaErrors(ObjectNode result, List<JsonNode> runs) throws IOException {
+        var affected = new ArrayList<String>();
+        for (var run : runs) {
+            if (quotaError(view(run))) {
+                affected.add(runId(run));
+            }
+        }
+        if (affected.isEmpty()) {
+            return;
+        }
+        limit(result, "Runs whose harness answered with a quota or limit error (the text 'quota' in its own output or "
+                + "stderr) count as quota_error, not as timed_out, early_exit or no_ask. Their records were written "
+                + "before the error ended the wait at once, as timed_out where the worker had called the stub, as "
+                + "early_exit where it had not. The verdict reads them as before; verdict_without_quota_error is the "
+                + "verdict without them, an additional figure: " + String.join(", ", affected) + ".");
+    }
+
+    /**
+     * Adds the limit of the time figures of Q3: what each one measures, and that the verdict still reads the stop
+     * event ({@code ask_to_stop_event_ms_*}, formerly {@code ask_to_end_ms_*}).
+     *
+     * @param result the result of Q3
+     */
+    static void limitOfQ3Times(ObjectNode result) {
+        limit(result, "ask_to_stop_event_ms (formerly ask_to_end_ms) is the time from the ask to the event the "
+                + "verdict reads as the stop: for a warm worker its next wait_started, for a fresh worker the exit of "
+                + "the asking generation's process. A fresh worker that called pm_wait after the ask and kept calling "
+                + "it on wait_again did not end its turn; the driver answered only after its silence limit (bounded "
+                + "wait plus grace), the answer fenced the generation, and the exit followed: for such a run the "
+                + "figure is a silence-limit wait, not the time to the end of the turn. ask_to_next_pm_wait_ms is the "
+                + "time from the ask to the asking generation's first pm_wait after it (null when none), and "
+                + "ask_to_exit_ms the time to its process exit where one is observed, with exits_before_answer "
+                + "counting those before the answer was sent. verdict_by_next_pm_wait_or_end reads as the stop the "
+                + "next pm_wait or an exit before the answer, warm or fresh (stopped_by_next_pm_wait_or_end runs), an "
+                + "additional figure that does not replace the verdict.");
     }
 
     /**
@@ -512,7 +590,8 @@ final class QuestionResults {
     private static void limitOfEarlyExitsWaitedOut(ObjectNode result, List<JsonNode> runs) throws IOException {
         var waitedOut = new TreeMap<String, Integer>();
         for (var run : runs) {
-            if (run.path(TIMED_OUT).asBoolean() && earlyExit(view(run))) {
+            var view = view(run);
+            if (run.path(TIMED_OUT).asBoolean() && earlyExit(view) && !quotaError(view)) {
                 waitedOut.merge(run.path(HOST).asText(), 1, Integer::sum);
             }
         }
@@ -546,13 +625,24 @@ final class QuestionResults {
         result.put("os", System.getProperty("os.name"));
         var array = result.putArray("groups");
         var pass = !groups.isEmpty();
+        var quotaErrors = false;
+        var passWithoutQuota = true;
+        var judgedWithoutQuota = false;
         for (var entry : groups.entrySet()) {
             var group = evaluateGroup(item, entry.getValue());
             group.put("group", entry.getKey());
             array.add(group);
             pass &= !"fail".equals(group.path(VERDICT).asText());
+            quotaErrors |= group.path(QUOTA_ERROR).asInt() > 0;
+            var without = group.path(VERDICT_WITHOUT_QUOTA_ERROR).asText(group.path(VERDICT).asText());
+            passWithoutQuota &= !"fail".equals(without);
+            judgedWithoutQuota |= !"none".equals(without);
         }
         result.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
+        if (quotaErrors) {
+            result.put(VERDICT_WITHOUT_QUOTA_ERROR, "R4".equals(item) || !judgedWithoutQuota ? "none"
+                    : passWithoutQuota ? "pass" : "fail");
+        }
         if ("R1".equals(item) || "R2".equals(item)) {
             result.set("R1".equals(item) ? "max_hold_seconds" : "max_age_seconds", longestPassing(array,
                     "R1".equals(item) ? "duration_s" : "age_s"));
@@ -617,7 +707,29 @@ final class QuestionResults {
             group.set("fixture", first.get("fixture"));
         }
         counts(views, group);
-        var pass = switch (item) {
+        var pass = judge(item, views, group);
+        group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
+        var withoutQuota = new ArrayList<RunView>();
+        for (var view : views) {
+            if (!quotaError(view)) {
+                withoutQuota.add(view);
+            }
+        }
+        if (withoutQuota.size() < views.size()) {
+            var scratch = QuestionStub.JSON.createObjectNode();
+            var verdict = withoutQuota.isEmpty() || "R4".equals(item) ? "none"
+                    : judge(item, withoutQuota, scratch) ? "pass" : "fail";
+            group.put(VERDICT_WITHOUT_QUOTA_ERROR, verdict);
+            group.put("runs_without_quota_error", withoutQuota.size());
+            if (scratch.has(VERDICT_BY_NEXT_PM_WAIT)) {
+                group.set(VERDICT_BY_NEXT_PM_WAIT + "_without_quota_error", scratch.get(VERDICT_BY_NEXT_PM_WAIT));
+            }
+        }
+        return group;
+    }
+
+    private static boolean judge(String item, List<RunView> views, ObjectNode group) {
+        return switch (item) {
             case "Q1" -> q1(views, group);
             case "Q2" -> q2(views, group);
             case "Q3" -> q3(views, group);
@@ -631,36 +743,46 @@ final class QuestionResults {
             case "R4" -> r4(views, group);
             default -> throw new IllegalArgumentException("unknown item " + item);
         };
-        group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
-        return group;
     }
 
     /**
      * Adds the counts every group reports beside its item's figures, so that no run leaves the result without a
      * trace: {@code runs}, {@code timed_out} (the run waited out its run limit), {@code no_ask} (no {@code asked}
-     * event), {@code early_exit} ({@link #earlyExit(RunView)}), {@code asked}, {@code continued} and
-     * {@code submitted} (runs with at least one such event). They are reported figures: no verdict reads them.
+     * event), {@code early_exit} ({@link #earlyExit(RunView)}), {@value #QUOTA_ERROR} ({@link #quotaError(RunView)}),
+     * {@code asked}, {@code continued} and {@code submitted} (runs with at least one such event). A quota-error run
+     * counts in {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask} or {@code early_exit}. They are
+     * reported figures: no verdict reads them.
      *
      * @param views  the group's runs
      * @param group  the group
+     * @throws IOException if a run's files cannot be read
      */
-    private static void counts(List<RunView> views, ObjectNode group) {
+    private static void counts(List<RunView> views, ObjectNode group) throws IOException {
         var timedOut = 0;
+        var noAsk = 0;
         var asked = 0;
         var earlyExits = 0;
+        var quotaErrors = 0;
         var continued = 0;
         var submitted = 0;
         for (var view : views) {
-            timedOut += view.run().path(TIMED_OUT).asBoolean() ? 1 : 0;
-            asked += view.named(ASKED).isEmpty() ? 0 : 1;
-            earlyExits += earlyExit(view) ? 1 : 0;
+            var askedHere = !view.named(ASKED).isEmpty();
+            asked += askedHere ? 1 : 0;
+            if (quotaError(view)) {
+                quotaErrors++;
+            } else {
+                timedOut += view.run().path(TIMED_OUT).asBoolean() ? 1 : 0;
+                noAsk += askedHere ? 0 : 1;
+                earlyExits += earlyExit(view) ? 1 : 0;
+            }
             continued += view.named("continued").isEmpty() ? 0 : 1;
             submitted += view.named(SUBMITTED).isEmpty() ? 0 : 1;
         }
         group.put(RUNS, views.size());
         group.put(TIMED_OUT, timedOut);
-        group.put("no_ask", views.size() - asked);
+        group.put("no_ask", noAsk);
         group.put(EARLY_EXIT, earlyExits);
+        group.put(QUOTA_ERROR, quotaErrors);
         group.put(ASKED, asked);
         group.put("continued", continued);
         group.put(SUBMITTED, submitted);
@@ -698,6 +820,68 @@ final class QuestionResults {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a run met a quota or limit error of its harness: its record says so ({@value #QUOTA_ERROR}), or a line of
+     * its workers' own output or {@code stderr} matches {@link #QUOTA_PATTERN} ({@link #quotaDetail(String, List)}).
+     * The second reading also finds the quota errors of records written before the driver detected them.
+     *
+     * @param view a run
+     * @return whether its harness answered with a quota error
+     * @throws IOException if a worker's {@code stderr} cannot be read
+     */
+    static boolean quotaError(RunView view) throws IOException {
+        if (view.run().path(QUOTA_ERROR).asBoolean()) {
+            return true;
+        }
+        var stderr = new StringBuilder();
+        for (var worker : view.run().path("workers")) {
+            var file = stderrOf(worker);
+            if (file != null && Files.exists(file)) {
+                stderr.append(Files.readString(file, StandardCharsets.UTF_8)).append('\n');
+            }
+        }
+        return quotaDetail(stderr.toString(), view.outputs()).isPresent();
+    }
+
+    /**
+     * @param stderr  what a worker wrote to {@code stderr}
+     * @param outputs its arrival-stamped output lines
+     * @return the first line of {@code stderr} that is not a line of {@code pm-exec}'s own and matches
+     *         {@link #QUOTA_PATTERN}, else the first such output line; empty when none
+     */
+    static Optional<String> quotaDetail(String stderr, List<JsonNode> outputs) {
+        return stderr.lines().filter(line -> !QuestionDriver.pmExecLine(line))
+                .filter(line -> QUOTA_PATTERN.matcher(line).find()).findFirst()
+                .or(() -> outputs.stream().map(line -> line.path("line").asText())
+                        .filter(line -> QUOTA_PATTERN.matcher(line).find()).findFirst());
+    }
+
+    /**
+     * @param worker a worker of a run record
+     * @return its {@code stderr} file: the recorded one, else the one beside its output
+     *         ({@link QuestionDriver#stderrFile(Path, String, int)}); {@code null} when the record names neither
+     */
+    private static Path stderrOf(JsonNode worker) {
+        if (worker.path("stderr").isTextual()) {
+            return Path.of(worker.path("stderr").asText());
+        }
+        var output = worker.path("output").isTextual() ? Path.of(worker.path("output").asText()) : null;
+        if (output == null || output.getParent() == null) {
+            return null;
+        }
+        return QuestionDriver.stderrFile(output.getParent(), worker.path(WORKER).asText(),
+                worker.path(GENERATION).asInt());
+    }
+
+    /**
+     * @param run a run record
+     * @return the id of the run: the name of the directory of its stub
+     */
+    static String runId(JsonNode run) {
+        var stub = Path.of(run.path("stub_dir").asText());
+        return stub.getParent() == null ? stub.toString() : stub.getParent().getFileName().toString();
     }
 
     private static boolean q1(List<RunView> views, ObjectNode group) {
@@ -777,15 +961,43 @@ final class QuestionResults {
                 && controlAsks == 0;
     }
 
+    /**
+     * Q3: the verdict reads, per run, the stop after the first ask (a warm worker's next {@code wait_started}, a fresh
+     * worker's process exit) and an unchanged worktree. Beside it the group reports, per run and in total, the time to
+     * the asking generation's next {@code pm_wait} ({@link #nextPmWait}), the time to its process exit where one is
+     * observed, and {@value #VERDICT_BY_NEXT_PM_WAIT}, the verdict with the next {@code pm_wait} or an exit before the
+     * answer read as the stop: additional figures, not the verdict.
+     */
     private static boolean q3(List<RunView> views, ObjectNode group) {
         var stopped = 0;
         var unchanged = 0;
         var times = new ArrayList<Long>();
+        var waits = new ArrayList<Long>();
+        var exits = new ArrayList<Long>();
+        var exitsBeforeAnswer = 0;
+        var stoppedByWaitOrEnd = 0;
+        var perRun = QuestionStub.JSON.createArrayNode();
         for (var view : views) {
             var asked = view.named(ASKED).stream().findFirst();
+            var figures = perRun.addObject();
+            figures.put("run", runId(view.run()));
             if (asked.isEmpty()) {
+                figures.putNull(ASK_TO_NEXT_PM_WAIT_MS);
+                figures.putNull(ASK_TO_EXIT_MS);
                 continue;
             }
+            var wait = nextPmWait(view, asked.get());
+            wait.ifPresent(waits::add);
+            putOrNull(figures, ASK_TO_NEXT_PM_WAIT_MS, wait.orElse(null));
+            var exit = askToExit(view, asked.get());
+            exit.ifPresent(exits::add);
+            putOrNull(figures, ASK_TO_EXIT_MS, exit.orElse(null));
+            var answerAt = view.named("answer_sent").stream().mapToLong(event -> event.path("at").asLong()).min();
+            var beforeAnswer = exit.isPresent() && (answerAt.isEmpty()
+                    || asked.get().path("at").asLong() + exit.get() < answerAt.getAsLong());
+            figures.put("exit_before_answer", beforeAnswer);
+            exitsBeforeAnswer += beforeAnswer ? 1 : 0;
+            stoppedByWaitOrEnd += wait.isPresent() || beforeAnswer ? 1 : 0;
             var at = asked.get().path("at").asLong();
             var worker = asked.get().path(WORKER).asText();
             var generation = asked.get().path(GENERATION).asInt();
@@ -808,9 +1020,59 @@ final class QuestionResults {
         }
         group.put("stopped", stopped);
         group.put("worktree_unchanged", unchanged);
-        group.put("ask_to_end_ms_median", median(times));
-        group.put("ask_to_end_ms_max", times.stream().mapToLong(Long::longValue).max().orElse(-1));
+        group.put("ask_to_stop_event_ms_median", median(times));
+        group.put("ask_to_stop_event_ms_max", max(times));
+        group.put("asked_then_pm_wait", waits.size());
+        group.put(ASK_TO_NEXT_PM_WAIT_MS + "_median", median(waits));
+        group.put(ASK_TO_NEXT_PM_WAIT_MS + "_max", max(waits));
+        group.put("exits_observed", exits.size());
+        group.put("exits_before_answer", exitsBeforeAnswer);
+        group.put(ASK_TO_EXIT_MS + "_median", median(exits));
+        group.put(ASK_TO_EXIT_MS + "_max", max(exits));
+        group.put("stopped_by_next_pm_wait_or_end", stoppedByWaitOrEnd);
+        group.put(VERDICT_BY_NEXT_PM_WAIT, stoppedByWaitOrEnd == views.size() && unchanged == views.size() ? "pass"
+                : "fail");
+        group.set("per_run", perRun);
         return stopped == views.size() && unchanged == views.size();
+    }
+
+    /**
+     * @param view  a run
+     * @param asked its first ask
+     * @return the milliseconds from the ask to the asking generation's first {@code pm_wait} at or after it (its
+     *         {@code call} of {@code pm_wait} or its {@code wait_started}), empty when it called none
+     */
+    static Optional<Long> nextPmWait(RunView view, JsonNode asked) {
+        var at = asked.path("at").asLong();
+        var worker = asked.path(WORKER).asText();
+        var generation = asked.path(GENERATION).asInt();
+        return view.events().stream()
+                .filter(event -> event.path("at").asLong() >= at && same(event, worker, generation))
+                .filter(event -> "wait_started".equals(event.path(EVENT).asText())
+                        || QuestionDriver.CALL.equals(event.path(EVENT).asText())
+                        && "pm_wait".equals(event.path("tool").asText()))
+                .map(event -> event.path("at").asLong() - at).findFirst();
+    }
+
+    private static Optional<Long> askToExit(RunView view, JsonNode asked) {
+        var at = asked.path("at").asLong();
+        var worker = asked.path(WORKER).asText();
+        var generation = asked.path(GENERATION).asInt();
+        return view.named("worker_exited").stream()
+                .filter(event -> event.path("at").asLong() >= at && same(event, worker, generation))
+                .map(event -> event.path("at").asLong() - at).findFirst();
+    }
+
+    private static void putOrNull(ObjectNode node, String field, Long value) {
+        if (value == null) {
+            node.putNull(field);
+        } else {
+            node.put(field, value);
+        }
+    }
+
+    private static long max(List<Long> values) {
+        return values.stream().mapToLong(Long::longValue).max().orElse(-1);
     }
 
     private static boolean q4(List<RunView> views, ObjectNode group) {
