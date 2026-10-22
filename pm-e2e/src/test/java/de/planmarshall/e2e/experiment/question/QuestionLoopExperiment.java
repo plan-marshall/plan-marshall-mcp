@@ -122,6 +122,14 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * share, the driver ends the older generations that still run, so that none reaches the stub under the newer
  * generation's identity ({@link QuestionDriver#SUPERSEDED_ENDED}).
  * <p>
+ * Q7 measures the server-side loop of the fallback: the record open for its open time with no worker of the task
+ * connected, a stub restart in it, and the answer delivered exactly once after it. Its fresh asker is therefore ended
+ * by the driver at its silence limit after the ask if it has not ended its turn, before the open time starts
+ * ({@link QuestionDriver#endAsker}, recorded as {@value QuestionDriver#ASKER_ENDED_BY_DRIVER}): a harness action, as
+ * in the other fresh items, where an asker still running is ended once its silence limit has passed, at the latest by
+ * the launch of the continuation. A model that does not end its turn after the ask is a finding of the run, not of
+ * the server ({@link QuestionResults#limitOfQ7}).
+ * <p>
  * Antigravity runs without further parameters on the launch verified on 2026-10-21 with agy against the stub
  * ({@link QuestionDriver#AGY_ARGV}, {@link QuestionDriver#AGY_CONFIG}); {@code -Dpm.experiment.agy.argv} (a JSON array
  * with {@code {prompt}}, {@code {model}}, {@code {session_id}}, {@code {mcp_config}}) and
@@ -645,6 +653,16 @@ class QuestionLoopExperiment {
             default -> throw new IllegalArgumentException("unknown item " + item + ": Q1 to Q7, R1 to R4");
         }
         return plans;
+    }
+
+    /**
+     * @param plan a planned run
+     * @return whether its fresh asker is ended by the driver at its silence limit after the ask, before the open time
+     *         starts: the fresh runs of Q7, which measure the server-side loop with the record open and no worker of
+     *         the task connected ({@link QuestionDriver#endAsker})
+     */
+    static boolean endsAskerBeforeOpenTime(RunPlan plan) {
+        return "Q7".equals(plan.item()) && !plan.warm() && plan.form() == Form.FALLBACK;
     }
 
     /** The large work of R4, loaded only when it has runs. */
@@ -1185,7 +1203,11 @@ class QuestionLoopExperiment {
 
         /**
          * Waits until the asker stopped after its ask: a fresh worker exits, a warm worker calls {@code pm_wait}
-         * (Q3), before the answer can start a continuation that changes the worktree.
+         * (Q3), before the answer can start a continuation that changes the worktree. In Q7 the fresh asker is ended
+         * by the driver at its silence limit after the ask if it still runs ({@link QuestionDriver#endAsker}), before
+         * the open time starts, so that the record is open with no worker of the task connected; the run records
+         * whether that was needed ({@value QuestionDriver#ASKER_ENDED_BY_DRIVER}), when, and whether the asker still
+         * held {@code pm_wait} then.
          */
         private void awaitStop(Worker asker, JsonNode asked) throws IOException, InterruptedException {
             var at = asked.path("at").asLong();
@@ -1194,6 +1216,12 @@ class QuestionLoopExperiment {
                                 && event.path("at").asLong() >= at && asker.id().equals(event.path("worker").asText())
                                 && asker.generation() == event.path("generation").asInt(),
                         System.currentTimeMillis() + plan.host().silenceLimit().toMillis());
+            } else if (endsAskerBeforeOpenTime(plan)) {
+                var end = driver.endAsker(asker, at, plan.host().silenceLimit());
+                var field = QuestionDriver.ASKER_ENDED_BY_DRIVER;
+                record.put(field, end.endedByDriver());
+                record.put(field + "_after_ask_ms", end.afterAskMs());
+                record.put(field + "_holding_wait", end.holdingWait());
             } else {
                 driver.awaitExit(asker, plan.host().silenceLimit());
             }

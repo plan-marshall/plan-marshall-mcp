@@ -98,7 +98,9 @@ import org.junit.jupiter.params.provider.CsvSource;
  * end of the turn instead of the time to the next {@code pm_wait}, and a harness's quota error waited out and counted
  * as a timeout or an early exit. Beside them Q6's vote runs: a continuation that the asker, still holding
  * {@code pm_wait} when the quorum decided, already took and submitted, given to a new generation that the stub refuses,
- * so the run waited out its limit. The recipes, corpus items, repositories and executables of these
+ * so the run waited out its limit. Beside them Q7's open time: a fresh asker that holds {@code pm_wait} through the
+ * open time, unseen by {@code leases_while_open}, or not ended by the driver before the open time; and a held wait the
+ * stopping stub refuses named as {@code generation_fenced}. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used.
  */
@@ -761,6 +763,323 @@ class QuestionStubTest {
                     () -> assertEquals(1, lines),
                     () -> assertEquals(AnswerResult.ALREADY_ANSWERED,
                             stub.answer("Q-001", 1, List.of(answer("Q-001")))));
+        }
+    }
+
+    @Nested
+    @DisplayName("Q7 open time")
+    class Q7OpenTime {
+
+        private static final String CLAUDE_PROPERTY = QuestionDriver.EXECUTABLE_PROPERTY + "claude";
+        private static final String WARM = "w-warm";
+        private static final String CONTINUATION = "T-1-Q-001";
+
+        private String previous;
+
+        @BeforeEach
+        void claudeExecutable() throws IOException {
+            var claude = script(directory.resolve("bin").resolve("claude"), "exit 0");
+            previous = System.getProperty(CLAUDE_PROPERTY);
+            System.setProperty(CLAUDE_PROPERTY, claude.toString());
+        }
+
+        @AfterEach
+        void restoreProperty() {
+            if (previous == null) {
+                System.clearProperty(CLAUDE_PROPERTY);
+            } else {
+                System.setProperty(CLAUDE_PROPERTY, previous);
+            }
+        }
+
+        @Test
+        @DisplayName("a held pm_wait the stopping stub ends is refused stub_stopped, not generation_fenced")
+        void shouldRefuseHeldWaitAtStopAsStubStopped() throws Exception {
+            stub = QuestionStub.start(Settings.of(directory.resolve("stub"), socket)
+                    .withWindow(Duration.ofSeconds(30)));
+            var client = Client.connect(socket, WORKER, 1);
+            clients.add(client);
+            var held = Thread.ofVirtual().start(() -> {
+                try {
+                    client.call("pm_wait", QuestionStub.JSON.createObjectNode());
+                } catch (IOException _) {
+                    // the stopping stub may close the connection before the refusal arrives
+                }
+            });
+            awaitEvent(stub.events(), "wait_started");
+
+            stub.close();
+            held.join(10_000);
+
+            var refused = QuestionResults.readJsonLines(stub.events()).stream()
+                    .filter(event -> "refused".equals(event.path("event").asText())).toList();
+            stub = null;
+            assertAll("the refusal at the stop",
+                    () -> assertEquals(1, refused.size(), refused.toString()),
+                    () -> assertEquals(QuestionStub.STUB_STOPPED, refused.getFirst().path("reason").asText()),
+                    () -> assertEquals(WORKER, refused.getFirst().path("worker").asText()));
+        }
+
+        @Test
+        @DisplayName("the driver ends a fresh asker that still holds pm_wait at its silence limit, before the open "
+                + "time, and records it")
+        void shouldEndHoldingAskerBeforeOpenTime() throws Exception {
+            try (var driver = driver("exec sleep 30")) {
+                var asker = driver.startFresh(task(Form.FALLBACK), launch());
+                var client = Client.connect(socket, WORKER, 1);
+                clients.add(client);
+                client.state();
+                client.link("ack", QuestionStub.JSON.createObjectNode());
+                client.ask("ask", validEnvelope());
+                var askedAt = firstAt(driver.stub().events(), "asked");
+                Thread.ofVirtual().start(() -> {
+                    try {
+                        client.call("pm_wait", QuestionStub.JSON.createObjectNode());
+                    } catch (IOException _) {
+                        // the connection ends with the test
+                    }
+                });
+                awaitEvent(driver.stub().events(), "wait_started");
+
+                var end = driver.endAsker(asker, askedAt, Duration.ofMillis(200));
+
+                Thread.sleep(100);
+                driver.stub().event("answer_recorded", Map.of("decision", "Q-001"));
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var figures = QuestionResults.q7Run(new QuestionResults.RunView(run(), events, List.of(),
+                        List.of()));
+                var names = events.stream().map(event -> event.path("event").asText()).toList();
+                assertAll("the ended asker",
+                        () -> assertTrue(end.endedByDriver(), end.toString()),
+                        () -> assertTrue(end.holdingWait(), end.toString()),
+                        () -> assertTrue(end.afterAskMs() >= 200, end.toString()),
+                        () -> assertFalse(asker.process().isAlive()),
+                        () -> assertTrue(names.contains(QuestionDriver.ASKER_ENDED_BY_DRIVER), names.toString()),
+                        () -> assertTrue(names.indexOf("worker_exited") < names.indexOf(
+                                QuestionDriver.OPEN_TIME_STARTED), names.toString()),
+                        () -> assertEquals(QuestionDriver.OPEN_TIME_STARTED, figures.path("open_time_from").asText()),
+                        () -> assertEquals(0, figures.path(QuestionResults.HELD_WAIT_GENERATIONS).asInt(),
+                                figures.toString()),
+                        () -> assertEquals(0, figures.path(QuestionResults.WORKERS_CONNECTED_WHILE_OPEN).asInt(),
+                                figures.toString()),
+                        () -> assertEquals(0, figures.path(QuestionResults.HELD_WAIT_MS).asLong(), figures.toString()),
+                        () -> assertEquals(0, figures.path(QuestionResults.LEASES_WHILE_OPEN).asInt(),
+                                figures.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("an asker that exited by itself is not ended by the driver, and the open time starts at once")
+        void shouldNotEndExitedAsker() throws Exception {
+            try (var driver = driver("exit 0")) {
+                var asker = driver.startFresh(task(Form.FALLBACK), launch());
+                assertTrue(driver.awaitExit(asker, Duration.ofSeconds(10)).isPresent());
+
+                var end = driver.endAsker(asker, System.currentTimeMillis(), Duration.ofSeconds(5));
+
+                var names = QuestionResults.readJsonLines(driver.stub().events()).stream()
+                        .map(event -> event.path("event").asText()).toList();
+                assertAll("the asker that exited",
+                        () -> assertFalse(end.endedByDriver(), end.toString()),
+                        () -> assertFalse(end.holdingWait(), end.toString()),
+                        () -> assertFalse(names.contains(QuestionDriver.ASKER_ENDED_BY_DRIVER), names.toString()),
+                        () -> assertTrue(names.contains(QuestionDriver.OPEN_TIME_STARTED), names.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("an asker that held pm_wait through the open time and a restart counts as a held slot, and its "
+                + "fenced, unacknowledged offer is reported")
+        void shouldCountHeldWaitAsHeldSlot() {
+            var view = new QuestionResults.RunView(run(), heldThroughOpenTime(true), List.of(), List.of());
+
+            var figures = QuestionResults.q7Run(view);
+
+            assertAll("the figures of the held asker",
+                    () -> assertEquals("stop_wait_end", figures.path("open_time_from").asText()),
+                    () -> assertEquals(220_000, figures.path("open_time_ms").asLong()),
+                    () -> assertEquals(0, figures.path("offers_while_open").asInt()),
+                    () -> assertEquals(1, figures.path(QuestionResults.HELD_WAIT_GENERATIONS).asInt()),
+                    () -> assertEquals(1, figures.path(QuestionResults.WORKERS_CONNECTED_WHILE_OPEN).asInt()),
+                    () -> assertEquals(20_000 + 99_001 + 96_900, figures.path(QuestionResults.HELD_WAIT_MS).asLong()),
+                    () -> assertEquals(1, figures.path(QuestionResults.LEASES_WHILE_OPEN).asInt()),
+                    () -> assertEquals("not recorded", figures.path(QuestionDriver.ASKER_ENDED_BY_DRIVER).asText()),
+                    () -> assertEquals(2, figures.path("continuing_task_offers").asInt()),
+                    () -> assertEquals(1, figures.path("fenced_unacknowledged_offers").asInt()),
+                    () -> assertTrue(figures.path(QuestionResults.OFFER_COUNTED_TWICE_FENCED).asBoolean()),
+                    () -> assertEquals(1, figures.path("refused_fenced_without_fence").asInt()));
+        }
+
+        @Test
+        @DisplayName("a stub log without the end of the stop wait leaves the held figures unavailable")
+        void shouldMarkFiguresUnavailableWithoutOpenTime() {
+            var view = new QuestionResults.RunView(run(), heldThroughOpenTime(false), List.of(), List.of());
+
+            var figures = QuestionResults.q7Run(view);
+
+            assertAll("the unavailable figures",
+                    () -> assertEquals(QuestionResults.UNAVAILABLE, figures.path(QuestionResults.HELD_WAIT_MS).asText()),
+                    () -> assertEquals(QuestionResults.UNAVAILABLE,
+                            figures.path(QuestionResults.WORKERS_CONNECTED_WHILE_OPEN).asText()),
+                    () -> assertEquals(0, figures.path(QuestionResults.LEASES_WHILE_OPEN).asInt()));
+        }
+
+        @Test
+        @DisplayName("the group reads leases_while_open with the held slot, reports the new figures beside it, and "
+                + "keeps the criterion")
+        void shouldReportHeldFiguresInGroup() {
+            var held = new QuestionResults.RunView(run(), heldThroughOpenTime(true), List.of(), List.of());
+            var unreadable = new QuestionResults.RunView(run(), heldThroughOpenTime(false), List.of(), List.of());
+            var group = QuestionStub.JSON.createObjectNode();
+
+            var pass = QuestionResults.q7(List.of(held, unreadable), group);
+
+            assertAll("the group",
+                    () -> assertFalse(pass),
+                    () -> assertEquals(1, group.path(QuestionResults.LEASES_WHILE_OPEN).asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.WORKERS_CONNECTED_WHILE_OPEN).asInt()),
+                    () -> assertEquals(215_901, group.path(QuestionResults.HELD_WAIT_MS).asLong()),
+                    () -> assertEquals(1, group.path("open_time_unavailable").asInt()),
+                    () -> assertEquals(2, group.path(QuestionDriver.ASKER_ENDED_BY_DRIVER + "_not_recorded").asInt()),
+                    () -> assertEquals(2, group.path(QuestionResults.FENCED_UNACKNOWLEDGED_OFFER_RUNS).asInt()),
+                    () -> assertEquals(2, group.path(QuestionResults.Q7_RUNS).size()),
+                    () -> assertEquals("No worker or slot held while the record is open; the answer delivered "
+                            + "exactly once after the restart.", QuestionResults.CRITERIA.get("Q7")));
+        }
+
+        @Test
+        @DisplayName("the limit names the driver's end of the asker as a harness action and the runs it applies to")
+        void shouldNameAskerEndInLimit() {
+            var ended = QuestionStub.JSON.createObjectNode();
+            ended.put("run", "Q7-new-000");
+            ended.put(QuestionDriver.ASKER_ENDED_BY_DRIVER, true);
+            ended.put(QuestionResults.HELD_WAIT_MS, 0);
+            var exited = QuestionStub.JSON.createObjectNode();
+            exited.put("run", "Q7-new-001");
+            exited.put(QuestionDriver.ASKER_ENDED_BY_DRIVER, false);
+            exited.put(QuestionResults.HELD_WAIT_MS, 0);
+            var old = QuestionResults.q7Run(new QuestionResults.RunView(run(), heldThroughOpenTime(true), List.of(),
+                    List.of()));
+            old.put("run", "Q7-old-002");
+            var result = QuestionStub.JSON.createObjectNode();
+
+            QuestionResults.limitOfQ7Figures(result, List.of(ended, exited, old));
+
+            var limit = result.path("limits").path(0).asText();
+            assertAll("the limit",
+                    () -> assertTrue(limit.contains("a harness action"), limit),
+                    () -> assertTrue(limit.contains("a finding of the run, not of the server"), limit),
+                    () -> assertTrue(limit.contains("ended the asker in 1 of 2 runs (Q7-new-000)"), limit),
+                    () -> assertTrue(limit.contains("Q7-old-002 215901 ms"), limit),
+                    () -> assertTrue(limit.contains(QuestionResults.OFFER_COUNTED_TWICE_FENCED), limit),
+                    () -> assertTrue(limit.contains(QuestionStub.STUB_STOPPED), limit));
+        }
+
+        @Test
+        @DisplayName("the stub's stop ends every held wait, and an offer at spawn ends none")
+        void shouldEndWaitsAtStubStop() {
+            var events = List.of(event(1, "wait_started", WORKER, 1, Map.of()),
+                    event(2, "offered", WORKER, 1, Map.of("task", TASK, "at_spawn", true)),
+                    event(3, "stub_stopped", null, 0, Map.of()),
+                    event(4, "wait_started", WORKER, 1, Map.of()));
+
+            var waits = QuestionResults.waits(events);
+
+            assertAll("the waits",
+                    () -> assertEquals(new QuestionResults.Wait(WORKER, 1, 1, 3), waits.getFirst()),
+                    () -> assertEquals(new QuestionResults.Wait(WORKER, 1, 4, Long.MAX_VALUE), waits.get(1)),
+                    () -> assertTrue(QuestionResults.holdingWait(events, WORKER, 1)));
+        }
+
+        private QuestionDriver driver(String exec) throws IOException {
+            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(Duration.ofSeconds(30));
+            return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
+                    directory.resolve("workers"), directory.resolve("run"),
+                    List.of(script(directory.resolve("pm-exec"), exec).toString())));
+        }
+
+        private static Launch launch() {
+            return new Launch(WORKER, 1, ROLE, "Do it.", false, null, List.of(), null);
+        }
+
+        private static ObjectNode run() {
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put("item", "Q7");
+            run.put("task_id", TASK);
+            run.put("warm_worker", WARM);
+            return run;
+        }
+
+        /**
+         * The stub log of a Q7 run whose fresh asker {@code w1} generation 1 held {@code pm_wait} through its open
+         * time, as in run {@code Q7-claude-fresh-question_apply-answer_he-106-002-aa970d29} of the Q7 smoke pass, in
+         * milliseconds from its start: it asks (10 s) and holds {@code pm_wait} from 12 s; the driver's stop wait ends
+         * at 280 s (its second {@code worktree_digest}, omitted when {@code stopWaitEnd} is false); a stub restart at
+         * 400 s refuses its held wait {@code generation_fenced}; it reconnects and holds again until the answer
+         * (500 s); the continuing task is offered over its wait, the driver's continuation fences it before it
+         * acknowledged, and generation 2 takes the task at spawn. The warm worker's own wait is beside it.
+         */
+        private static List<JsonNode> heldThroughOpenTime(boolean stopWaitEnd) {
+            var events = new ArrayList<JsonNode>();
+            events.add(event(0, "connected", WORKER, 1, Map.of()));
+            events.add(event(500, "connected", WARM, 1, Map.of()));
+            events.add(event(1_000, "wait_started", WARM, 1, Map.of()));
+            events.add(event(10_000, "asked", WORKER, 1, Map.of("task", TASK, "decision", "Q-001")));
+            events.add(event(10_001, "closed", WORKER, 1, Map.of("task", TASK, "outcome", "asked")));
+            events.add(event(10_002, "worktree_digest", WORKER, 1, Map.of()));
+            events.add(event(12_000, "wait_started", WORKER, 1, Map.of()));
+            if (stopWaitEnd) {
+                events.add(event(280_000, "worktree_digest", WORKER, 1, Map.of()));
+            }
+            events.add(event(300_000, "wait_again", WORKER, 1, Map.of("reason", "window")));
+            events.add(event(301_000, "wait_started", WORKER, 1, Map.of()));
+            events.add(event(400_000, "stub_restart", null, 0, Map.of()));
+            events.add(event(400_001, "stub_stopped", null, 0, Map.of()));
+            events.add(event(400_002, "refused", WORKER, 1, Map.of("reason", "generation_fenced")));
+            events.add(event(400_003, "disconnected", WORKER, 1, Map.of()));
+            events.add(event(403_000, "connected", WORKER, 1, Map.of("fenced", false)));
+            events.add(event(403_100, "wait_started", WORKER, 1, Map.of()));
+            events.add(event(500_000, "answer_recorded", null, 0, Map.of("decision", "Q-001", "channel", "cli")));
+            events.add(event(500_002, "continued", null, 0, Map.of("decision", "Q-001", "task", CONTINUATION)));
+            events.add(event(500_003, "offered", WORKER, 1, Map.of("task", CONTINUATION, "at_spawn", false)));
+            events.add(event(500_004, "fenced", WORKER, 1, Map.of("by", 2)));
+            events.add(event(500_005, "released", WORKER, 1, Map.of("task", CONTINUATION, "reason", "fenced")));
+            events.add(event(500_006, "offered", WORKER, 2, Map.of("task", CONTINUATION, "at_spawn", true)));
+            events.add(event(500_007, QuestionDriver.SUPERSEDED_ENDED, WORKER, 1, Map.of("by", 2)));
+            events.add(event(503_000, "worker_exited", WORKER, 1, Map.of("exit", 143)));
+            events.add(event(505_000, "connected", WORKER, 2, Map.of()));
+            events.add(event(510_000, "acknowledged", WORKER, 2, Map.of("task", CONTINUATION, "kind", "offer")));
+            return events;
+        }
+
+        private static JsonNode event(long at, String name, String worker, int generation, Map<String, ?> fields) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put("event", name);
+            if (worker != null) {
+                node.put("worker", worker);
+                node.put("generation", generation);
+            }
+            fields.forEach((key, value) -> node.set(key, QuestionStub.JSON.valueToTree(value)));
+            return node;
+        }
+
+        private static long firstAt(Path events, String name) throws IOException {
+            return QuestionResults.readJsonLines(events).stream()
+                    .filter(event -> name.equals(event.path("event").asText())).findFirst().orElseThrow()
+                    .path("at").asLong();
+        }
+
+        private static void awaitEvent(Path events, String name) throws IOException, InterruptedException {
+            var deadline = System.currentTimeMillis() + 10_000;
+            while (System.currentTimeMillis() < deadline) {
+                if (QuestionResults.readJsonLines(events).stream()
+                        .anyMatch(event -> name.equals(event.path("event").asText()))) {
+                    return;
+                }
+                Thread.sleep(50);
+            }
+            throw new IllegalStateException("no event " + name + " in " + events);
         }
     }
 

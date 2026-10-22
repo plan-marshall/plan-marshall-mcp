@@ -98,6 +98,8 @@ final class QuestionStub implements AutoCloseable {
      * (Model Work § The Adjudication).
      */
     static final String VOTE_PREFIX = "vote-";
+    /** The reason a held {@code pm_wait} is refused with when the stub stops (also the stop of a restart). */
+    static final String STUB_STOPPED = "stub_stopped";
 
     private static final Set<String> DECISION_KINDS = Set.of("interpretation", "approach", "granularity",
             "placement", "test_strategy", "scope", "product_behaviour", "assurance", "external_fact");
@@ -904,10 +906,22 @@ final class QuestionStub implements AutoCloseable {
 
     // --- the three tools ---
 
+    /**
+     * A {@code pm_wait}: held up to the bounded wait. A wait the stopping stub ends ({@link #close()}, also the stop of
+     * a restart) is refused {@value #STUB_STOPPED}, a wait of a fenced generation {@code generation_fenced}. Before
+     * 2026-10-22 both were refused {@code generation_fenced}, so the stub log of a restart named a held wait of a
+     * generation that was not fenced as fenced (Q7 smoke pass, run
+     * {@code Q7-claude-fresh-question_apply-answer_he-106-002-aa970d29}: {@code stub_restart}, {@code stub_stopped},
+     * then {@code refused} {@code generation_fenced} for {@code w1} generation 1, which reconnected with
+     * {@code fenced: false}).
+     */
     private Outcome pmWait(Connection connection, JsonNode token) {
         var key = connection.key();
         lock.lock();
         try {
+            if (closed) {
+                return refused(connection, STUB_STOPPED);
+            }
             if (fenced(connection)) {
                 return refused(connection, "generation_fenced");
             }
@@ -918,7 +932,10 @@ final class QuestionStub implements AutoCloseable {
             var nextProgress = System.nanoTime() + settings.progressEvery().toNanos();
             var progress = 0;
             while (true) {
-                if (closed || fenced(connection)) {
+                if (closed) {
+                    return refused(connection, STUB_STOPPED);
+                }
+                if (fenced(connection)) {
                     return refused(connection, "generation_fenced");
                 }
                 if (!Objects.equals(waits.get(key), sequence)) {

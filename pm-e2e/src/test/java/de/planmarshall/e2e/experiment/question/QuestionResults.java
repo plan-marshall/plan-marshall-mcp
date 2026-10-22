@@ -412,6 +412,7 @@ final class QuestionResults {
             case "Q4" -> limitOfQ4CrossHost(result, runs);
             case "Q5" -> limitOfQ5Bound(result);
             case "Q6" -> limitOfQ6Votes(result, runs);
+            case "Q7" -> limitOfQ7(result, runs);
             default -> {
                 // no limit of its own
             }
@@ -1591,12 +1592,31 @@ final class QuestionResults {
         return validVotes == votes && share >= FOLLOW_SHARE && mixups == 0;
     }
 
-    private static boolean q7(List<RunView> views, ObjectNode group) {
+    /**
+     * Judges a Q7 group. The verdict reads, as before, {@code leases_while_open == 0}, every warm worker recycled,
+     * every stub restarted while open, and every answer delivered exactly once. {@code leases_while_open} counts per
+     * run ({@link #q7Run(RunView)}) the offers and deliveries of the entry's tasks between the ask and the answer and,
+     * besides them, every worker generation other than the warm worker that held a {@code pm_wait} in the open time:
+     * a held wait is a held slot. The group reports beside it {@value #WORKERS_CONNECTED_WHILE_OPEN},
+     * {@value #HELD_WAIT_MS}, the runs whose open time cannot be read from the stub log
+     * ({@code open_time_unavailable}), the runs whose asker the driver ended ({@value QuestionDriver#ASKER_ENDED_BY_DRIVER},
+     * and those recorded before the field), the runs whose continuing task was offered more than once only because
+     * of an offer to a generation fenced before it acknowledged ({@value #FENCED_UNACKNOWLEDGED_OFFER_RUNS}), and
+     * each run's figures ({@value #Q7_RUNS}).
+     *
+     * @param views the group's runs
+     * @param group the group
+     * @return whether the group passes
+     */
+    static boolean q7(List<RunView> views, ObjectNode group) {
         var held = 0;
         var recycled = 0;
         var restarted = 0;
         var exactlyOnce = 0;
+        var perRun = QuestionStub.JSON.createArrayNode();
         for (var view : views) {
+            var figures = q7Run(view);
+            perRun.add(figures);
             var asked = view.named(ASKED).stream().findFirst();
             var answered = view.named("answer_recorded").stream().findFirst();
             if (asked.isEmpty() || answered.isEmpty()) {
@@ -1604,11 +1624,7 @@ final class QuestionResults {
             }
             var from = asked.get().path("at").asLong();
             var to = answered.get().path("at").asLong();
-            var entry = view.run().path("task_id").asText();
-            held += (int) view.events().stream().filter(event -> within(event, from, to))
-                    .filter(event -> "offered".equals(event.path(EVENT).asText())
-                            || "answer_delivered".equals(event.path(EVENT).asText()))
-                    .filter(event -> event.path(TASK).asText().startsWith(entry)).count();
+            held += figures.path(LEASES_WHILE_OPEN).asInt();
             var warm = view.run().path("warm_worker").asText("");
             if (view.events().stream().filter(event -> within(event, from, to))
                     .anyMatch(event -> warm.equals(event.path(WORKER).asText())
@@ -1630,11 +1646,472 @@ final class QuestionResults {
                 exactlyOnce += offers == 1 ? 1 : 0;
             }
         }
-        group.put("leases_while_open", held);
+        group.put(LEASES_WHILE_OPEN, held);
+        q7HeldFigures(perRun, group);
         group.put("warm_worker_recycled", recycled);
         group.put("stub_restarted_while_open", restarted);
         group.put("answer_delivered_exactly_once", exactlyOnce);
+        group.set(Q7_RUNS, perRun);
         return held == 0 && recycled == views.size() && restarted == views.size() && exactlyOnce == views.size();
+    }
+
+    /** The Q7 figure, per run and per group, that the verdict reads as the slots held while the record is open. */
+    static final String LEASES_WHILE_OPEN = "leases_while_open";
+    /**
+     * The Q7 figure of the worker generations other than the warm worker whose relay was connected and whose process
+     * ran in the open time: a reported figure, no verdict reads it.
+     */
+    static final String WORKERS_CONNECTED_WHILE_OPEN = "workers_connected_while_open";
+    /**
+     * The Q7 figure of the milliseconds of {@code pm_wait} held in the open time by worker generations other than the
+     * warm worker: a reported figure, no verdict reads it.
+     */
+    static final String HELD_WAIT_MS = "held_wait_ms";
+    /** The Q7 figure of the worker generations other than the warm worker that held a {@code pm_wait} in the open time. */
+    static final String HELD_WAIT_GENERATIONS = "held_wait_generations";
+    /** The value of a Q7 figure that the stub log of a run cannot give. */
+    static final String UNAVAILABLE = "unavailable";
+    /**
+     * The Q7 group figure of the runs whose continuing task was offered more than once only because of offers to a
+     * generation fenced before it acknowledged the task: a reported figure, no verdict reads it.
+     */
+    static final String FENCED_UNACKNOWLEDGED_OFFER_RUNS = "fenced_unacknowledged_offer_runs";
+    /** The per-run flag of Q7: the continuing task's offer counted twice is an offer fenced before its acknowledgement. */
+    static final String OFFER_COUNTED_TWICE_FENCED = "offer_counted_twice_is_fenced_unacknowledged";
+    /** The Q7 group array of the figures of each run ({@link #q7Run(RunView)}). */
+    static final String Q7_RUNS = "q7_runs";
+
+    private static final Set<String> WAIT_ENDS = Set.of("wait_again", "wait_end", "refused", "answer_delivered",
+            "consultation_delivered", "offered", "disconnected", "worker_exited");
+    private static final String STUB_STOPPED_EVENT = "stub_stopped";
+    private static final String OFFERED = "offered";
+
+    /**
+     * One held {@code pm_wait} of a worker generation, from the stub log ({@link #waits(List)}).
+     *
+     * @param worker     the worker
+     * @param generation its generation
+     * @param start      its {@code wait_started} (epoch milliseconds)
+     * @param end        its end (epoch milliseconds), {@link Long#MAX_VALUE} while the log shows none
+     */
+    record Wait(String worker, int generation, long start, long end) {
+    }
+
+    /**
+     * One connection of a worker generation, from the stub log ({@link #connections(List)}).
+     *
+     * @param worker     the worker
+     * @param generation its generation
+     * @param start      its {@code connected} (epoch milliseconds)
+     * @param end        its {@code disconnected}, its process's {@code worker_exited} or the stub's stop, whichever
+     *                   is first; {@link Long#MAX_VALUE} while the log shows none
+     */
+    record Link(String worker, int generation, long start, long end) {
+    }
+
+    /**
+     * The open time of a Q7 run: from the event {@value QuestionDriver#OPEN_TIME_STARTED} (the asker stopped, by its
+     * own exit or ended by the driver), or, in a stub log written before that event, from the end of the driver's wait
+     * for the asker's stop (the asking generation's second {@code worktree_digest} at or after the ask), to the
+     * answer ({@code answer_recorded}).
+     *
+     * @param from   its start (epoch milliseconds)
+     * @param to     its end (epoch milliseconds)
+     * @param source {@value QuestionDriver#OPEN_TIME_STARTED} or {@code stop_wait_end}
+     */
+    record OpenTime(long from, long to, String source) {
+    }
+
+    /**
+     * The held {@code pm_wait} calls of a stub log: each {@code wait_started} of a generation, ended by the first
+     * later event of the same generation that ends a wait ({@code wait_again}, {@code wait_end}, {@code refused}, a
+     * delivery, an offer over the wait, {@code disconnected}, {@code worker_exited}), by its next
+     * {@code wait_started}, or by the stub's stop ({@code stub_stopped}).
+     *
+     * @param events the stub log
+     * @return the waits, in the order they ended
+     */
+    static List<Wait> waits(List<JsonNode> events) {
+        var open = new LinkedHashMap<String, Long>();
+        var waits = new ArrayList<Wait>();
+        for (var event : events) {
+            var name = event.path(EVENT).asText();
+            var at = event.path("at").asLong();
+            if (STUB_STOPPED_EVENT.equals(name)) {
+                open.forEach((key, start) -> waits.add(wait(key, start, at)));
+                open.clear();
+                continue;
+            }
+            var worker = event.path(WORKER).asText("");
+            if (worker.isEmpty()) {
+                continue;
+            }
+            var key = worker + "#" + event.path(GENERATION).asInt();
+            var ends = WAIT_ENDS.contains(name) && !(OFFERED.equals(name) && event.path("at_spawn").asBoolean());
+            if ("wait_started".equals(name) || ends) {
+                var start = open.remove(key);
+                if (start != null) {
+                    waits.add(wait(key, start, at));
+                }
+            }
+            if ("wait_started".equals(name)) {
+                open.put(key, at);
+            }
+        }
+        open.forEach((key, start) -> waits.add(wait(key, start, Long.MAX_VALUE)));
+        return waits;
+    }
+
+    private static Wait wait(String key, long start, long end) {
+        var cut = key.lastIndexOf('#');
+        return new Wait(key.substring(0, cut), Integer.parseInt(key.substring(cut + 1)), start, end);
+    }
+
+    /**
+     * @param events     the stub log
+     * @param worker     a worker
+     * @param generation its generation
+     * @return whether the log shows the generation holding a {@code pm_wait} now: a {@code wait_started} without an end
+     */
+    static boolean holdingWait(List<JsonNode> events, String worker, int generation) {
+        return waits(events).stream().anyMatch(wait -> wait.worker().equals(worker)
+                && wait.generation() == generation && wait.end() == Long.MAX_VALUE);
+    }
+
+    /**
+     * The connections of a stub log: each {@code connected} of a generation, ended by its {@code disconnected}, by its
+     * process's {@code worker_exited}, or by the stub's stop ({@code stub_stopped}), whichever comes first; a second
+     * {@code connected} of a generation still connected continues the connection.
+     *
+     * @param events the stub log
+     * @return the connections, in the order they ended
+     */
+    static List<Link> connections(List<JsonNode> events) {
+        var open = new LinkedHashMap<String, Long>();
+        var links = new ArrayList<Link>();
+        for (var event : events) {
+            var name = event.path(EVENT).asText();
+            var at = event.path("at").asLong();
+            if (STUB_STOPPED_EVENT.equals(name)) {
+                open.forEach((key, start) -> links.add(link(key, start, at)));
+                open.clear();
+                continue;
+            }
+            var worker = event.path(WORKER).asText("");
+            if (worker.isEmpty()) {
+                continue;
+            }
+            var key = worker + "#" + event.path(GENERATION).asInt();
+            if (QuestionDriver.CONNECTED.equals(name)) {
+                open.putIfAbsent(key, at);
+            } else if ("disconnected".equals(name) || "worker_exited".equals(name)) {
+                var start = open.remove(key);
+                if (start != null) {
+                    links.add(link(key, start, at));
+                }
+            }
+        }
+        open.forEach((key, start) -> links.add(link(key, start, Long.MAX_VALUE)));
+        return links;
+    }
+
+    private static Link link(String key, long start, long end) {
+        var cut = key.lastIndexOf('#');
+        return new Link(key.substring(0, cut), Integer.parseInt(key.substring(cut + 1)), start, end);
+    }
+
+    /**
+     * @param view a Q7 run
+     * @return its open time ({@link OpenTime}), empty when it did not ask, was not answered, or its stub log shows
+     *         neither the start of the open time nor the end of the driver's wait for the asker's stop
+     */
+    static Optional<OpenTime> openTime(RunView view) {
+        var asked = view.named(ASKED).stream().findFirst();
+        var answered = view.named("answer_recorded").stream().findFirst();
+        if (asked.isEmpty() || answered.isEmpty()) {
+            return Optional.empty();
+        }
+        var askedAt = asked.get().path("at").asLong();
+        var to = answered.get().path("at").asLong();
+        var started = view.named(QuestionDriver.OPEN_TIME_STARTED).stream().findFirst();
+        if (started.isPresent()) {
+            var from = started.get().path("at").asLong();
+            return from <= to ? Optional.of(new OpenTime(from, to, QuestionDriver.OPEN_TIME_STARTED))
+                    : Optional.empty();
+        }
+        var worker = asked.get().path(WORKER).asText();
+        var generation = asked.get().path(GENERATION).asInt();
+        return view.named("worktree_digest").stream().filter(event -> same(event, worker, generation))
+                .filter(event -> event.path("at").asLong() >= askedAt).skip(1).findFirst()
+                .map(event -> event.path("at").asLong()).filter(from -> from <= to)
+                .map(from -> new OpenTime(from, to, "stop_wait_end"));
+    }
+
+    /**
+     * The figures of one Q7 run. {@code offers_while_open} is the count the verdict read before: the offers and
+     * deliveries of the entry's tasks between the ask and the answer. In the open time ({@link #openTime(RunView)}),
+     * for every worker generation but the warm worker: {@value #HELD_WAIT_GENERATIONS} (the generations that held a
+     * {@code pm_wait}), {@value #HELD_WAIT_MS} (how long, summed) and {@value #WORKERS_CONNECTED_WHILE_OPEN} (the
+     * generations connected), each {@value #UNAVAILABLE} when the open time cannot be read.
+     * {@value #LEASES_WHILE_OPEN} is {@code offers_while_open} plus {@value #HELD_WAIT_GENERATIONS}: a held wait is a
+     * held slot. Beside them: whether the driver ended the asker ({@value QuestionDriver#ASKER_ENDED_BY_DRIVER},
+     * {@code not recorded} for a record written before the field), the offers of the continuing task, those to a
+     * generation fenced before it acknowledged the task ({@code fenced_unacknowledged_offers}), whether an offer
+     * counted twice is such an offer ({@value #OFFER_COUNTED_TWICE_FENCED}, {@code null} when the task was offered at
+     * most once), and the {@code generation_fenced} refusals of a generation no {@code fenced} event names
+     * ({@code refused_fenced_without_fence}, the log artifact of the stub's stop before 2026-10-22).
+     *
+     * @param view a Q7 run
+     * @return its figures
+     */
+    static ObjectNode q7Run(RunView view) {
+        var node = QuestionStub.JSON.createObjectNode();
+        node.put("run", view.run().has("stub_dir") ? runId(view.run()) : "");
+        var asked = view.named(ASKED).stream().findFirst();
+        var answered = view.named("answer_recorded").stream().findFirst();
+        var offers = 0L;
+        if (asked.isPresent() && answered.isPresent()) {
+            var from = asked.get().path("at").asLong();
+            var to = answered.get().path("at").asLong();
+            var entry = view.run().path("task_id").asText();
+            offers = view.events().stream().filter(event -> within(event, from, to))
+                    .filter(event -> OFFERED.equals(event.path(EVENT).asText())
+                            || "answer_delivered".equals(event.path(EVENT).asText()))
+                    .filter(event -> event.path(TASK).asText().startsWith(entry)).count();
+        }
+        node.put("offers_while_open", offers);
+        var warm = view.run().path("warm_worker").asText("");
+        var open = openTime(view);
+        var heldGenerations = 0L;
+        if (open.isPresent()) {
+            var from = open.get().from();
+            var to = open.get().to();
+            var held = waits(view.events()).stream().filter(wait -> !warm.equals(wait.worker()))
+                    .filter(wait -> wait.start() < to && wait.end() > from).toList();
+            heldGenerations = held.stream().map(wait -> wait.worker() + "#" + wait.generation()).distinct().count();
+            node.put("open_time_from", open.get().source());
+            node.put("open_time_ms", to - from);
+            node.put(HELD_WAIT_GENERATIONS, heldGenerations);
+            node.put(HELD_WAIT_MS, held.stream().mapToLong(wait -> Math.min(wait.end(), to)
+                    - Math.max(wait.start(), from)).sum());
+            node.put(WORKERS_CONNECTED_WHILE_OPEN, connections(view.events()).stream()
+                    .filter(link -> !warm.equals(link.worker()))
+                    .filter(link -> link.start() < to && link.end() > from)
+                    .map(link -> link.worker() + "#" + link.generation()).distinct().count());
+        } else {
+            node.put("open_time_from", UNAVAILABLE);
+            node.put(HELD_WAIT_GENERATIONS, UNAVAILABLE);
+            node.put(HELD_WAIT_MS, UNAVAILABLE);
+            node.put(WORKERS_CONNECTED_WHILE_OPEN, UNAVAILABLE);
+        }
+        node.put(LEASES_WHILE_OPEN, offers + heldGenerations);
+        var ended = QuestionDriver.ASKER_ENDED_BY_DRIVER;
+        if (view.run().has(ended)) {
+            node.put(ended, view.run().path(ended).asBoolean());
+            node.put(ended + "_after_ask_ms", view.run().path(ended + "_after_ask_ms").asLong());
+            node.put(ended + "_holding_wait", view.run().path(ended + "_holding_wait").asBoolean());
+        } else {
+            node.put(ended, NOT_RECORDED);
+        }
+        continuingOffers(view, asked.map(event -> event.path(DECISION).asText()).orElse(""), node);
+        node.put("refused_fenced_without_fence", refusedFencedWithoutFence(view));
+        return node;
+    }
+
+    /**
+     * Adds the offers of the task that continues a decision ({@code continuing_task_offers}), those of them to a
+     * generation that never acknowledged the task and whose lease of it was released {@code fenced}
+     * ({@code fenced_unacknowledged_offers}), and {@value #OFFER_COUNTED_TWICE_FENCED}: with more than one offer,
+     * whether every offer but one is such a fenced, unacknowledged offer; {@code null} with at most one.
+     */
+    private static void continuingOffers(RunView view, String decision, ObjectNode node) {
+        var continued = view.named("continued").stream()
+                .filter(event -> decision.equals(event.path(DECISION).asText())).toList();
+        if (continued.size() != 1) {
+            node.put("continuing_task_offers", 0);
+            node.put("fenced_unacknowledged_offers", 0);
+            node.putNull(OFFER_COUNTED_TWICE_FENCED);
+            return;
+        }
+        var task = continued.getFirst().path(TASK).asText();
+        var offers = view.named(OFFERED).stream().filter(event -> task.equals(event.path(TASK).asText())).toList();
+        var fenced = offers.stream().filter(offer -> {
+            var worker = offer.path(WORKER).asText();
+            var generation = offer.path(GENERATION).asInt();
+            var acknowledged = view.named("acknowledged").stream().anyMatch(event -> same(event, worker, generation)
+                    && task.equals(event.path(TASK).asText()));
+            var released = view.named("released").stream().anyMatch(event -> same(event, worker, generation)
+                    && task.equals(event.path(TASK).asText()) && "fenced".equals(event.path("reason").asText()));
+            return !acknowledged && released;
+        }).count();
+        node.put("continuing_task_offers", offers.size());
+        node.put("fenced_unacknowledged_offers", fenced);
+        if (offers.size() > 1) {
+            node.put(OFFER_COUNTED_TWICE_FENCED, offers.size() - fenced == 1);
+        } else {
+            node.putNull(OFFER_COUNTED_TWICE_FENCED);
+        }
+    }
+
+    /**
+     * @return the {@code refused} events with the reason {@code generation_fenced} of a generation that no
+     *         {@code fenced} event before them names: in the stub before 2026-10-22, a held {@code pm_wait} that the
+     *         stopping stub refused at a restart
+     */
+    private static long refusedFencedWithoutFence(RunView view) {
+        var fenced = new HashSet<String>();
+        var count = 0L;
+        for (var event : view.events()) {
+            var name = event.path(EVENT).asText();
+            var key = event.path(WORKER).asText() + "#" + event.path(GENERATION).asInt();
+            if ("fenced".equals(name)) {
+                fenced.add(key);
+            } else if ("refused".equals(name) && "generation_fenced".equals(event.path("reason").asText())
+                    && !fenced.contains(key)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Adds the group's sums of the per-run held figures: {@value #WORKERS_CONNECTED_WHILE_OPEN},
+     * {@value #HELD_WAIT_MS} and {@value #HELD_WAIT_GENERATIONS} over the runs whose open time is readable
+     * ({@value #UNAVAILABLE} when none is), {@code open_time_unavailable}, the runs whose asker the driver ended and
+     * those recorded before the field, and {@value #FENCED_UNACKNOWLEDGED_OFFER_RUNS}.
+     */
+    private static void q7HeldFigures(ArrayNode perRun, ObjectNode group) {
+        var available = 0;
+        var connected = 0L;
+        var heldMs = 0L;
+        var heldGenerations = 0L;
+        var endedByDriver = 0;
+        var notRecorded = 0;
+        var fencedOffers = 0;
+        for (var run : perRun) {
+            if (run.path(HELD_WAIT_MS).isNumber()) {
+                available++;
+                connected += run.path(WORKERS_CONNECTED_WHILE_OPEN).asLong();
+                heldMs += run.path(HELD_WAIT_MS).asLong();
+                heldGenerations += run.path(HELD_WAIT_GENERATIONS).asLong();
+            }
+            var ended = run.path(QuestionDriver.ASKER_ENDED_BY_DRIVER);
+            endedByDriver += ended.isBoolean() && ended.asBoolean() ? 1 : 0;
+            notRecorded += ended.isBoolean() ? 0 : 1;
+            fencedOffers += run.path(OFFER_COUNTED_TWICE_FENCED).asBoolean() ? 1 : 0;
+        }
+        if (available == 0) {
+            group.put(WORKERS_CONNECTED_WHILE_OPEN, UNAVAILABLE);
+            group.put(HELD_WAIT_MS, UNAVAILABLE);
+            group.put(HELD_WAIT_GENERATIONS, UNAVAILABLE);
+        } else {
+            group.put(WORKERS_CONNECTED_WHILE_OPEN, connected);
+            group.put(HELD_WAIT_MS, heldMs);
+            group.put(HELD_WAIT_GENERATIONS, heldGenerations);
+        }
+        group.put("open_time_unavailable", perRun.size() - available);
+        group.put(QuestionDriver.ASKER_ENDED_BY_DRIVER, endedByDriver);
+        group.put(QuestionDriver.ASKER_ENDED_BY_DRIVER + "_not_recorded", notRecorded);
+        group.put(FENCED_UNACKNOWLEDGED_OFFER_RUNS, fencedOffers);
+    }
+
+    /**
+     * Adds the limit of Q7: what its open time is and how {@value #LEASES_WHILE_OPEN} counts a held wait; that the
+     * asker ended by the driver is a harness action, with the runs that needed it (and, for records written before the
+     * driver ended the asker, the runs whose asker held {@code pm_wait} into the open time); that a model that does
+     * not end its turn after the ask is a finding of the run, not of the server; the runs whose open time cannot be
+     * read; the runs whose continuing task was offered twice because of a fenced, unacknowledged offer; and the runs
+     * whose stub log names a held wait refused at the stub's stop as {@code generation_fenced}.
+     *
+     * @param result the result of Q7
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    static void limitOfQ7(ObjectNode result, List<JsonNode> runs) throws IOException {
+        var figures = new ArrayList<ObjectNode>();
+        for (var run : runs) {
+            figures.add(q7Run(view(run)));
+        }
+        limitOfQ7Figures(result, figures);
+    }
+
+    /**
+     * The limit of Q7 ({@link #limitOfQ7}) from the figures of its runs ({@link #q7Run(RunView)}).
+     *
+     * @param result  the result of Q7
+     * @param figures the figures of its runs
+     */
+    static void limitOfQ7Figures(ObjectNode result, List<ObjectNode> figures) {
+        var field = QuestionDriver.ASKER_ENDED_BY_DRIVER;
+        var ended = new ArrayList<String>();
+        var recorded = 0;
+        var heldBefore = new ArrayList<String>();
+        var unavailable = new ArrayList<String>();
+        var fencedOffers = new ArrayList<String>();
+        var refusedAtStop = new ArrayList<String>();
+        for (var run : figures) {
+            var id = run.path("run").asText();
+            if (run.path(field).isBoolean()) {
+                recorded++;
+                if (run.path(field).asBoolean()) {
+                    ended.add(id);
+                }
+            } else if (run.path(HELD_WAIT_GENERATIONS).asLong() > 0) {
+                heldBefore.add(id + " " + run.path(HELD_WAIT_MS).asLong() + " ms");
+            }
+            if (!run.path(HELD_WAIT_MS).isNumber()) {
+                unavailable.add(id);
+            }
+            if (run.path(OFFER_COUNTED_TWICE_FENCED).asBoolean()) {
+                fencedOffers.add(id);
+            }
+            if (run.path("refused_fenced_without_fence").asLong() > 0) {
+                refusedAtStop.add(id);
+            }
+        }
+        var text = new StringBuilder("The open time of a run starts when the asking generation has stopped (the "
+                + "event " + QuestionDriver.OPEN_TIME_STARTED + "; in a stub log written before it, the end of the "
+                + "driver's wait for the asker's stop, its second worktree_digest) and ends with the answer "
+                + "(answer_recorded). " + LEASES_WHILE_OPEN + " counts, as before, the offers and deliveries of the "
+                + "entry's tasks between the ask and the answer, and besides them every worker generation other than "
+                + "the warm worker that held a pm_wait in the open time: a held wait is a held slot. "
+                + WORKERS_CONNECTED_WHILE_OPEN + " (generations other than the warm worker whose relay was connected "
+                + "in the open time) and " + HELD_WAIT_MS + " (how long they held pm_wait in it) are reported "
+                + "figures beside it. The verdict logic is unchanged.");
+        text.append(" The fresh asker that has not ended its turn at its silence limit after the ask is ended by "
+                + "the driver before the open time starts (" + field + "), a harness action as in the other fresh "
+                + "items; a model that does not end its turn after the ask is a finding of the run, not of the "
+                + "server.");
+        if (recorded > 0) {
+            text.append(" The driver ended the asker in ").append(ended.size()).append(" of ").append(recorded)
+                    .append(" runs").append(ended.isEmpty() ? "" : " (" + String.join(", ", ended) + ")")
+                    .append('.');
+        }
+        if (recorded < figures.size()) {
+            text.append(" ").append(figures.size() - recorded).append(" run records were written before the driver "
+                    + "ended the asker (" + field + " not recorded); in ").append(heldBefore.size())
+                    .append(" of them the asker held pm_wait into the open time and counts in " + LEASES_WHILE_OPEN)
+                    .append(heldBefore.isEmpty() ? "." : ": " + String.join(", ", heldBefore) + ".");
+        }
+        if (!unavailable.isEmpty()) {
+            text.append(" The open time cannot be read from the stub log of ").append(String.join(", ", unavailable))
+                    .append(": its held figures are " + UNAVAILABLE + ", and " + LEASES_WHILE_OPEN
+                            + " counts its offers and deliveries only.");
+        }
+        if (!fencedOffers.isEmpty()) {
+            text.append(" In ").append(String.join(", ", fencedOffers)).append(" the continuing task was offered "
+                    + "twice because the stub offered it over the held pm_wait of a generation the driver then "
+                    + "fenced, before that generation acknowledged it (" + OFFER_COUNTED_TWICE_FENCED + "); "
+                    + "answer_delivered_exactly_once counts that offer, the verdict logic being unchanged.");
+        }
+        if (!refusedAtStop.isEmpty()) {
+            text.append(" The stub logs of ").append(String.join(", ", refusedAtStop)).append(" show a pm_wait "
+                    + "refused generation_fenced of a generation no fenced event names: the stub before 2026-10-22 "
+                    + "refused a wait it held when it stopped for the restart with that reason; it was not fenced, "
+                    + "and it reconnected with fenced: false. The stub now refuses it " + QuestionStub.STUB_STOPPED
+                    + ".");
+        }
+        limit(result, text.toString());
     }
 
     private static boolean r1(List<RunView> views, ObjectNode group) {

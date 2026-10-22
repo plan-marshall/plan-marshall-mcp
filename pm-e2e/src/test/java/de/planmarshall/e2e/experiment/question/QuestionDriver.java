@@ -610,6 +610,74 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
+     * The event the driver logs, and the field of a Q7 run record, when it ends the fresh asker that still runs at
+     * its silence limit after the ask ({@link #endAsker}): a harness action, the end of a turn the model did not end.
+     */
+    static final String ASKER_ENDED_BY_DRIVER = "asker_ended_by_driver";
+
+    /**
+     * The event the driver logs when the open time of a Q7 run starts: the asking generation has stopped (it exited,
+     * or the driver ended it), so the record is open with no worker of the task connected.
+     */
+    static final String OPEN_TIME_STARTED = "open_time_started";
+
+    /** How long {@link #endAsker} waits for the driver's own {@code worker_exited} of an ended asker. */
+    private static final Duration EXIT_EVENT_WAIT = Duration.ofSeconds(30);
+
+    /**
+     * How the fresh asker of a Q7 run stopped before the open time ({@link #endAsker}).
+     *
+     * @param worker        the asking worker
+     * @param generation    its generation
+     * @param endedByDriver whether the driver ended it at its silence limit, because it still ran
+     * @param afterAskMs    the milliseconds from the ask to its exit observed by the driver, or to its end by the
+     *                      driver
+     * @param holdingWait   whether it held a {@code pm_wait} when the driver ended it (by the stub log: a
+     *                      {@code wait_started} without an end), {@code false} when it exited by itself
+     */
+    record AskerEnd(String worker, int generation, boolean endedByDriver, long afterAskMs, boolean holdingWait) {
+    }
+
+    /**
+     * Ends the fresh asker of a Q7 run before the open time starts, by the rule the other fresh items follow: the
+     * driver waits for the asker's exit up to its silence limit after the ask, and ends an asker that still runs, as
+     * the launch of a newer generation ends an older one ({@link #SUPERSEDED_ENDED}) and as the server ends a worker
+     * whose turn does not end. Such an end is logged as {@value #ASKER_ENDED_BY_DRIVER} with the time after the ask
+     * and whether the asker held a {@code pm_wait} then; once the driver's own {@code worker_exited} of it is in the
+     * log, {@value #OPEN_TIME_STARTED} is logged: the record is open with no worker of the task connected.
+     *
+     * @param asker        the asking generation
+     * @param askedAt      when it asked (epoch milliseconds, the {@code asked} event)
+     * @param silenceLimit how long after the ask it may run before it is ended
+     * @return how it stopped
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    AskerEnd endAsker(Worker asker, long askedAt, Duration silenceLimit) throws IOException, InterruptedException {
+        var waitFor = Duration.ofMillis(Math.max(0, askedAt + silenceLimit.toMillis() - System.currentTimeMillis()));
+        var exited = awaitExit(asker, waitFor).isPresent();
+        AskerEnd end;
+        if (exited) {
+            end = new AskerEnd(asker.id(), asker.generation(), false, System.currentTimeMillis() - askedAt, false);
+        } else {
+            var holding = QuestionResults.holdingWait(QuestionResults.readJsonLines(stub.events()), asker.id(),
+                    asker.generation());
+            end = new AskerEnd(asker.id(), asker.generation(), true, System.currentTimeMillis() - askedAt, holding);
+            var fields = identity(asker);
+            fields.put("after_ask_ms", end.afterAskMs());
+            fields.put("holding_wait", holding);
+            stub.event(ASKER_ENDED_BY_DRIVER, fields);
+            terminate(asker);
+        }
+        awaitEvent(event -> "worker_exited".equals(event.path(EVENT).asText()) && matches(event, asker),
+                System.currentTimeMillis() + EXIT_EVENT_WAIT.toMillis());
+        var fields = identity(asker);
+        fields.put(ASKER_ENDED_BY_DRIVER, end.endedByDriver());
+        stub.event(OPEN_TIME_STARTED, fields);
+        return end;
+    }
+
+    /**
      * Ends a worker as the server ends one: {@code SIGTERM}, then {@code SIGKILL} after the termination grace.
      *
      * @param worker the worker
