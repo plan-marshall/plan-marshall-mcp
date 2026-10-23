@@ -69,6 +69,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * The stub of the question loop without a model (experiment only): a client speaks to it over its socket as a relay
@@ -763,6 +764,45 @@ class QuestionStubTest {
                     () -> assertEquals(1, lines),
                     () -> assertEquals(AnswerResult.ALREADY_ANSWERED,
                             stub.answer("Q-001", 1, List.of(answer("Q-001")))));
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(Form.class)
+        @DisplayName("an open, unanswered question of every form is queued for the operator again after a restart")
+        void shouldRequeueOpenQuestionOfEveryForm(Form form) throws Exception {
+            stub = start(QuestionStub.QUESTION_BOUND);
+            activeWorker(form).ask("ask", validEnvelope());
+            var before = stub.operatorDecisions().poll();
+            stub.close();
+
+            stub = start(QuestionStub.QUESTION_BOUND);
+            var requeued = List.copyOf(stub.operatorDecisions());
+
+            assertAll("the requeue of " + form,
+                    () -> assertEquals("Q-001", before),
+                    () -> assertEquals(List.of("Q-001"), requeued),
+                    () -> assertEquals(AnswerResult.ANSWERED, stub.answer("Q-001", 1, List.of(answer("Q-001")))));
+        }
+
+        @Test
+        @DisplayName("an open resume-form question is queued after a restart, and its answer makes the rebuilt task "
+                + "resumable instead of continuing it in a new task")
+        void shouldResumeRebuiltTaskAfterRestart() throws Exception {
+            stub = start(QuestionStub.QUESTION_BOUND);
+            activeWorker(Form.RESUME).ask("ask", validEnvelope());
+            stub.close();
+
+            stub = start(QuestionStub.QUESTION_BOUND);
+            var suspended = stub.state(TASK);
+            var requeued = stub.operatorDecisions().peek();
+            var answered = stub.answer("Q-001", 1, List.of(answer("Q-001")));
+
+            assertAll("the resume after the restart",
+                    () -> assertEquals(Optional.of("task.suspended"), suspended),
+                    () -> assertEquals("Q-001", requeued),
+                    () -> assertEquals(AnswerResult.ANSWERED, answered),
+                    () -> assertEquals(Optional.of("task.resumable"), stub.state(TASK)),
+                    () -> assertEquals(List.of(TASK), stub.taskIds()));
         }
     }
 
@@ -2603,6 +2643,224 @@ class QuestionStubTest {
                 invocation.put("fixtures_limit", limit);
             }
             return invocation;
+        }
+    }
+
+    /**
+     * The canary re-read of R1 and the figures of R1 and R2 beside their verdicts. The output lines are stored worker
+     * outputs of the smoke passes under {@code pm-e2e/target/question-loop/runs/}, shortened to the fields the
+     * detector reads; where a text was changed to name the canary file, the comment says so and the shape is the
+     * stored one.
+     */
+    @Nested
+    @DisplayName("R1 and R2 results")
+    class R1R2Results {
+
+        /** Claude Code {@code Read} of the canary (R1-claude-fresh-probe-resumability-001-868f38e9, line 48). */
+        private static final String CLAUDE_READ = """
+                {"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","type":"message",\
+                "role":"assistant","content":[{"type":"tool_use","id":"toolu_01Nnzxoo85Dbd9czYfbfLjXP","name":"Read",\
+                "input":{"file_path":"/private/var/folders/rg/T/pm-qlv/R1-claude-fresh-probe-resumability-001-868f38e9\
+                /workers/w1/canary.txt"},"caller":{"type":"direct"}}]},"parent_tool_use_id":null,\
+                "session_id":"b81b563c-9b9e-49e5-958d-d5d589ed719e"}""";
+
+        /** Claude Code's submit whose judgment names the canary (R1-claude-fresh-probe-resumability-000-e76e523e). */
+        private static final String CLAUDE_SUBMIT = """
+                {"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","type":"message",\
+                "role":"assistant","content":[{"type":"tool_use","id":"toolu_01FBFPFoaA1Jg1bVZ2WHRfVd",\
+                "name":"mcp__plan-marshall__pm_do","input":{"plan_id":"qlv","entity":"T-1","link":"submit",\
+                "args":{"answer":"canary-56afedbdb9643c99","judgment":"Task completed successfully. I read the \
+                canary.txt file and retained its token."}},"caller":{"type":"direct"}}]},"parent_tool_use_id":null,\
+                "session_id":"9ac7ee87-cc5d-4098-807b-f73bbd23c209","tool_use_meta":[{"id":"toolu_01FBFPFoaA1Jg1bVZ2WHRfVd",\
+                "display_name":"Pm Do","server_display_name":"plan-marshall","tool_name":"pm_do"}]}""";
+
+        /** The stub's representation, which quotes the task naming the canary (868f38e9, line 37). */
+        private static final String CLAUDE_TOOL_RESULT = """
+                {"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_018TtFrHUdLgNM2y32oukwtp",\
+                "type":"tool_result","content":[{"type":"text","text":"state: task.answer\\nfacts:\\n  task: \\"Read \
+                canary.txt of your working directory and keep its token.\\""}]}]},"parent_tool_use_id":null}""";
+
+        /** Claude Code's prose in the stored shape of a text item; its text changed to name the canary. */
+        private static final String CLAUDE_PROSE = """
+                {"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","type":"message",\
+                "role":"assistant","content":[{"type":"text","text":"I will not read canary.txt again."}]}}""";
+
+        /** OpenCode {@code read} of the canary (Q2-opencode-warm-question_ask-or-proceed_he-0-original-000-4e0451b0). */
+        private static final String OPENCODE_READ = """
+                {"type":"tool_use","timestamp":1792668201283,"sessionID":"ses_e9ca65464ffeAiLUq45JbhQYpJ",\
+                "part":{"type":"tool","id":"call_qdF8BmPb7ZBn5a5RxPCT6vRw","tool":"read","state":{"status":"completed",\
+                "input":{"path":"canary.txt","limit":200},"output":"Read file canary.txt, lines 1-1\\n1: \
+                canary-d296209ad8bef1d9","title":"read"}}}""";
+
+        /** OpenCode {@code read} of the directory, whose output lists the canary (Q1-opencode-…-3cd7db92). */
+        private static final String OPENCODE_LISTING = """
+                {"type":"tool_use","timestamp":1792649754936,"sessionID":"ses_e9dc48d0dffeeTHes4OBLzePRE",\
+                "part":{"type":"tool","id":"call_wGvBZ6tVIzySiOjx7p76EdUj","tool":"read","state":{"status":"completed",\
+                "input":{"path":"."},"output":"Read directory ., entries 1-2\\ncanary.txt\\nopencode.json",\
+                "title":"read"}}}""";
+
+        /**
+         * OpenCode's submit through {@code execute} (Q1-opencode-…-3cd7db92, submit:TASK-002); its judgment changed
+         * to name the canary.
+         */
+        private static final String OPENCODE_SUBMIT = """
+                {"type":"tool_use","timestamp":1792649769978,"sessionID":"ses_e9dc48d0dffeeTHes4OBLzePRE",\
+                "part":{"type":"tool","id":"call_bdPVj7OVOzDFriNb316Qxbdk","tool":"execute","state":{"status":"completed",\
+                "input":{"code":"return await tools[\\"plan-marshall\\"].pm_do({plan_id:\\"qlv\\",entity:\\"T-1\\",\
+                link:\\"submit\\",args:{answer:\\"False\\",judgment:\\"Read canary.txt before the ask.\\"}});"},\
+                "output":"state: entity.completed","title":"execute"}}}""";
+
+        /** Antigravity's final object (Q1-agy-fresh-question_apply-answer_he-0-000-5632eacb); response changed. */
+        private static final String ANTIGRAVITY_RESULT = """
+                {"conversation_id":"444e4726-420e-48d4-838c-36539b370773","status":"SUCCESS",\
+                "response":"I read canary.txt once before the ask.","duration_seconds":297.726415,"num_turns":1,\
+                "usage":{"input_tokens":193040,"output_tokens":6957,"total_tokens":199997}}""";
+
+        @Test
+        @DisplayName("Claude Code: a Read of the canary counts; the submit, the stub's facts and prose that name it "
+                + "do not")
+        void shouldDetectClaudeCodeRead() {
+            var file = QuestionFixtures.CANARY_FILE;
+
+            assertAll("Claude Code",
+                    () -> assertTrue(QuestionResults.readsFile(CLAUDE_READ, file)),
+                    () -> assertFalse(QuestionResults.readsFile(CLAUDE_SUBMIT, file)),
+                    () -> assertFalse(QuestionResults.readsFile(CLAUDE_TOOL_RESULT, file)),
+                    () -> assertFalse(QuestionResults.readsFile(CLAUDE_PROSE, file)));
+        }
+
+        @Test
+        @DisplayName("OpenCode: a read of the canary counts; a listing that names it and a submit through execute do "
+                + "not")
+        void shouldDetectOpenCodeRead() {
+            var file = QuestionFixtures.CANARY_FILE;
+
+            assertAll("OpenCode",
+                    () -> assertTrue(QuestionResults.readsFile(OPENCODE_READ, file)),
+                    () -> assertFalse(QuestionResults.readsFile(OPENCODE_LISTING, file)),
+                    () -> assertFalse(QuestionResults.readsFile(OPENCODE_SUBMIT, file)));
+        }
+
+        @Test
+        @DisplayName("Antigravity: its final object carries no tool call, so nothing in it counts (not verified)")
+        void shouldNotDetectAntigravityRead() {
+            assertFalse(QuestionResults.readsFile(ANTIGRAVITY_RESULT, QuestionFixtures.CANARY_FILE));
+        }
+
+        @Test
+        @DisplayName("only a read after the ask counts, and a line that is no JSON never counts")
+        void shouldCountReadAfterAskOnly() {
+            var before = List.<JsonNode>of(stampedAt(100, CLAUDE_READ), stampedAt(300, CLAUDE_SUBMIT),
+                    stampedAt(300, "canary.txt \"tool_use\""));
+            var after = List.<JsonNode>of(stampedAt(300, CLAUDE_SUBMIT), stampedAt(400, OPENCODE_READ));
+
+            assertAll("the re-read",
+                    () -> assertFalse(QuestionResults.rereadsCanary(before, 200)),
+                    () -> assertTrue(QuestionResults.rereadsCanary(after, 200)));
+        }
+
+        @Test
+        @DisplayName("the longest passing duration is reported per form beside the pooled figure")
+        void shouldReportLongestPassingPerForm() {
+            var groups = QuestionStub.JSON.createArrayNode();
+            groups.add(group("fresh", 3600, "pass"));
+            groups.add(group("fresh", 1800, "pass"));
+            groups.add(group("warm", 3600, "fail"));
+            groups.add(group("warm", 1800, "pass"));
+
+            var perForm = QuestionResults.longestPassingPerForm(groups, "duration_s");
+
+            assertAll("per form",
+                    () -> assertEquals(3600, perForm.path("fresh").path("claude m").asInt()),
+                    () -> assertEquals(1800, perForm.path("warm").path("claude m").asInt()));
+        }
+
+        @Test
+        @DisplayName("an R2 group splits its runs by restart without changing its key or verdict")
+        void shouldBreakDownRestartRuns() throws Exception {
+            var submitted = event(4, "submitted");
+            submitted.putObject("args").put("answer", "canary-1");
+            var continued = List.<JsonNode>of(event(1, "asked"), answerDelivered(2), event(3, "acknowledged")
+                    .put("kind", "answer"), submitted);
+            var plain = new QuestionResults.RunView(r2Run(false, false), continued, List.of(), List.of());
+            var restarted = new QuestionResults.RunView(r2Run(true, true), List.<JsonNode>of(event(1, "asked")),
+                    List.of(), List.of());
+            var group = QuestionStub.JSON.createObjectNode();
+
+            QuestionResults.restartBreakdown(List.of(plain, restarted), group);
+
+            var breakdown = group.path(QuestionResults.RESTART_BREAKDOWN);
+            assertAll("the breakdown",
+                    () -> assertEquals(List.of(1, 1, 0, 0, 1), figures(breakdown.path("true"))),
+                    () -> assertEquals(List.of(1, 1, 1, 1, 0), figures(breakdown.path("false"))));
+        }
+
+        @Test
+        @DisplayName("R2 names the age of 24 hours as not run when its invocations did not run it")
+        void shouldNameMissingDayAge() {
+            var without = QuestionStub.JSON.createObjectNode();
+            without.putArray("r2_ages_s").add(300).add(3600);
+            var withDay = QuestionStub.JSON.createObjectNode();
+            withDay.putArray("r2_ages_s").add(300).add(86_400);
+            var dropped = QuestionStub.JSON.createObjectNode();
+            var run = QuestionStub.JSON.createObjectNode();
+            var kept = QuestionStub.JSON.createObjectNode();
+
+            QuestionResults.limitOfR2Ages(dropped, List.of(run), List.of(without));
+            QuestionResults.limitOfR2Ages(kept, List.of(run), List.of(withDay));
+
+            assertAll("the limit",
+                    () -> assertEquals("the age 24 hours was not run, operator decision; the criterion text is "
+                            + "unchanged", dropped.path("limits").get(0).asText()),
+                    () -> assertTrue(kept.path("limits").isMissingNode(), kept.toString()));
+        }
+
+        private static JsonNode stampedAt(long at, String line) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put("line", line);
+            return node;
+        }
+
+        private static ObjectNode group(String form, int duration, String verdict) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("host", "claude");
+            node.put("model", "m");
+            node.put("form", form);
+            node.put("duration_s", duration);
+            node.put("verdict", verdict);
+            return node;
+        }
+
+        private static ObjectNode event(long at, String name) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put("event", name);
+            node.put("worker", WORKER);
+            node.put("generation", 1);
+            return node;
+        }
+
+        private static ObjectNode answerDelivered(long at) {
+            return event(at, "answer_delivered").put("resumed", true);
+        }
+
+        private static ObjectNode r2Run(boolean restart, boolean timedOut) {
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put("item", "R2");
+            run.put("host", "claude");
+            run.put("form", "fresh");
+            run.put("age_s", 300);
+            run.put("restart", restart);
+            run.put("negative", false);
+            run.put("canary", "canary-1");
+            run.put(QuestionResults.TIMED_OUT, timedOut);
+            return run;
+        }
+
+        private static List<Integer> figures(JsonNode part) {
+            return List.of("runs", "asked", "continued_from_session", "submitted", "timed_out").stream()
+                    .map(field -> part.path(field).asInt(-1)).toList();
         }
     }
 

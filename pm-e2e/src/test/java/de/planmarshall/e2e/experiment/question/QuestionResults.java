@@ -176,6 +176,24 @@ final class QuestionResults {
      * figure, not the verdict.
      */
     static final String VERDICT_BY_NEXT_PM_WAIT = "verdict_by_next_pm_wait_or_end";
+    /** The tools of the stub: a call of one of them is no read of a file of the worktree (R1). */
+    static final Set<String> STUB_TOOLS = Set.of("pm_state", "pm_wait", "pm_do");
+    /**
+     * The suffix of the figures of R1 and R2 per form ({@code max_hold_seconds_per_form},
+     * {@code max_age_seconds_per_form}): beside the pooled figure, which takes the longest passing duration or age of
+     * either form, each form's own, so that a duration that passed fresh and failed warm reads as such.
+     */
+    static final String PER_FORM = "_per_form";
+    /**
+     * The R2 group figure that splits its runs by whether the stub was restarted while the record was open:
+     * {@code true} and {@code false}, each with {@code runs}, {@code asked}, {@code continued_from_session} (as R2
+     * counts it), {@code submitted} and {@code timed_out}. The group key has no restart field; the figure does not
+     * change the verdict.
+     */
+    static final String RESTART_BREAKDOWN = "restart_breakdown";
+    /** The limit of R2 when its invocations did not run the age of 24 hours. */
+    static final String R2_NO_DAY_AGE = "the age 24 hours was not run, operator decision; the criterion text is "
+            + "unchanged";
 
     private static final String LIMITS = "limits";
     private static final String NOT_RECORDED = "not recorded";
@@ -413,12 +431,33 @@ final class QuestionResults {
             case "Q5" -> limitOfQ5Bound(result);
             case "Q6" -> limitOfQ6Votes(result, runs);
             case "Q7" -> limitOfQ7(result, runs);
+            case "R2" -> limitOfR2Ages(result, runs, contributing.values());
             default -> {
                 // no limit of its own
             }
         }
         scale(item, result, runs, invocations);
         return result;
+    }
+
+    /**
+     * Adds the limit of R2's ages ({@value #R2_NO_DAY_AGE}) when the age of 24 hours was not run: the ages its
+     * contributing invocations recorded ({@code r2_ages_s}), or, where none recorded them, the ages of its runs, do not
+     * include 86400 seconds.
+     *
+     * @param result       the result of R2
+     * @param runs         its run records
+     * @param contributing the invocations that contributed run records
+     */
+    static void limitOfR2Ages(ObjectNode result, List<JsonNode> runs, Collection<JsonNode> contributing) {
+        var ages = new TreeSet<Long>();
+        contributing.forEach(invocation -> invocation.path("r2_ages_s").forEach(age -> ages.add(age.asLong())));
+        if (ages.isEmpty()) {
+            runs.forEach(run -> ages.add(run.path("age_s").asLong()));
+        }
+        if (!ages.contains(Duration.ofHours(24).toSeconds())) {
+            limit(result, R2_NO_DAY_AGE);
+        }
     }
 
     /**
@@ -1024,8 +1063,10 @@ final class QuestionResults {
             result.put(VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT, passWithoutContinuationExits ? "pass" : "fail");
         }
         if ("R1".equals(item) || "R2".equals(item)) {
-            result.set("R1".equals(item) ? "max_hold_seconds" : "max_age_seconds", longestPassing(array,
-                    "R1".equals(item) ? "duration_s" : "age_s"));
+            var name = "R1".equals(item) ? "max_hold_seconds" : "max_age_seconds";
+            var parameter = "R1".equals(item) ? "duration_s" : "age_s";
+            result.set(name, longestPassing(array, parameter));
+            result.set(name + PER_FORM, longestPassingPerForm(array, parameter));
         }
         return result;
     }
@@ -1089,6 +1130,9 @@ final class QuestionResults {
         counts(views, group);
         if ("Q4".equals(item)) {
             crossHostRuns(views, group);
+        }
+        if ("R2".equals(item)) {
+            restartBreakdown(views, group);
         }
         var pass = judge(item, views, group);
         group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
@@ -2169,6 +2213,48 @@ final class QuestionResults {
         return (positive == 0 || share >= CONTINUE_SHARE) && hung == 0;
     }
 
+    /**
+     * Adds {@value #RESTART_BREAKDOWN} to an R2 group: its runs split by their record's {@code restart}, each part with
+     * {@code runs}, {@code asked}, {@code submitted} and {@code timed_out} as {@link #counts(List, ObjectNode)} counts
+     * them, and {@code continued_from_session} as {@link #r2(List, ObjectNode)} counts it
+     * ({@link #continuedFromSession(RunView)}). A reported figure: no verdict reads it.
+     *
+     * @param views the group's runs
+     * @param group the group
+     * @throws IOException if a run's files cannot be read
+     */
+    static void restartBreakdown(List<RunView> views, ObjectNode group) throws IOException {
+        var breakdown = group.putObject(RESTART_BREAKDOWN);
+        for (var restart : List.of(true, false)) {
+            var part = views.stream().filter(view -> view.run().path("restart").asBoolean() == restart).toList();
+            var counted = QuestionStub.JSON.createObjectNode();
+            counts(part, counted);
+            var node = breakdown.putObject(String.valueOf(restart));
+            node.put(RUNS, part.size());
+            node.put(ASKED, counted.path(ASKED).asInt());
+            node.put("continued_from_session", part.stream().filter(QuestionResults::continuedFromSession).count());
+            node.put(SUBMITTED, counted.path(SUBMITTED).asInt());
+            node.put(TIMED_OUT, counted.path(TIMED_OUT).asInt());
+        }
+    }
+
+    /**
+     * Whether a positive R2 run continued from the session, as {@link #r2(List, ObjectNode)} counts it: an answer was
+     * delivered to a resumed generation, an answer was acknowledged, and the submission names the canary.
+     *
+     * @param view a run
+     * @return whether it continued from the session; never for a negative resume
+     */
+    static boolean continuedFromSession(RunView view) {
+        if (view.run().path("negative").asBoolean()) {
+            return false;
+        }
+        var acknowledged = view.named("acknowledged").stream()
+                .anyMatch(event -> "answer".equals(event.path("kind").asText()));
+        var resumed = view.named("answer_delivered").stream().anyMatch(event -> event.path("resumed").asBoolean());
+        return resumed && acknowledged && namesCanary(view);
+    }
+
     private static String negativeOutcome(RunView view) {
         var started = view.named("worker_started").stream().filter(event -> event.path("resumed").asBoolean())
                 .findFirst();
@@ -2376,6 +2462,25 @@ final class QuestionResults {
         return QuestionStub.JSON.valueToTree(longest);
     }
 
+    /**
+     * The longest passing value of a parameter per form ({@code fresh}, {@code warm}) and host and model, read as
+     * {@link #longestPassing(ArrayNode, String)} reads it over all groups; a form without a passing group maps to an
+     * empty object.
+     *
+     * @param groups    the groups of R1 or R2
+     * @param parameter {@code duration_s} or {@code age_s}
+     * @return the figure per form
+     */
+    static ObjectNode longestPassingPerForm(ArrayNode groups, String parameter) {
+        var forms = new TreeMap<String, ArrayNode>();
+        for (var group : groups) {
+            forms.computeIfAbsent(group.path("form").asText(), _ -> QuestionStub.JSON.createArrayNode()).add(group);
+        }
+        var perForm = QuestionStub.JSON.createObjectNode();
+        forms.forEach((form, members) -> perForm.set(form, longestPassing(members, parameter)));
+        return perForm;
+    }
+
     // --- per run ---
 
     private static RunView view(JsonNode run) throws IOException {
@@ -2449,10 +2554,99 @@ final class QuestionResults {
     }
 
     private static boolean rereadsCanary(RunView view, long askedAt) {
-        return view.outputs().stream().filter(line -> line.path("at").asLong() > askedAt)
-                .map(line -> line.path("line").asText())
-                .anyMatch(text -> text.contains(QuestionFixtures.CANARY_FILE)
-                        && (text.contains("\"tool_use\"") || text.contains("\"tool\"")));
+        return rereadsCanary(view.outputs(), askedAt);
+    }
+
+    /**
+     * Whether the worker read the canary file again after the ask (R1): an output line after the ask that is a tool
+     * call of the worker's own tools whose input names {@value QuestionFixtures#CANARY_FILE}
+     * ({@link #readsFile(String, String)}). A call of a stub tool ({@link #STUB_TOOLS}) never counts, whatever its
+     * arguments say: the worker's submit names the canary file in its judgment ("read canary.txt"), which the detector
+     * before 2026-10-23 counted as a re-read (11 of the 13 runs it flagged in the R1 smoke pass of 2026-10-22). Neither
+     * does assistant prose, a tool result (the stub's facts quote the task, which names the file), or a tool's output
+     * (a directory listing names the file).
+     *
+     * @param outputs a run's arrival-stamped output lines
+     * @param askedAt when the worker asked (epoch milliseconds)
+     * @return whether a line after the ask reads the canary file
+     */
+    static boolean rereadsCanary(List<JsonNode> outputs, long askedAt) {
+        return outputs.stream().filter(line -> line.path("at").asLong() > askedAt)
+                .anyMatch(line -> readsFile(line.path("line").asText(), QuestionFixtures.CANARY_FILE));
+    }
+
+    /**
+     * Whether one output line of a worker is a call of one of its own tools whose input names a file, per host:
+     * <ul>
+     * <li>Claude Code ({@code --output-format stream-json}): an {@code assistant} line whose {@code message.content}
+     * has an item {@code {"type":"tool_use","name":…,"input":{…}}} whose name is no stub tool (the stub's tools are
+     * named {@code mcp__plan-marshall__pm_do} and so on) and whose input names the file, as {@code Read}
+     * ({@code file_path}), {@code Bash} ({@code command}) or {@code Grep} ({@code path}, {@code pattern}) do. Verified
+     * on the stored outputs of the R1 smoke pass: {@code Read} with the file's absolute {@code file_path} in runs
+     * {@code R1-claude-fresh-probe-resumability-001-868f38e9} and {@code R1-claude-warm-probe-resumability-001-3c8a69d0}.
+     * </li>
+     * <li>OpenCode ({@code --format json}): a line {@code {"type":"tool_use","part":{"type":"tool","tool":…,
+     * "state":{"input":{…},"output":…}}}} whose tool is no stub tool and whose input names the file (not its output);
+     * for the tool {@code execute}, whose input is the code it runs, only when that code calls no stub tool, since
+     * OpenCode calls the stub's tools through it ({@code tools["plan-marshall"].pm_do(…)}) with the submit's text in
+     * its arguments. Verified on the stored output of
+     * {@code Q2-opencode-warm-question_ask-or-proceed_he-0-original-000-4e0451b0} ({@code read} with
+     * {@code path: canary.txt}); an {@code execute} that reads the file was not observed in any stored output.</li>
+     * <li>Antigravity ({@code --output-format json}): not verified. Its output is one final object
+     * ({@code conversation_id}, {@code response}, {@code usage}) without its tool calls in every stored Antigravity
+     * output, so no read of a file can be seen in it and none counts.</li>
+     * </ul>
+     *
+     * @param text one output line of a worker
+     * @param file the file name
+     * @return whether it is a call of one of the worker's own tools whose input names the file
+     */
+    static boolean readsFile(String text, String file) {
+        if (!text.contains(file)) {
+            return false;
+        }
+        JsonNode line;
+        try {
+            line = QuestionStub.JSON.readTree(text);
+        } catch (JsonProcessingException _) {
+            return false;
+        }
+        return claudeCodeReadsFile(line, file) || openCodeReadsFile(line, file);
+    }
+
+    private static boolean claudeCodeReadsFile(JsonNode line, String file) {
+        if (!"assistant".equals(line.path("type").asText())) {
+            return false;
+        }
+        for (var content : line.path("message").path("content")) {
+            if ("tool_use".equals(content.path("type").asText()) && !stubTool(content.path("name").asText())
+                    && content.path("input").toString().contains(file)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean openCodeReadsFile(JsonNode line, String file) {
+        var part = line.path("part");
+        if (!"tool_use".equals(line.path("type").asText()) || !"tool".equals(part.path("type").asText())) {
+            return false;
+        }
+        var tool = part.path("tool").asText();
+        var input = part.path("state").path("input");
+        if (stubTool(tool) || !input.toString().contains(file)) {
+            return false;
+        }
+        if ("execute".equals(tool)) {
+            var code = input.path("code").asText();
+            return STUB_TOOLS.stream().noneMatch(stub -> code.contains(stub + "("));
+        }
+        return true;
+    }
+
+    private static boolean stubTool(String name) {
+        return STUB_TOOLS.stream().anyMatch(stub -> name.equals(stub) || name.endsWith("_" + stub)
+                || name.endsWith("." + stub));
     }
 
     private static int hostToolCalls(RunView view) {

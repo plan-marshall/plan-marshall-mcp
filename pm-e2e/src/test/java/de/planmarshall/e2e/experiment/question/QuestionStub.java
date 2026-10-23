@@ -2153,7 +2153,15 @@ final class QuestionStub implements AutoCloseable {
         }
     }
 
-    /** Replays {@code questions.jsonl}: open records stay open, an answered one continues exactly once. */
+    /**
+     * Replays {@code questions.jsonl}: open records stay open, an answered one continues exactly once. An open,
+     * unanswered decision is put back before the operator in every form, as the stub before the restart had put it: a
+     * delivered one is queued again, an undelivered one is delivered with the reason {@code role_unavailable}. A
+     * decision of the form {@code RESUME} that has not continued also rebuilds its task, suspended (or resumable when
+     * answered) with its stored session, so the operator's answer after the restart makes it resumable. Before
+     * 2026-10-23 an open {@code RESUME} decision was rebuilt but not queued, so the driver never saw it after a restart
+     * and every restart run of R2 waited out its run limit.
+     */
     private void replay() throws IOException {
         if (!Files.exists(records)) {
             return;
@@ -2186,13 +2194,23 @@ final class QuestionStub implements AutoCloseable {
                 task.openDecision = decision.id;
                 task.answers = answersFor(decision.entryKey);
                 tasks.put(decision.spec.taskId(), task);
+                if (!decision.answered) {
+                    requeueForOperator(decision);
+                }
             } else if (decision.answered) {
                 continueInNewTask(decision);
-            } else if (!decision.delivered) {
-                deliverToOperator(decision, "role_unavailable");
             } else {
-                operatorDecisions.add(decision.id);
+                requeueForOperator(decision);
             }
+        }
+    }
+
+    /** Puts an open, unanswered decision back before the operator after a restart. */
+    private void requeueForOperator(Decision decision) {
+        if (decision.delivered) {
+            operatorDecisions.add(decision.id);
+        } else {
+            deliverToOperator(decision, "role_unavailable");
         }
     }
 
