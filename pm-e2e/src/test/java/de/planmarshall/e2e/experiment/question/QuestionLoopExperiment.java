@@ -28,10 +28,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
 
@@ -100,9 +102,13 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * connects and exits without a call of its own ends the run at once as {@code continuation_early_exit} with the same
  * detail: the ask stays counted, and the run counts neither as {@code early_exit} nor as a timeout. A worker whose
  * harness answers with a quota or limit error
- * ({@link QuestionResults#QUOTA_PATTERN} in its own output or {@code stderr}) ends the run at once as
- * {@code quota_error}, before either of these and whether or not it called the stub
- * ({@link QuestionDriver#quotaError()}).
+ * ({@link QuestionResults#QUOTA_PATTERN} in its own error output: its {@code stderr} and the error lines of its
+ * structured output, never a tool's input or result, assistant text or a file it read,
+ * {@link QuestionResults#quotaDetail}) ends the run at once as {@code quota_error}, before either of these and whether
+ * or not it called the stub ({@link QuestionDriver#quotaError()}). A run whose fixture or workspace setup fails before
+ * any worker launches (the scenario's checkout, {@link QuestionFixtures#prepare}) is recorded as
+ * {@value QuestionResults#SETUP_FAILED} with the first line of git's output, and the invocation does not start its
+ * remaining runs of that scenario; its record is appended again after its runs with the counts ({@link SetupStops}).
  * <p>
  * The answer of an ask is awaited alike in every run ({@link QuestionDriver#awaitAnswer}): a decision delivered to the
  * operator is answered on the operator's behalf after the run's hold; in a vote run of Q6 a set its quorum decided is
@@ -421,7 +427,11 @@ class QuestionLoopExperiment {
 
         var invocation = invocation(item, config, plans);
         QuestionResults.recordInvocation(config.results(), invocation);
-        execute(plans, config, invocation.path(QuestionResults.INVOCATION).asText());
+        var stops = new SetupStops();
+        execute(plans, config, invocation.path(QuestionResults.INVOCATION).asText(), stops);
+        if (stops.failures() > 0) {
+            QuestionResults.recordInvocation(config.results(), stops.applyTo(invocation));
+        }
         var result = QuestionResults.result(item, QuestionResults.runs(config.results(), item),
                 QuestionResults.invocations(config.results(), item),
                 () -> QuestionFixtures.unusedScenarios(telemetry(config)).size());
@@ -871,18 +881,80 @@ class QuestionLoopExperiment {
 
     // --- execution ---
 
-    private static void execute(List<RunPlan> plans, Config config, String invocation) throws InterruptedException,
-            ExecutionException {
+    /**
+     * The setup failures of one invocation ({@value QuestionResults#SETUP_FAILED}): the scenarios whose setup failed in
+     * a run, how many runs failed so, and how many runs of those scenarios were not started afterwards. A failed setup
+     * is a stop-worthy event: the invocation's remaining runs of that scenario are not run, and the invocation's record
+     * is appended again after its runs with the counts ({@link #applyTo(ObjectNode)}).
+     */
+    static final class SetupStops {
+
+        private final Set<String> failed = ConcurrentHashMap.newKeySet();
+        private final AtomicInteger failures = new AtomicInteger();
+        private final AtomicInteger stopped = new AtomicInteger();
+
+        /**
+         * @param fixture a fixture
+         * @return whether a run of it failed its setup, so that its remaining runs are not started; counts the run
+         *         as stopped then
+         */
+        boolean stop(String fixture) {
+            if (!failed.contains(fixture)) {
+                return false;
+            }
+            stopped.incrementAndGet();
+            return true;
+        }
+
+        /** Records a run whose setup of the fixture failed. */
+        void failed(String fixture) {
+            failed.add(fixture);
+            failures.incrementAndGet();
+        }
+
+        /** @return the runs whose setup failed */
+        int failures() {
+            return failures.get();
+        }
+
+        /** @return the runs not started because an earlier run of their scenario failed its setup */
+        int stopped() {
+            return stopped.get();
+        }
+
+        /**
+         * @param invocation the invocation record written before the runs
+         * @return a copy with {@value QuestionResults#SETUP_FAILED} (the count), {@code setup_failed_fixtures},
+         *         {@value QuestionResults#SETUP_STOPPED_RUNS} and a message that names the stop
+         */
+        ObjectNode applyTo(ObjectNode invocation) {
+            var copy = invocation.deepCopy();
+            copy.put(QuestionResults.SETUP_FAILED, failures());
+            var fixtures = copy.putArray("setup_failed_fixtures");
+            failed.stream().sorted().forEach(fixtures::add);
+            copy.put(QuestionResults.SETUP_STOPPED_RUNS, stopped());
+            copy.put("setup_stop_message", "the setup of " + String.join(", ", failed.stream().sorted().toList())
+                    + " failed in " + failures() + " run(s); the invocation's remaining " + stopped() + " run(s) of "
+                    + "that scenario were not started");
+            return copy;
+        }
+    }
+
+    private static void execute(List<RunPlan> plans, Config config, String invocation, SetupStops stops)
+            throws InterruptedException, ExecutionException {
         try (var executor = Executors.newFixedThreadPool(config.parallel())) {
             var futures = new ArrayList<Future<?>>();
             for (var plan : plans) {
                 var serial = serialOpenCode(config) && usesOpenCode(plan);
                 futures.add(executor.submit(() -> {
+                    if (stops.stop(plan.fixture().id())) {
+                        return null;
+                    }
                     if (serial) {
                         OPENCODE_SERIAL.lock();
                     }
                     try {
-                        runOne(plan, config, invocation);
+                        runOne(plan, config, invocation, stops);
                     } finally {
                         if (serial) {
                             OPENCODE_SERIAL.unlock();
@@ -897,7 +969,7 @@ class QuestionLoopExperiment {
         }
     }
 
-    private static void runOne(RunPlan plan, Config config, String invocation) throws IOException {
+    private static void runOne(RunPlan plan, Config config, String invocation, SetupStops stops) throws IOException {
         var bytes = new byte[4];
         RANDOM.nextBytes(bytes);
         var suffix = HexFormat.of().formatHex(bytes);
@@ -918,10 +990,27 @@ class QuestionLoopExperiment {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             record.put("error", "interrupted");
+        } catch (QuestionFixtures.SetupFailure e) {
+            recordSetupFailure(record, e);
+            stops.failed(plan.fixture().id());
         } catch (IOException | IllegalStateException e) {
             record.put("error", String.valueOf(e.getMessage()));
         }
         QuestionResults.recordRun(config.results(), record);
+    }
+
+    /**
+     * Records a run whose fixture or workspace setup failed before any worker launched: {@value
+     * QuestionResults#SETUP_FAILED}, its reason (the first line of git's output) and the full message; it names no
+     * worker, and the result counts it in neither {@code no_ask} nor {@code timed_out}.
+     *
+     * @param record  the run record
+     * @param failure the setup failure
+     */
+    static void recordSetupFailure(ObjectNode record, QuestionFixtures.SetupFailure failure) {
+        record.put(QuestionResults.SETUP_FAILED, true);
+        record.put(QuestionResults.SETUP_FAILED_REASON, failure.reason());
+        record.put("error", String.valueOf(failure.getMessage()));
     }
 
     private static ObjectNode runRecord(RunPlan plan, Path stubDir) {
@@ -1366,6 +1455,7 @@ class QuestionLoopExperiment {
                     ended = true;
                     var value = quota.get();
                     record.put(QuestionResults.QUOTA_ERROR, true);
+                    record.put(QuestionResults.QUOTA_RULE, QuestionResults.HARNESS_ERROR_OUTPUT);
                     record.put("quota_error_worker", value.worker());
                     record.put("quota_error_generation", value.generation());
                     record.put("quota_error_detail", value.detail());

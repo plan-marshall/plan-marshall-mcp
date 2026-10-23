@@ -419,14 +419,57 @@ final class QuestionFixtures {
         return value.asText();
     }
 
+    /** A git command that failed: its command line and what git wrote to {@code stderr}. */
+    static final class GitFailure extends IllegalStateException {
+
+        private static final long serialVersionUID = 1L;
+
+        /** What git wrote to {@code stderr}, stripped. */
+        private final String output;
+
+        GitFailure(String command, String output) {
+            super(command + " failed: " + output);
+            this.output = output;
+        }
+
+        /** @return the first line of git's output, empty when it wrote none */
+        String firstLine() {
+            return output.lines().findFirst().orElse("");
+        }
+    }
+
+    /**
+     * The fixture or workspace setup of a run failed before any worker launched ({@link #prepare}): the scenario's
+     * local clone is missing, or a git step of its checkout failed, for example a start commit the clone cannot give
+     * ({@code fatal: unable to read tree}). The run is recorded as {@value QuestionResults#SETUP_FAILED} with
+     * {@link #reason()}, never as {@code no_ask}, timed out or launched.
+     */
+    static final class SetupFailure extends IOException {
+
+        private static final long serialVersionUID = 1L;
+
+        /** The first line of git's output, or the missing clone. */
+        private final String reason;
+
+        SetupFailure(String reason, String message, Throwable cause) {
+            super(message, cause);
+            this.reason = reason;
+        }
+
+        /** @return the reason: the first line of git's output, or the missing clone */
+        String reason() {
+            return reason;
+        }
+    }
+
     /**
      * Runs git and returns its output.
      *
      * @param directory the repository, {@code null} for none
      * @param args      the arguments
      * @return the standard output
-     * @throws IOException           if git cannot be run
-     * @throws IllegalStateException if git fails
+     * @throws IOException if git cannot be run
+     * @throws GitFailure  if git fails
      */
     static String git(Path directory, String... args) throws IOException {
         var command = new ArrayList<String>();
@@ -442,7 +485,7 @@ final class QuestionFixtures {
         var err = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
         try {
             if (process.waitFor() != 0) {
-                throw new IllegalStateException(String.join(" ", command) + " failed: " + err.strip());
+                throw new GitFailure(String.join(" ", command), err.strip());
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -477,12 +520,15 @@ final class QuestionFixtures {
      *
      * @param checkout  the scenario's repository
      * @param directory the worker directory
-     * @throws IOException if git cannot be run
+     * @throws SetupFailure if there is no local clone
+     * @throws GitFailure   if a git step fails
+     * @throws IOException  if git cannot be run
      */
     static void checkout(Checkout checkout, Path directory) throws IOException {
         if (!Files.exists(checkout.localClone().resolve(".git"))) {
-            throw new IllegalStateException("no local clone at " + checkout.localClone()
-                    + ": set -Dpm.experiment.clones to the directory of the local clones");
+            var reason = "no local clone at " + checkout.localClone();
+            throw new SetupFailure(reason, reason + ": set -Dpm.experiment.clones to the directory of the local clones",
+                    null);
         }
         git(null, "init", "--quiet", directory.toString());
         git(directory, "fetch", "--quiet", "--no-tags", checkout.localClone().toString(), "+refs/*:refs/source/*");
@@ -503,17 +549,24 @@ final class QuestionFixtures {
     }
 
     /**
-     * Prepares a worker directory: checks out the fixture's repository, if it has one, and writes a fresh canary.
+     * Prepares a worker directory: checks out the fixture's repository, if it has one, and writes a fresh canary. A
+     * checkout that fails (the local clone missing, a git step failed) is a {@link SetupFailure} whose reason is the
+     * first line of git's output.
      *
      * @param fixture   the fixture
      * @param directory the worker directory
      * @return the canary token
-     * @throws IOException if the directory cannot be written
+     * @throws SetupFailure if the fixture's checkout fails
+     * @throws IOException  if the directory cannot be written
      */
     static String prepare(Fixture fixture, Path directory) throws IOException {
         Files.createDirectories(directory);
         if (fixture.checkout() != null) {
-            checkout(fixture.checkout(), directory);
+            try {
+                checkout(fixture.checkout(), directory);
+            } catch (GitFailure e) {
+                throw new SetupFailure(e.firstLine(), e.getMessage(), e);
+            }
         }
         var bytes = new byte[8];
         RANDOM.nextBytes(bytes);

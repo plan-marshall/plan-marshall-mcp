@@ -49,7 +49,8 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * whether they ran at the specified scale ({@link #scale}); a smaller pass keeps its verdict, marked
  * {@value #NOT_AT_SCALE}. Every group also counts its runs that timed out, did not ask, ended early, ended early in a
  * continuation generation ({@value #CONTINUATION_EARLY_EXIT}), had a voter that ended early
- * ({@value #VOTER_EARLY_EXIT}), met a quota error of the harness, asked, continued and submitted, and a Q4 group its
+ * ({@value #VOTER_EARLY_EXIT}), met a quota error of the harness, failed its fixture setup before any worker launched
+ * ({@value #SETUP_FAILED}), asked, continued and submitted, and a Q4 group its
  * runs that continued on another host ({@value #CROSS_HOST_RUNS}), figures no verdict reads; where a group has quota
  * errors, it also reports its verdict without them
  * ({@code verdict_without_quota_error}), and where its verdict without its continuation early exits reads differently,
@@ -159,12 +160,37 @@ final class QuestionResults {
      */
     static final String QUOTA_ERROR = "quota_error";
     /**
-     * A harness's quota or limit error in its own output or {@code stderr}: the text {@code quota} in any case.
-     * Antigravity answered {@code error: Individual quota reached. Please upgrade your subscription to increase your
-     * limits. Resets in 42h26m24s.} on {@code stderr} and as the {@code error} of its result object in the last three
-     * Antigravity runs of the Q3 smoke pass (2026-10-22). Lines of {@code pm-exec}'s own do not count.
+     * A harness's quota or limit error: the text {@code quota} in any case, matched only in the harness's own error
+     * output ({@link #quotaDetail(String, List)}), never in a tool's input or result, assistant text or a file the
+     * worker read. Antigravity answered {@code error: Individual quota reached. Please upgrade your subscription to
+     * increase your limits. Resets in 42h26m24s.} on {@code stderr} and as the {@code error} of its result object in
+     * the last three Antigravity runs of the Q3 smoke pass (2026-10-22). Lines of {@code pm-exec}'s own do not count.
      */
     static final Pattern QUOTA_PATTERN = Pattern.compile("quota", Pattern.CASE_INSENSITIVE);
+    /**
+     * The field of a run record that names the rule its {@value #QUOTA_ERROR} was detected by; a record without it was
+     * written under the earlier rule, which matched {@link #QUOTA_PATTERN} in every output line, and is read again
+     * ({@link #quotaError(RunView)}).
+     */
+    static final String QUOTA_RULE = "quota_rule";
+    /** The rule of {@link #quotaDetail(String, List)}: the harness's own error output only. */
+    static final String HARNESS_ERROR_OUTPUT = "harness_error_output";
+    /**
+     * The field of a run record, and the group column, of a run whose fixture or workspace setup failed before any
+     * worker launched ({@link #setupFailed(JsonNode)}): it is counted in no other column and in no figure.
+     */
+    static final String SETUP_FAILED = "setup_failed";
+    /** The field of a run record with the reason of its {@value #SETUP_FAILED}: the first line of git's output. */
+    static final String SETUP_FAILED_REASON = "setup_failed_reason";
+    /**
+     * The field of an invocation record with the runs it did not start, because an earlier run of the same scenario
+     * failed its setup ({@value #SETUP_FAILED}); they are no run record and not counted as missing.
+     */
+    static final String SETUP_STOPPED_RUNS = "setup_stopped_runs";
+    /** An old run record's error of a failed git step of the setup: {@code <git command> failed: <git's output>}. */
+    private static final Pattern GIT_SETUP_ERROR = Pattern.compile("^git .* failed: (.*)$", Pattern.DOTALL);
+    /** An old run record's error of a missing local clone ({@link QuestionFixtures#checkout}). */
+    private static final String NO_LOCAL_CLONE = "no local clone at ";
     /** The per-run figure of Q3: the milliseconds from the ask to the asking generation's next {@code pm_wait}. */
     static final String ASK_TO_NEXT_PM_WAIT_MS = "ask_to_next_pm_wait_ms";
     /** The per-run figure of Q3: the milliseconds from the ask to the exit of the asking generation's process. */
@@ -294,12 +320,17 @@ final class QuestionResults {
     /**
      * @param resultsDir the results directory of the measurement
      * @param item       an item
-     * @return the invocation records of the item
+     * @return the invocation records of the item, one per invocation: where an invocation appended its record again
+     *         after its runs (with the setup failures it met, {@link QuestionLoopExperiment#invocation}), the last
+     *         record, in the place of its first
      * @throws IOException if they cannot be read
      */
     static List<JsonNode> invocations(Path resultsDir, String item) throws IOException {
-        return readJsonLines(resultsDir.resolve("invocations.jsonl")).stream()
-                .filter(invocation -> item.equals(invocation.path("item").asText())).toList();
+        var latest = new LinkedHashMap<String, JsonNode>();
+        readJsonLines(resultsDir.resolve("invocations.jsonl")).stream()
+                .filter(invocation -> item.equals(invocation.path("item").asText()))
+                .forEach(invocation -> latest.put(invocation.path(INVOCATION).asText(), invocation));
+        return List.copyOf(latest.values());
     }
 
     /**
@@ -336,7 +367,8 @@ final class QuestionResults {
                 continue;
             }
             var planned = recorded.path("planned_runs").asInt(-1);
-            if (planned >= 0 && entry.getValue() < planned) {
+            var stopped = recorded.path(SETUP_STOPPED_RUNS).asInt(0);
+            if (planned >= 0 && entry.getValue() + stopped < planned) {
                 node.put("incomplete", true);
                 node.put("planned_runs", planned);
                 incomplete.add(entry.getKey() + " recorded " + entry.getValue() + " of its " + planned
@@ -425,6 +457,7 @@ final class QuestionResults {
         limitOfContinuationEarlyExits(result, runs);
         limitOfContinuationsByHold(result, runs);
         limitOfQuotaErrors(result, runs);
+        limitOfSetupFailures(result, runs, contributing.values());
         limitOfReidentifiedGenerations(result, runs);
         switch (item) {
             case "Q3" -> limitOfQ3Times(result);
@@ -634,19 +667,68 @@ final class QuestionResults {
      */
     static void limitOfQuotaErrors(ObjectNode result, List<JsonNode> runs) throws IOException {
         var affected = new ArrayList<String>();
+        var reclassified = new ArrayList<String>();
         for (var run : runs) {
-            if (quotaError(view(run))) {
+            var view = view(run);
+            if (quotaError(view)) {
                 affected.add(runId(run));
+            } else if (quotaReclassified(view)) {
+                reclassified.add(runId(run));
             }
         }
-        if (affected.isEmpty()) {
+        if (!affected.isEmpty()) {
+            limit(result, "Runs whose harness answered with a quota or limit error (the text 'quota' in the "
+                    + "harness's own error output: its stderr without pm-exec's lines, and the error lines of its "
+                    + "structured output, never a tool's input or result, assistant text or a file the worker read) "
+                    + "count as quota_error, not as timed_out, early_exit or no_ask. Their records were written "
+                    + "before the error ended the wait at once, as timed_out where the worker had called the stub, as "
+                    + "early_exit where it had not. The verdict reads them as before; verdict_without_quota_error is "
+                    + "the verdict without them, an additional figure: " + String.join(", ", affected) + ".");
+        }
+        if (!reclassified.isEmpty()) {
+            limit(result, "The records of these runs say quota_error, detected by the earlier rule, which matched "
+                    + "'quota' in every output line, the results of the worker's own tool calls among them; the "
+                    + "harness's own error output of their workers shows no quota error, so they are read as the runs "
+                    + "they were, not as quota_error. The driver had ended them at once on that match: "
+                    + String.join(", ", reclassified) + ".");
+        }
+    }
+
+    /**
+     * Adds a limit naming the runs whose fixture or workspace setup failed before any worker launched
+     * ({@link #setupFailed(JsonNode)}), with their reasons, and the runs their invocations did not start because of
+     * it ({@value #SETUP_STOPPED_RUNS}): such a run counts as {@value #SETUP_FAILED} only, never as no_ask,
+     * timed_out or launched, and is in no figure of its group.
+     *
+     * @param result       the result
+     * @param runs         its run records
+     * @param contributing the invocations that contributed run records
+     */
+    static void limitOfSetupFailures(ObjectNode result, List<JsonNode> runs, Collection<JsonNode> contributing) {
+        var failed = new ArrayList<String>();
+        for (var run : runs) {
+            if (setupFailed(run)) {
+                failed.add(runId(run) + " (" + run.path("fixture").asText() + ": " + setupFailedReason(run) + ")");
+            }
+        }
+        var stopped = new ArrayList<String>();
+        for (var invocation : contributing) {
+            var count = invocation.path(SETUP_STOPPED_RUNS).asInt(0);
+            if (count > 0) {
+                stopped.add(invocation.path(INVOCATION).asText() + " " + count);
+            }
+        }
+        if (failed.isEmpty() && stopped.isEmpty()) {
             return;
         }
-        limit(result, "Runs whose harness answered with a quota or limit error (the text 'quota' in its own output or "
-                + "stderr) count as quota_error, not as timed_out, early_exit or no_ask. Their records were written "
-                + "before the error ended the wait at once, as timed_out where the worker had called the stub, as "
-                + "early_exit where it had not. The verdict reads them as before; verdict_without_quota_error is the "
-                + "verdict without them, an additional figure: " + String.join(", ", affected) + ".");
+        var text = new StringBuilder("A run whose fixture or workspace setup failed before any worker launched counts "
+                + "as " + SETUP_FAILED + " only, not as no_ask, timed_out or launched, and is in no figure of its "
+                + "group; its reason is the first line of git's output");
+        text.append(failed.isEmpty() ? "." : ": " + String.join("; ", failed) + ".");
+        text.append(" A failed setup stops the invocation's remaining runs of that scenario");
+        text.append(stopped.isEmpty() ? "." : ", not run and not counted as missing: " + String.join(", ", stopped)
+                + ".");
+        limit(result, text.toString());
     }
 
     /**
@@ -1138,16 +1220,25 @@ final class QuestionResults {
         }
         if ("R3".equals(item)) {
             exitObservations(views, group);
+            if (Fault.CALL_CUT.name().equals(first.path("fault").asText())) {
+                cutSurvival(views, group);
+            }
         }
-        var pass = judge(item, views, group);
+        var withSetup = views.stream().filter(view -> !setupFailed(view.run())).toList();
+        if (withSetup.isEmpty() && "R4".equals(item)) {
+            group.put(VERDICT, "none");
+            return group;
+        }
+        var launched = withSetup.isEmpty() ? views : withSetup;
+        var pass = judge(item, launched, group);
         group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
         var withoutQuota = new ArrayList<RunView>();
-        for (var view : views) {
+        for (var view : launched) {
             if (!quotaError(view)) {
                 withoutQuota.add(view);
             }
         }
-        if (withoutQuota.size() < views.size()) {
+        if (withoutQuota.size() < launched.size()) {
             var scratch = QuestionStub.JSON.createObjectNode();
             var verdict = withoutQuota.isEmpty() || "R4".equals(item) ? "none"
                     : judge(item, withoutQuota, scratch) ? "pass" : "fail";
@@ -1157,9 +1248,9 @@ final class QuestionResults {
                 group.set(VERDICT_BY_NEXT_PM_WAIT + "_without_quota_error", scratch.get(VERDICT_BY_NEXT_PM_WAIT));
             }
         }
-        var withoutContinuationExits = views.stream()
+        var withoutContinuationExits = launched.stream()
                 .filter(view -> continuationExit(view) != ContinuationExit.EXITED).toList();
-        if (withoutContinuationExits.size() < views.size() && !withoutContinuationExits.isEmpty()
+        if (withoutContinuationExits.size() < launched.size() && !withoutContinuationExits.isEmpty()
                 && !"R4".equals(item)) {
             var verdict = judge(item, withoutContinuationExits, QuestionStub.JSON.createObjectNode()) ? "pass" : "fail";
             if (!verdict.equals(group.path(VERDICT).asText())) {
@@ -1192,11 +1283,12 @@ final class QuestionResults {
      * event), {@code early_exit} ({@link #earlyExit(RunView)}), {@value #CONTINUATION_EARLY_EXIT}
      * ({@link #continuationExit(RunView)} is {@link ContinuationExit#EXITED}), {@value #VOTER_EARLY_EXIT}
      * ({@link #voterEarlyExit(RunView)}), {@value #QUOTA_ERROR}
-     * ({@link #quotaError(RunView)}), {@code asked}, {@code continued} and {@code submitted} (runs with at least one
-     * such event). A quota-error run counts in {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask},
-     * {@code early_exit} or {@value #CONTINUATION_EARLY_EXIT}; a continuation early exit not in {@code timed_out}, even
-     * where its record, written before the driver ended the wait on it, says timed out. They are reported figures: no
-     * verdict reads them.
+     * ({@link #quotaError(RunView)}), {@value #SETUP_FAILED} ({@link #setupFailed(JsonNode)}), {@code asked},
+     * {@code continued} and {@code submitted} (runs with at least one such event). A quota-error run counts in
+     * {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask}, {@code early_exit} or
+     * {@value #CONTINUATION_EARLY_EXIT}; a continuation early exit not in {@code timed_out}, even where its record,
+     * written before the driver ended the wait on it, says timed out; a run whose setup failed in
+     * {@value #SETUP_FAILED} only, since no worker of it launched. They are reported figures: no verdict reads them.
      *
      * @param views  the group's runs
      * @param group  the group
@@ -1210,9 +1302,14 @@ final class QuestionResults {
         var continuationEarlyExits = 0;
         var voterEarlyExits = 0;
         var quotaErrors = 0;
+        var setupFailures = 0;
         var continued = 0;
         var submitted = 0;
         for (var view : views) {
+            if (setupFailed(view.run())) {
+                setupFailures++;
+                continue;
+            }
             var askedHere = !view.named(ASKED).isEmpty();
             asked += askedHere ? 1 : 0;
             if (quotaError(view)) {
@@ -1235,6 +1332,7 @@ final class QuestionResults {
         group.put(CONTINUATION_EARLY_EXIT, continuationEarlyExits);
         group.put(VOTER_EARLY_EXIT, voterEarlyExits);
         group.put(QUOTA_ERROR, quotaErrors);
+        group.put(SETUP_FAILED, setupFailures);
         group.put(ASKED, asked);
         group.put("continued", continued);
         group.put(SUBMITTED, submitted);
@@ -1303,18 +1401,39 @@ final class QuestionResults {
     }
 
     /**
-     * Whether a run met a quota or limit error of its harness: its record says so ({@value #QUOTA_ERROR}), or a line of
-     * its workers' own output or {@code stderr} matches {@link #QUOTA_PATTERN} ({@link #quotaDetail(String, List)}).
-     * The second reading also finds the quota errors of records written before the driver detected them.
+     * Whether a run met a quota or limit error of its harness: its record says so ({@value #QUOTA_ERROR}) under the
+     * rule of {@link #quotaDetail(String, List)} ({@value #QUOTA_RULE} {@value #HARNESS_ERROR_OUTPUT}), or the
+     * harness's own error output of its workers matches {@link #QUOTA_PATTERN}. A record that says
+     * {@value #QUOTA_ERROR} without the rule was written under the earlier rule, which matched every output line,
+     * the results of the worker's own tool calls among them; it is read again from its stored output and
+     * {@code stderr}, and counts only where the harness's own error output matches ({@link #quotaReclassified}). The
+     * second reading also finds the quota errors of records written before the driver detected them.
      *
      * @param view a run
      * @return whether its harness answered with a quota error
      * @throws IOException if a worker's {@code stderr} cannot be read
      */
     static boolean quotaError(RunView view) throws IOException {
-        if (view.run().path(QUOTA_ERROR).asBoolean()) {
+        if (view.run().path(QUOTA_ERROR).asBoolean()
+                && HARNESS_ERROR_OUTPUT.equals(view.run().path(QUOTA_RULE).asText())) {
             return true;
         }
+        return quotaDetail(stderrOf(view), view.outputs()).isPresent();
+    }
+
+    /**
+     * Whether a run's record says {@value #QUOTA_ERROR} under the earlier rule (no {@value #QUOTA_RULE}) and the
+     * harness's own error output of its workers shows none: a false quota error, read now as the run it was.
+     *
+     * @param view a run
+     * @return whether its recorded quota error is not one
+     * @throws IOException if a worker's {@code stderr} cannot be read
+     */
+    static boolean quotaReclassified(RunView view) throws IOException {
+        return view.run().path(QUOTA_ERROR).asBoolean() && !view.run().has(QUOTA_RULE) && !quotaError(view);
+    }
+
+    private static String stderrOf(RunView view) throws IOException {
         var stderr = new StringBuilder();
         for (var worker : view.run().path("workers")) {
             var file = stderrOf(worker);
@@ -1322,20 +1441,118 @@ final class QuestionResults {
                 stderr.append(Files.readString(file, StandardCharsets.UTF_8)).append('\n');
             }
         }
-        return quotaDetail(stderr.toString(), view.outputs()).isPresent();
+        return stderr.toString();
     }
 
     /**
+     * The quota error in a worker's own error output, the rule {@value #HARNESS_ERROR_OUTPUT}: a line of its
+     * {@code stderr} that is not one of {@code pm-exec}'s own, or the error text of an error line of its structured
+     * output ({@link #harnessErrorText(String)}), that matches {@link #QUOTA_PATTERN}. A tool's input or result, the
+     * assistant's text and a file the worker read are never matched: the R4 large-work runs of 2026-10-23 were ended as
+     * quota errors because a repository file the worker read contained the word.
+     *
      * @param stderr  what a worker wrote to {@code stderr}
      * @param outputs its arrival-stamped output lines
-     * @return the first line of {@code stderr} that is not a line of {@code pm-exec}'s own and matches
-     *         {@link #QUOTA_PATTERN}, else the first such output line; empty when none
+     * @return the first matching line of {@code stderr}, else the first matching error line of the output; empty when
+     *         none
      */
     static Optional<String> quotaDetail(String stderr, List<JsonNode> outputs) {
         return stderr.lines().filter(line -> !QuestionDriver.pmExecLine(line))
                 .filter(line -> QUOTA_PATTERN.matcher(line).find()).findFirst()
                 .or(() -> outputs.stream().map(line -> line.path("line").asText())
-                        .filter(line -> QUOTA_PATTERN.matcher(line).find()).findFirst());
+                        .filter(line -> harnessErrorText(line).filter(text -> QUOTA_PATTERN.matcher(text).find())
+                                .isPresent())
+                        .findFirst());
+    }
+
+    /**
+     * The error text of one line of a harness's structured output, when the line is an error line of the harness
+     * itself; the shapes are those of the stored outputs under {@code pm-e2e/target/question-loop/runs/}:
+     * <ul>
+     * <li>Claude Code ({@code --output-format stream-json}): a {@code result} line with {@code is_error: true} or a
+     * subtype that starts with {@code error}; its text is {@code errors[]}, {@code result} and {@code error}. Verified:
+     * {@code {"type":"result","subtype":"error_during_execution","is_error":true,…,"errors":["No conversation found
+     * with session ID: …"]}} in R2-claude-fresh-probe-resumability-000-b59f4c86. Its {@code api_error} and
+     * {@code error} events are not verified (no stored output has one) and are not matched; a quota error of Claude
+     * Code reaches the run through its {@code stderr} or such a result line. Its {@code rate_limit_event} lines
+     * ({@code status: allowed}, {@code allowed_warning}) are no error.</li>
+     * <li>OpenCode ({@code --format json}): a line {@code {"type":"error",…,"error":{"type":…,"message":…}}}; its
+     * text is its {@code error}. Verified: {@code provider.transport} in
+     * Q4-opencode-warm-question_apply-answer_he-106-002-d46425ce.</li>
+     * <li>Antigravity ({@code --output-format json}): its final object ({@code conversation_id}) with a textual
+     * {@code error}; its text is that {@code error}, never its {@code response}. Verified:
+     * {@code "status":"ERROR","error":"Individual quota reached. …"} in the Q3 quota runs
+     * Q3-agy-warm-question_apply-answer_he-106-001-0910e1ab, -001-63b874de and -002-6860b0e8, whose {@code stderr}
+     * carries {@code error: Individual quota reached. …} as well.</li>
+     * </ul>
+     *
+     * @param text one output line of a worker
+     * @return the error text of the line, empty when it is no error line of the harness
+     */
+    static Optional<String> harnessErrorText(String text) {
+        JsonNode line;
+        try {
+            line = QuestionStub.JSON.readTree(text);
+        } catch (JsonProcessingException _) {
+            return Optional.empty();
+        }
+        if (line == null || !line.isObject()) {
+            return Optional.empty();
+        }
+        var type = line.path("type").asText("");
+        if ("result".equals(type) && (line.path("is_error").asBoolean()
+                || line.path("subtype").asText("").startsWith("error"))) {
+            var parts = new ArrayList<String>();
+            line.path("errors").forEach(error -> parts.add(error.isTextual() ? error.asText() : error.toString()));
+            for (var field : List.of("result", "error")) {
+                if (line.path(field).isTextual()) {
+                    parts.add(line.path(field).asText());
+                }
+            }
+            return Optional.of(String.join("\n", parts));
+        }
+        if ("error".equals(type) && line.has("error")) {
+            var error = line.path("error");
+            return Optional.of(error.isTextual() ? error.asText() : error.toString());
+        }
+        if (antigravityResult(line) && line.path("error").isTextual()) {
+            return Optional.of(line.path("error").asText());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a run's fixture or workspace setup failed before any worker launched: its record says so
+     * ({@value #SETUP_FAILED}), or, in a record written before that field, it names no worker and its {@code error} is
+     * a failed git step of the setup ({@code <git command> failed: …}) or a missing local clone.
+     *
+     * @param run a run record
+     * @return whether its setup failed
+     */
+    static boolean setupFailed(JsonNode run) {
+        if (run.path(SETUP_FAILED).asBoolean()) {
+            return true;
+        }
+        if (!run.path("workers").isMissingNode() && !run.path("workers").isEmpty()) {
+            return false;
+        }
+        var error = run.path("error").asText("");
+        return GIT_SETUP_ERROR.matcher(error).matches() || error.startsWith(NO_LOCAL_CLONE);
+    }
+
+    /**
+     * @param run a run record whose setup failed ({@link #setupFailed(JsonNode)})
+     * @return its reason: the recorded {@value #SETUP_FAILED_REASON}, else the first line of git's output in its
+     *         {@code error}, else that error's first line
+     */
+    static String setupFailedReason(JsonNode run) {
+        if (run.path(SETUP_FAILED_REASON).isTextual()) {
+            return run.path(SETUP_FAILED_REASON).asText();
+        }
+        var error = run.path("error").asText("");
+        var matcher = GIT_SETUP_ERROR.matcher(error);
+        var text = matcher.matches() ? matcher.group(1) : error;
+        return text.strip().lines().findFirst().orElse("");
     }
 
     /**
@@ -2490,6 +2707,102 @@ final class QuestionResults {
         node.set(RUNS, perRun);
     }
 
+    /** The R3 {@link Fault#CALL_CUT} group figure of the runs whose held call the logs show cut by the host. */
+    static final String CUT_BY_HOST = "cut_by_host";
+    /**
+     * The R3 {@link Fault#CALL_CUT} group figure of the runs whose cut the worker survived
+     * ({@link #cutSurvived(RunView, JsonNode)}).
+     */
+    static final String CUT_SURVIVED = "cut_survived";
+    /** The R3 {@link Fault#CALL_CUT} figure of the milliseconds from the cut to the generation's next pm_wait. */
+    static final String RE_WAIT_AFTER_CUT_MS = "re_wait_after_cut_ms";
+    /** The limit of R3 on a survived call cut, verbatim. */
+    static final String CUT_SURVIVED_LIMIT = "a call cut that the worker survives by waiting again is not a loss; the "
+            + "criterion counts it as undetected; reported as cut_survived";
+
+    /**
+     * The host's cut of a run's held call as the stub log shows it: the driver's {@value QuestionDriver#FAULT_INJECTED}
+     * of {@link Fault#CALL_CUT} with {@code cut_by: host} ({@link QuestionDriver#awaitCallCut}).
+     *
+     * @param view a run
+     * @return the cut event, empty when the logs show none
+     */
+    static Optional<JsonNode> hostCut(RunView view) {
+        return view.named(QuestionDriver.FAULT_INJECTED).stream()
+                .filter(event -> Fault.CALL_CUT.name().equals(event.path("fault").asText())
+                        && "host".equals(event.path("cut_by").asText()))
+                .findFirst();
+    }
+
+    /**
+     * The milliseconds from the host's cut of a held call to the next {@code pm_wait} the same generation called at or
+     * after it ({@value QuestionDriver#CALL} of {@code pm_wait}).
+     *
+     * @param view a run
+     * @param cut  its cut ({@link #hostCut(RunView)})
+     * @return the milliseconds, empty when the generation did not call {@code pm_wait} again
+     */
+    static Optional<Long> reWaitAfterCut(RunView view, JsonNode cut) {
+        var worker = cut.path(WORKER).asText();
+        var generation = cut.path(GENERATION).asInt();
+        var cutAt = cut.path("cut_at").asLong(cut.path("at").asLong());
+        return view.events().stream()
+                .filter(event -> QuestionDriver.CALL.equals(event.path(EVENT).asText())
+                        && "pm_wait".equals(event.path("tool").asText()) && same(event, worker, generation)
+                        && event.path("at").asLong() >= cutAt)
+                .map(event -> event.path("at").asLong() - cutAt).findFirst();
+    }
+
+    /**
+     * Whether a worker survived the host's cut of its held call: the same generation called {@code pm_wait} again
+     * after the cut ({@link #reWaitAfterCut}), the answer was delivered to it exactly once, it acknowledged the answer,
+     * and no loss of it was detected. Nothing was lost, so nothing was detected; the criterion counts the run as
+     * undetected and the verdict logic reads it so.
+     *
+     * @param view a run
+     * @param cut  its cut ({@link #hostCut(RunView)})
+     * @return whether the worker survived the cut
+     */
+    static boolean cutSurvived(RunView view, JsonNode cut) {
+        var worker = cut.path(WORKER).asText();
+        var generation = cut.path(GENERATION).asInt();
+        var delivered = view.named("answer_delivered").stream().filter(event -> same(event, worker, generation))
+                .count();
+        var acknowledged = view.named("acknowledged").stream().anyMatch(event -> same(event, worker, generation)
+                && "answer".equals(event.path("kind").asText()));
+        var lost = view.named(QuestionDriver.LOST_DETECTED).stream().anyMatch(event -> same(event, worker,
+                generation));
+        return reWaitAfterCut(view, cut).isPresent() && delivered == 1 && acknowledged && !lost;
+    }
+
+    /**
+     * Adds the figures of a survived call cut to an R3 {@link Fault#CALL_CUT} group: {@value #CUT_BY_HOST} (runs whose
+     * held call the logs show cut by the host), {@value #CUT_SURVIVED} ({@link #cutSurvived}), and
+     * {@value #RE_WAIT_AFTER_CUT_MS} median and max over the cut runs whose generation called {@code pm_wait} again;
+     * additional figures, the verdict logic of R3 is unchanged ({@value #CUT_SURVIVED_LIMIT}).
+     *
+     * @param views the group's runs
+     * @param group the group
+     */
+    static void cutSurvival(List<RunView> views, ObjectNode group) {
+        var cuts = 0;
+        var survived = 0;
+        var reWaits = new ArrayList<Long>();
+        for (var view : views) {
+            var cut = hostCut(view);
+            if (cut.isEmpty()) {
+                continue;
+            }
+            cuts++;
+            reWaitAfterCut(view, cut.get()).ifPresent(reWaits::add);
+            survived += cutSurvived(view, cut.get()) ? 1 : 0;
+        }
+        group.put(CUT_BY_HOST, cuts);
+        group.put(CUT_SURVIVED, survived);
+        group.put(RE_WAIT_AFTER_CUT_MS + "_median", median(reWaits));
+        group.put(RE_WAIT_AFTER_CUT_MS + "_max", max(reWaits));
+    }
+
     /**
      * Adds the limits of R3 to its result: how each fault is produced, per host for the call cut, and how many runs
      * had it as specified (the stop injected while the asker held {@code pm_wait}; the held call cut by the host), and
@@ -2529,6 +2842,12 @@ final class QuestionResults {
                 + "the held call) or the stub log (a newer pm_wait superseding it, a failed reply, a disconnect) shows "
                 + "it; a host with no cut did not cut a held call in these runs. Cut: "
                 + (perHost.isEmpty() ? "no run" : String.join(", ", perHost)) + ".");
+        if (!cuts.isEmpty()) {
+            limit(result, CUT_SURVIVED_LIMIT + ". Each CALL_CUT group reports " + CUT_BY_HOST + ", " + CUT_SURVIVED
+                    + " (the same generation called pm_wait again after the cut, got the answer once and acknowledged "
+                    + "it) and " + RE_WAIT_AFTER_CUT_MS + " (median and max, from the cut to that pm_wait); additional "
+                    + "figures, the verdict logic is unchanged.");
+        }
         var losses = runs.stream().filter(run -> run.has("loss_by")).toList();
         limit(result, "In " + losses.stream().filter(run -> "stub".equals(run.path("loss_first_by").asText()))
                 .count() + " of " + losses.size() + " runs with a detected loss the stub had already released the "

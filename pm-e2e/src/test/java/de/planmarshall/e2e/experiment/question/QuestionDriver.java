@@ -485,8 +485,8 @@ final class QuestionDriver implements AutoCloseable {
 
     /**
      * A worker generation whose harness answered with a quota or limit error ({@link QuestionResults#QUOTA_PATTERN}
-     * in its own output or {@code stderr}): Antigravity said {@code Individual quota reached} in the last three
-     * Antigravity runs of the Q3 smoke pass.
+     * in its own error output, {@link QuestionResults#quotaDetail(String, List)}): Antigravity said
+     * {@code Individual quota reached} in the last three Antigravity runs of the Q3 smoke pass.
      *
      * @param worker     the worker id
      * @param generation its generation
@@ -1526,10 +1526,14 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
-     * Whether a worker generation's harness answered with a quota or limit error: a line of its own {@code stderr}
-     * (not one of {@code pm-exec}'s) or of its output matches {@link QuestionResults#QUOTA_PATTERN}, whether or not it
-     * still runs and whether or not it called the stub. The first detection is logged as the event
-     * {@code quota_error}.
+     * Whether a worker generation's harness answered with a quota or limit error, by the rule the evaluation reads
+     * ({@value QuestionResults#HARNESS_ERROR_OUTPUT}, {@link QuestionResults#quotaDetail(String, List)}): a line of its
+     * own {@code stderr} (not one of {@code pm-exec}'s) or the error text of an error line of the harness in its
+     * structured output matches {@link QuestionResults#QUOTA_PATTERN}, whether or not it still runs and whether or not
+     * it called the stub. A tool's input or result, the assistant's text or a file the worker read never ends the run:
+     * before 2026-10-23 every output line was matched, and two R4 large-work runs were ended because the worker read a
+     * repository file that contains the word. The first detection is logged as the event {@code quota_error} with the
+     * rule.
      *
      * @param worker a worker
      * @return its quota error, empty when none
@@ -1549,6 +1553,7 @@ final class QuestionDriver implements AutoCloseable {
         if (quotaErrors.putIfAbsent(key, quota) == null) {
             var fields = identity(worker);
             fields.put("detail", quota.detail());
+            fields.put(QuestionResults.QUOTA_RULE, QuestionResults.HARNESS_ERROR_OUTPUT);
             stub.event(QuestionResults.QUOTA_ERROR, fields);
         }
         return Optional.of(quotaErrors.get(key));

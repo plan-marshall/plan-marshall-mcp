@@ -1642,19 +1642,41 @@ class QuestionStubTest {
         }
 
         @Test
-        @DisplayName("a quota error is a harness line of stderr, else an output line, never pm-exec's own")
+        @DisplayName("a quota error is a harness line of stderr, else an error line of the harness, never pm-exec's own")
         void shouldFindQuotaDetail() {
-            var output = List.<JsonNode>of(stamped("{\"type\":\"step_start\"}"),
-                    stamped("{\"status\":\"ERROR\",\"error\":\"Individual Quota reached.\"}"));
+            var output = List.<JsonNode>of(stamped("{\"type\":\"step_start\"}"), stamped(QuotaShapes.AGY_QUOTA));
 
             assertAll("the details",
                     () -> assertEquals(Optional.of(QUOTA_LINE), QuestionResults.quotaDetail(PM_EXEC_LAUNCHED + "\n"
                             + QUOTA_LINE + "\n", List.of())),
-                    () -> assertEquals(Optional.of("{\"status\":\"ERROR\",\"error\":\"Individual Quota reached.\"}"),
+                    () -> assertEquals(Optional.of(QuotaShapes.AGY_QUOTA),
                             QuestionResults.quotaDetail("harness line\n", output)),
                     () -> assertEquals(Optional.empty(), QuestionResults.quotaDetail(
                             "{\"pm_exec\":\"error\",\"message\":\"quota\"}\n", List.of())),
                     () -> assertEquals(Optional.empty(), QuestionResults.quotaDetail("", List.of())));
+        }
+
+        @Test
+        @DisplayName("a tool result that quotes a file with the word quota does not end the run as a quota error")
+        void shouldNotEndRunOnQuotaInToolResult() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_LAUNCHED + "' >&2\n"
+                    + "printf '%s\\n' '" + QuotaShapes.CLAUDE_TOOL_RESULT + "'\nexec sleep 30");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                var deadline = System.currentTimeMillis() + 10_000;
+                while ((!Files.exists(worker.output()) || Files.readString(worker.output()).isEmpty())
+                        && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(50);
+                }
+
+                var quota = driver.quotaError();
+
+                assertAll("no quota error",
+                        () -> assertTrue(Files.readString(worker.output()).contains("quota"), "no output line"),
+                        () -> assertEquals(Optional.empty(), quota),
+                        () -> assertTrue(worker.process().isAlive()));
+            }
         }
 
         @Test
@@ -1691,6 +1713,113 @@ class QuestionStubTest {
         private static Worker launch(QuestionDriver driver, int generation) throws IOException {
             return driver.startFresh(task(Form.FALLBACK), new Launch(WORKER, generation, ROLE, "Do it.", false, null,
                     List.of(), null));
+        }
+    }
+
+    /**
+     * The quota error read only in the harness's own error output. The lines are the stored shapes of the worker
+     * outputs under {@code pm-e2e/target/question-loop/runs/}, shortened to the fields the detector reads; where a text
+     * was changed to name a quota, the comment says so and the shape is the stored one. The lines that must not count
+     * carry neutral texts written for the test.
+     */
+    @Nested
+    @DisplayName("quota shapes")
+    class QuotaShapes {
+
+        /** Antigravity's final object of a Q3 quota run (Q3-agy-warm-question_apply-answer_he-106-001-0910e1ab). */
+        static final String AGY_QUOTA = """
+                {"conversation_id":"e858dc7e-33b4-4ade-91bb-e5afa7e220fd","status":"ERROR","response":"",\
+                "error":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in \
+                42h26m57s.","duration_seconds":31.781958,"num_turns":1,"usage":{"input_tokens":33515,\
+                "output_tokens":2903,"thinking_tokens":2073,"cache_read_tokens":77704,"total_tokens":36418}}""";
+
+        /** Claude Code's error result (R2-claude-fresh-probe-resumability-000-b59f4c86); its error text changed. */
+        static final String CLAUDE_ERROR_RESULT = """
+                {"type":"result","subtype":"error_during_execution","duration_ms":0,"duration_api_ms":0,\
+                "is_error":true,"num_turns":0,"stop_reason":null,"session_id":"9ab9d9b2-de0b-4b58-afa5-a71021c0f884",\
+                "total_cost_usd":0,"errors":["API Error: usage quota exceeded"]}""";
+
+        /** OpenCode's error line (Q4-opencode-warm-question_apply-answer_he-106-002-d46425ce); its message changed. */
+        static final String OPENCODE_ERROR = """
+                {"type":"error","timestamp":1792687085909,"sessionID":"ses_e9b873662ffe93ekz9w1kefnGi",\
+                "error":{"type":"provider.transport","message":"Quota exceeded for the provider","status":429}}""";
+
+        /** Claude Code's tool result of a file read, in its stored shape; the file's text written for the test. */
+        static final String CLAUDE_TOOL_RESULT = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{"
+                + "\"tool_use_id\":\"toolu_018TtFrHUdLgNM2y32oukwtp\",\"type\":\"tool_result\",\"content\":[{"
+                + "\"type\":\"text\",\"text\":\"12  the module quota of the parser\"}]}]},\"parent_tool_use_id\":null}";
+
+        /** Claude Code's tool call whose input names the word, in its stored shape. */
+        static final String CLAUDE_TOOL_USE = """
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use",\
+                "id":"toolu_01Nnzxoo85Dbd9czYfbfLjXP","name":"Grep","input":{"pattern":"quota"}}]}}""";
+
+        /** Claude Code's assistant text, in its stored shape. */
+        static final String CLAUDE_TEXT = """
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"text",\
+                "text":"The quota check stays as it is."}]}}""";
+
+        /** Claude Code's successful result whose text names the word, in its stored shape. */
+        static final String CLAUDE_SUCCESS_RESULT = """
+                {"type":"result","subtype":"success","is_error":false,"num_turns":4,\
+                "result":"Submitted; the quota check stays."}""";
+
+        /** OpenCode's tool call whose output names the word, in its stored shape. */
+        static final String OPENCODE_TOOL_OUTPUT = """
+                {"type":"tool_use","timestamp":1792668201283,"sessionID":"ses_e9ca65464ffeAiLUq45JbhQYpJ",\
+                "part":{"type":"tool","tool":"read","state":{"status":"completed","input":{"path":"limits.md"},\
+                "output":"1: quota per module"}}}""";
+
+        /** Antigravity's successful final object whose response names the word, in its stored shape. */
+        static final String AGY_RESPONSE = """
+                {"conversation_id":"444e4726-420e-48d4-838c-36539b370773","status":"SUCCESS",\
+                "response":"The quota check stays.","num_turns":1,"usage":{"total_tokens":10}}""";
+
+        @Test
+        @DisplayName("the error lines of Claude Code, OpenCode and Antigravity carry a quota error")
+        void shouldReadHarnessErrorLines() {
+            assertAll("the error lines",
+                    () -> assertEquals(Optional.of("API Error: usage quota exceeded"),
+                            QuestionResults.harnessErrorText(CLAUDE_ERROR_RESULT)),
+                    () -> assertTrue(QuestionResults.harnessErrorText(OPENCODE_ERROR).orElseThrow()
+                            .contains("Quota exceeded for the provider")),
+                    () -> assertTrue(QuestionResults.harnessErrorText(AGY_QUOTA).orElseThrow()
+                            .startsWith("Individual quota reached.")),
+                    () -> assertEquals(Optional.of(CLAUDE_ERROR_RESULT),
+                            QuestionResults.quotaDetail("", List.of(stamped(CLAUDE_ERROR_RESULT)))),
+                    () -> assertEquals(Optional.of(OPENCODE_ERROR),
+                            QuestionResults.quotaDetail("", List.of(stamped(OPENCODE_ERROR)))),
+                    () -> assertEquals(Optional.of(AGY_QUOTA),
+                            QuestionResults.quotaDetail("", List.of(stamped(AGY_QUOTA)))));
+        }
+
+        @Test
+        @DisplayName("a tool's input or result, assistant text, a successful result and a response never count")
+        void shouldIgnoreWorkerContent() {
+            var lines = List.of(CLAUDE_TOOL_RESULT, CLAUDE_TOOL_USE, CLAUDE_TEXT, CLAUDE_SUCCESS_RESULT,
+                    OPENCODE_TOOL_OUTPUT, AGY_RESPONSE, "plain quota text");
+            var outputs = lines.stream().map(QuotaShapes::stamped).toList();
+
+            assertAll("the worker's content",
+                    () -> assertEquals(Optional.empty(), QuestionResults.quotaDetail("harness line\n", outputs)),
+                    () -> assertTrue(lines.stream().allMatch(line -> line.contains("quota"))),
+                    () -> assertTrue(lines.stream().allMatch(line -> QuestionResults.harnessErrorText(line)
+                            .isEmpty())));
+        }
+
+        @Test
+        @DisplayName("an error line without the word is no quota error")
+        void shouldNotCountOtherErrors() throws Exception {
+            var transport = OPENCODE_ERROR.replace("Quota exceeded for the provider", "Connection lost");
+
+            assertEquals(Optional.empty(), QuestionResults.quotaDetail("", List.of(stamped(transport))));
+        }
+
+        private static JsonNode stamped(String line) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", 1L);
+            node.put("line", line);
+            return node;
         }
     }
 
@@ -1826,6 +1955,52 @@ class QuestionStubTest {
                     () -> assertEquals(second, QuestionFixtures.git(clone, "rev-parse", "HEAD").strip()),
                     () -> assertEquals("", QuestionFixtures.git(clone, "status", "--porcelain")),
                     () -> assertEquals("two", Files.readString(clone.resolve("file.txt"))));
+        }
+
+        @Test
+        @DisplayName("a start commit the local clone cannot give is a setup failure with the first line of git's "
+                + "output, before any worker launches")
+        void shouldFailSetupWithoutStartCommit() throws Exception {
+            var clone = Files.createDirectories(directory.resolve("clones").resolve(REPOSITORY));
+            QuestionFixtures.git(null, "init", "--quiet", clone.toString());
+            commit(clone, "one");
+            QuestionFixtures.git(clone, "checkout", "--quiet", "-b", "gone");
+            var unreachable = commit(clone, "two");
+            QuestionFixtures.git(clone, "checkout", "--quiet", "-");
+            QuestionFixtures.git(clone, "branch", "--quiet", "-D", "gone");
+            var fixture = new QuestionFixtures.Fixture("q-demo", "large", "", "", null, false,
+                    new QuestionFixtures.Checkout(clone, unreachable));
+            var worker = directory.resolve("worker");
+
+            var failure = assertThrows(QuestionFixtures.SetupFailure.class,
+                    () -> QuestionFixtures.prepare(fixture, worker));
+
+            var record = QuestionStub.JSON.createObjectNode();
+            QuestionLoopExperiment.recordSetupFailure(record, failure);
+            assertAll("the setup failure",
+                    () -> assertTrue(failure.reason().startsWith("fatal: "), failure.reason()),
+                    () -> assertEquals(1, failure.reason().lines().count(), failure.reason()),
+                    () -> assertTrue(failure.getMessage().contains("checkout --quiet --detach " + unreachable),
+                            failure.getMessage()),
+                    () -> assertFalse(Files.exists(worker.resolve(QuestionFixtures.CANARY_FILE))),
+                    () -> assertTrue(record.path(QuestionResults.SETUP_FAILED).asBoolean()),
+                    () -> assertEquals(failure.reason(), record.path(QuestionResults.SETUP_FAILED_REASON).asText()),
+                    () -> assertTrue(QuestionResults.setupFailed(record)),
+                    () -> assertEquals(failure.reason(), QuestionResults.setupFailedReason(record)));
+        }
+
+        @Test
+        @DisplayName("a missing local clone is a setup failure that names it")
+        void shouldFailSetupWithoutClone() {
+            var clone = directory.resolve("clones").resolve("absent");
+            var fixture = new QuestionFixtures.Fixture("q-demo", "large", "", "", null, false,
+                    new QuestionFixtures.Checkout(clone, COMMIT));
+            var worker = directory.resolve("worker");
+
+            var failure = assertThrows(QuestionFixtures.SetupFailure.class,
+                    () -> QuestionFixtures.prepare(fixture, worker));
+
+            assertEquals("no local clone at " + clone, failure.reason());
         }
 
         private DirectorySource branch() throws IOException {
@@ -2532,6 +2707,171 @@ class QuestionStubTest {
             assertAll("the limit",
                     () -> assertEquals(1, result.path("limits").size()),
                     () -> assertTrue(limit.endsWith(": claude 1 (twice)."), limit));
+        }
+
+        @Test
+        @DisplayName("a record that says quota_error under the earlier rule is read again: a quota word in a tool "
+                + "result is no quota error, and the limits name the run")
+        void shouldReclassifyEarlierQuotaRecord() throws Exception {
+            var earlier = (ObjectNode) q3Run("earlier", "warm", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(2_000, "wait_started"),
+                    event(3_000, "worktree_digest").put("digest", "d1"));
+            earlier.put(QuestionResults.QUOTA_ERROR, true);
+            writeOutput(earlier, QuotaShapes.CLAUDE_TOOL_RESULT);
+            var current = (ObjectNode) q3Run("current", "warm", false, "", event(1_000, "asked"),
+                    event(1_100, "worktree_digest").put("digest", "d1"), event(2_000, "wait_started"),
+                    event(3_000, "worktree_digest").put("digest", "d1"));
+            current.put(QuestionResults.QUOTA_ERROR, true);
+            current.put(QuestionResults.QUOTA_RULE, QuestionResults.HARNESS_ERROR_OUTPUT);
+
+            var result = QuestionResults.result("Q3", List.of(earlier, current), List.of(invocation("i1", "Q3", 3, 3,
+                    2)), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals(1, group.path(QuestionResults.QUOTA_ERROR).asInt()),
+                    () -> assertEquals(1, group.path("runs_without_quota_error").asInt()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.startsWith("Runs whose harness answered "
+                            + "with a quota") && limit.endsWith(": current.")), limits.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains("detected by the earlier rule")
+                            && limit.endsWith(": earlier.")), limits.toString()));
+        }
+
+        @Test
+        @DisplayName("a run whose setup failed counts as setup_failed only, not as no_ask or timed_out, with its "
+                + "reason, also from a record written before the field")
+        void shouldCountSetupFailureApart() throws Exception {
+            var current = setupRecord("q-demo-a", "current");
+            QuestionLoopExperiment.recordSetupFailure(current, new QuestionFixtures.SetupFailure(
+                    "fatal: unable to read tree (0123)", "git -C w checkout --quiet --detach 0123 failed: fatal: "
+                            + "unable to read tree (0123)", null));
+            var earlier = setupRecord("q-demo-a", "earlier");
+            earlier.put("error", "git -C /tmp/w checkout --quiet --detach 0123 failed: fatal: unable to read tree "
+                    + "(0123)\nsecond line");
+            var invocation = invocation("i1", "R4", 0, 1, null);
+            invocation.put("planned_runs", 3);
+            invocation.put(QuestionResults.SETUP_STOPPED_RUNS, 1);
+
+            var result = QuestionResults.result("R4", List.of(current, earlier), List.of(invocation), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals(List.of(2, 0, 0, 0, 0, 0, 0), counts(group)),
+                    () -> assertEquals(2, group.path(QuestionResults.SETUP_FAILED).asInt()),
+                    () -> assertEquals("none", group.path("verdict").asText()),
+                    () -> assertTrue(group.path("tokens").isMissingNode(), group.toString()),
+                    () -> assertEquals("fatal: unable to read tree (0123)", QuestionResults.setupFailedReason(earlier)),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains("current (q-demo-a: fatal: "
+                            + "unable to read tree (0123))") && limit.endsWith("not counted as missing: i1 1.")),
+                            limits.toString()),
+                    () -> assertTrue(result.path("invocations").get(0).path("incomplete").isMissingNode(),
+                            result.toString()));
+        }
+
+        @Test
+        @DisplayName("a failed setup stops the invocation's remaining runs of its scenario, and the invocation's "
+                + "record appended again after its runs replaces the first")
+        void shouldStopScenarioAfterSetupFailure() throws Exception {
+            var stops = new QuestionLoopExperiment.SetupStops();
+            var before = stops.stop("q-demo-a");
+            stops.failed("q-demo-a");
+            var after = stops.stop("q-demo-a");
+            var other = stops.stop("q-demo-b");
+            var results = directory.resolve("results");
+            var invocation = invocation("r4-a", "R4", 0, 3, null);
+            QuestionResults.recordInvocation(results, invocation);
+            QuestionResults.recordInvocation(results, stops.applyTo(invocation));
+
+            var read = QuestionResults.invocations(results, "R4");
+
+            assertAll("the stop",
+                    () -> assertFalse(before),
+                    () -> assertTrue(after),
+                    () -> assertFalse(other),
+                    () -> assertEquals(1, read.size()),
+                    () -> assertEquals(1, read.getFirst().path(QuestionResults.SETUP_FAILED).asInt()),
+                    () -> assertEquals(1, read.getFirst().path(QuestionResults.SETUP_STOPPED_RUNS).asInt()),
+                    () -> assertEquals("[\"q-demo-a\"]", read.getFirst().path("setup_failed_fixtures").toString()),
+                    () -> assertTrue(read.getFirst().path("setup_stop_message").asText().contains("not started")),
+                    () -> assertFalse(invocation.has(QuestionResults.SETUP_FAILED), "the record itself was changed"));
+        }
+
+        @Test
+        @DisplayName("R3 reports a call cut the worker survived by waiting again beside the unchanged verdict")
+        void shouldReportSurvivedCallCut() throws Exception {
+            var survived = cutRun("survived", true);
+            var lost = cutRun("lost", false);
+
+            var result = QuestionResults.result("R3", List.of(survived, lost), List.of(invocation("i1", "R3", 3, 3,
+                    2)), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the survived cut",
+                    () -> assertEquals(2, group.path(QuestionResults.CUT_BY_HOST).asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.CUT_SURVIVED).asInt()),
+                    () -> assertEquals(1_967, group.path(QuestionResults.RE_WAIT_AFTER_CUT_MS + "_median").asLong()),
+                    () -> assertEquals(1_967, group.path(QuestionResults.RE_WAIT_AFTER_CUT_MS + "_max").asLong()),
+                    () -> assertEquals(1, group.path("detected_within_deadline").asInt()),
+                    () -> assertEquals("fail", group.path("verdict").asText()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.startsWith("a call cut that the worker "
+                            + "survives by waiting again is not a loss; the criterion counts it as undetected; "
+                            + "reported as cut_survived")), limits.toString()));
+        }
+
+        /**
+         * A CALL_CUT run of R3 on Claude Code: the asker holds pm_wait from 3 s, the host cuts it at 63.033 s; when it
+         * survives, the same generation calls pm_wait again at 65 s, gets the answer at 90 s and acknowledges it;
+         * otherwise it calls nothing more and the answer it never acknowledges is detected as lost.
+         */
+        private JsonNode cutRun(String id, boolean survives) throws IOException {
+            var events = new ArrayList<ObjectNode>(List.of(event(1_000, "asked"),
+                    event(2_999, QuestionDriver.CALL).put("tool", "pm_wait"), event(3_000, "wait_started"),
+                    event(63_033, QuestionDriver.FAULT_INJECTED).put("fault", "CALL_CUT").put("cut_by", "host")
+                            .put("evidence", "cancelled").put("cut_at", 63_033)));
+            if (survives) {
+                events.addAll(List.of(event(65_000, QuestionDriver.CALL).put("tool", "pm_wait"),
+                        event(65_001, "wait_started"), event(90_000, "answer_delivered").put("task", TASK),
+                        event(96_000, "acknowledged").put("kind", "answer").put("task", TASK),
+                        event(110_000, "submitted").put("task", TASK)));
+            } else {
+                events.addAll(List.of(event(90_000, "answer_delivered").put("task", TASK),
+                        event(105_000, QuestionDriver.LOST_DETECTED).put("by", "answer_ack_missing")
+                                .put("after_ms", 15_000)));
+            }
+            var run = (ObjectNode) q3Run(id, "fresh", false, "", events.toArray(ObjectNode[]::new));
+            run.put("item", "R3");
+            run.put("continuation", "hold");
+            run.put("fault", "CALL_CUT");
+            run.put(QuestionResults.CALL_CUT_FIELD, true);
+            return run;
+        }
+
+        private ObjectNode setupRecord(String fixture, String id) {
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put(QuestionResults.INVOCATION, "i1");
+            run.put("item", "R4");
+            run.put("host", "claude");
+            run.put("model", "m");
+            run.put("form", "fresh");
+            run.put("continuation", "hold");
+            run.put("fixture", fixture);
+            run.put("size", "large");
+            run.put("stub_dir", directory.resolve(id).resolve("stub").toString());
+            return run;
+        }
+
+        private static void writeOutput(JsonNode run, String line) throws IOException {
+            var stamped = QuestionStub.JSON.createObjectNode();
+            stamped.put("at", 1L);
+            stamped.put("line", line);
+            Files.writeString(Path.of(run.path("workers").get(0).path("output").asText()),
+                    QuestionStub.JSON.writeValueAsString(stamped) + "\n");
         }
 
         private static ObjectNode event(long at, String name) {
