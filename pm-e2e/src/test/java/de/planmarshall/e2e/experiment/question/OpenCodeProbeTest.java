@@ -15,16 +15,26 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.stream.Stream;
 
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.OpenCodeDataHome;
+import de.planmarshall.e2e.experiment.question.QuestionFixtures.Reply;
+import de.planmarshall.e2e.experiment.question.QuestionStub.Form;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -37,12 +47,32 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * {@code opencode.json} and data home; {@code stub-run} starts {@code opencode run} against the stub
  * ({@code pm.experiment.opencode.probe.model}, {@code .window}, {@code .phases} of
  * {@code new,resume,missing,unreadable}, {@code .flags}: further flags after {@code run}, comma-separated).
+ * <p>
+ * {@code asker} launches OpenCode through {@code pm-exec} as the asker of a forced apply-answer fixture, as Q1 does
+ * ({@link QuestionFixtures#applyAnswer(Path)}, an entity task in the continuation form hold, the launch of the
+ * measurement {@link QuestionLoopExperiment#workerLaunch}), on the operator's global data home, serially per model and
+ * run; the operator answers the recommended option with the fixture's reply, and a worker still running at the run
+ * limit is ended. Properties: {@code pm.experiment.opencode.probe.models} (comma-separated, required),
+ * {@code .runs} (1 to {@value #MAX_ASKER_RUNS} per model, default {@value #MAX_ASKER_RUNS}), {@code .limit} (the run
+ * limit, default {@code PT6M}), {@code .first-run} (the index of the first run, for the labels, default 1),
+ * {@code .fixture} (the index of the apply-answer fixture, default 0) and
+ * {@code pm.experiment.corpus-cache}. One row per run (the stub tools called, asks, submissions, exit, seconds, the
+ * first {@code stderr} line that is not {@code pm-exec}'s own, the tools OpenCode called them through, and the cost the
+ * output's steps report) is appended to {@code asker-probe.txt} of the output directory. It never writes
+ * {@code runs.jsonl}.
  */
 @DisplayName("OpenCode probe: one step with -Dpm.experiment.opencode.probe=<step>")
 @EnabledIfSystemProperty(named = "pm.experiment.opencode.probe", matches = ".+")
 class OpenCodeProbeTest {
 
+    /** The most asker runs per model. */
+    static final int MAX_ASKER_RUNS = 3;
+
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final List<String> STUB_TOOLS = List.of("pm_state", "pm_wait", "pm_do");
+    private static final String ASKER = "w1";
+    private static final String ROLE = "implement";
+    private static final String TASK_ID = "T-1";
     private static String opencodeExecutable;
 
     @Test
@@ -56,6 +86,7 @@ class OpenCodeProbeTest {
             switch (step.strip()) {
                 case "config" -> config(out, report);
                 case "stub-run" -> stubRun(out, report);
+                case "asker" -> asker(out, report);
                 default -> throw new IllegalArgumentException(step);
             }
             var file = out.resolve(step.strip() + "-" + System.currentTimeMillis() + ".txt");
@@ -156,6 +187,119 @@ class OpenCodeProbeTest {
             report.append("== stub events\n").append(Files.readString(stub.events())).append('\n');
             report.append("== files below the worker data home\n").append(names(workDir.resolve("data")));
         }
+    }
+
+    /** The forced apply-answer fixture run as Q1 does, per model and run; one row per run. */
+    private static void asker(Path out, StringBuilder report) throws IOException, InterruptedException {
+        var models = List.of(System.getProperty("pm.experiment.opencode.probe.models").split(",")).stream()
+                .map(String::strip).filter(model -> !model.isEmpty()).toList();
+        var runs = Integer.getInteger("pm.experiment.opencode.probe.runs", MAX_ASKER_RUNS);
+        if (runs < 1 || runs > MAX_ASKER_RUNS) {
+            throw new IllegalArgumentException("pm.experiment.opencode.probe.runs must be 1 to " + MAX_ASKER_RUNS);
+        }
+        var limit = Duration.parse(System.getProperty("pm.experiment.opencode.probe.limit", "PT6M"));
+        var cache = Path.of(System.getProperty("pm.experiment.corpus-cache",
+                Path.of("").toAbsolutePath().getParent().resolve("pm-mcp-server/target/corpus-cache").toString()));
+        var fixture = QuestionFixtures.applyAnswer(cache)
+                .get(Integer.getInteger("pm.experiment.opencode.probe.fixture", 0));
+        var exec = QuestionDriver.resolveExec();
+        var rows = out.resolve("asker-probe.txt");
+        report.append("fixture=").append(fixture.id()).append(" limit=").append(limit).append('\n');
+        var firstRun = Integer.getInteger("pm.experiment.opencode.probe.first-run", 1);
+        for (var model : models) {
+            for (var index = firstRun; index < firstRun + runs; index++) {
+                var row = askerRun(fixture, model, index, limit, out.resolve("asker-" + System.currentTimeMillis()),
+                        exec);
+                report.append(row).append('\n');
+                Files.writeString(rows, row + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE,
+                        StandardOpenOption.APPEND);
+            }
+        }
+    }
+
+    private static String askerRun(QuestionFixtures.Fixture fixture, String model, int index, Duration limit,
+            Path base, List<String> exec) throws IOException, InterruptedException {
+        var bytes = new byte[4];
+        RANDOM.nextBytes(bytes);
+        var suffix = HexFormat.of().formatHex(bytes);
+        var stubSettings = QuestionStub.Settings.of(base.resolve("stub"), Path.of("/tmp", "pmq-ap-" + suffix
+                + ".sock")).withWindow(Host.OPENCODE.boundedWait());
+        var settings = new QuestionDriver.Settings(Host.OPENCODE, model, base.resolve("workers"), base.resolve("run"),
+                exec, OpenCodeDataHome.GLOBAL);
+        try (var driver = QuestionDriver.start(stubSettings, settings)) {
+            QuestionFixtures.prepare(fixture, settings.workspace().resolve(ASKER));
+            var started = System.currentTimeMillis();
+            var worker = driver.startFresh(QuestionFixtures.entityTask(fixture, TASK_ID, ROLE, Form.HOLD),
+                    QuestionLoopExperiment.workerLaunch(ASKER, 1, ROLE, Host.OPENCODE, false, null));
+            var deadline = started + limit.toMillis();
+            var ended = false;
+            while (worker.process().isAlive() && System.currentTimeMillis() < deadline
+                    && driver.launchFailure().isEmpty()) {
+                driver.answerNext(Duration.ofSeconds(1), Duration.ZERO,
+                        decision -> QuestionFixtures.answer(fixture, decision, Reply.OPTION));
+                if (!ended && driver.stub().state(TASK_ID).filter(state -> state.endsWith(".completed")
+                        || "task.lost".equals(state) || "task.infeasible".equals(state)).isPresent()) {
+                    driver.stub().end(ASKER, 1);
+                    ended = true;
+                }
+            }
+            var exit = worker.process().isAlive() ? "none (ended at " + limit + ")"
+                    : Integer.toString(worker.process().exitValue());
+            if (worker.process().isAlive()) {
+                driver.terminate(worker);
+            }
+            var seconds = (System.currentTimeMillis() - started) / 1000;
+            return askerRow(model, index, driver, worker, exit, seconds, base);
+        }
+    }
+
+    private static String askerRow(String model, int index, QuestionDriver driver, QuestionDriver.Worker worker,
+            String exit, long seconds, Path base) throws IOException {
+        var tools = new TreeSet<String>();
+        var asks = 0;
+        var submissions = 0;
+        var refusals = 0;
+        for (var event : QuestionResults.readJsonLines(driver.stub().events())) {
+            switch (event.path("event").asText()) {
+                case QuestionDriver.CALL -> tools.add(event.path("tool").asText());
+                case QuestionDriver.ASKED -> asks++;
+                case "submitted" -> submissions++;
+                case "ask_refused", "link_refused", "submit_refused" -> refusals++;
+                default -> {
+                    // not a figure of the probe
+                }
+            }
+        }
+        var hostTools = new TreeMap<String, Integer>();
+        var cost = 0.0;
+        for (var stamped : QuestionResults.readJsonLines(worker.output())) {
+            JsonNode line;
+            try {
+                line = QuestionStub.JSON.readTree(stamped.path("line").asText());
+            } catch (JsonProcessingException _) {
+                continue;
+            }
+            var part = line.path("part");
+            if ("step_finish".equals(line.path("type").asText())) {
+                cost += part.path("cost").asDouble(0);
+            } else if ("tool_use".equals(line.path("type").asText())) {
+                var tool = part.path("tool").asText();
+                var code = part.path("state").path("input").path("code").asText("");
+                var key = "execute".equals(tool) && STUB_TOOLS.stream().anyMatch(code::contains) ? "execute(pm)" : tool;
+                hostTools.merge(key, 1, Integer::sum);
+            }
+        }
+        var direct = hostTools.keySet().stream().anyMatch(tool -> STUB_TOOLS.stream().anyMatch(tool::endsWith));
+        var viaExecute = hostTools.containsKey("execute(pm)");
+        var route = direct && viaExecute ? "both" : direct ? "direct MCP tool" : viaExecute ? "execute" : "none";
+        var stderr = driver.stderr(worker).lines().filter(text -> !text.isBlank() && !QuestionDriver.pmExecLine(text))
+                .findFirst().orElse("");
+        return String.join(" | ", model, "run " + index, "pm_state " + tools.contains("pm_state"),
+                "pm_wait " + tools.contains("pm_wait"), "pm_do " + tools.contains("pm_do"), "asks " + asks,
+                "submissions " + submissions, "refused " + refusals, "exit " + exit, seconds + " s",
+                "route " + route, "host tools " + hostTools, "cost " + String.format(Locale.ROOT, "%.5f", cost),
+                "stderr: " + stderr, "final: " + QuestionResults.finalText(QuestionResults.readJsonLines(
+                        worker.output())).replace('\n', ' '), "dir " + base);
     }
 
     private static AgyProbeTest.Result opencode(String flags, String model, String session, String prompt,
