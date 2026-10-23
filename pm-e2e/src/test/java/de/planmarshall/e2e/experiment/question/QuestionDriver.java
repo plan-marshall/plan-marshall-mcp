@@ -227,9 +227,24 @@ final class QuestionDriver implements AutoCloseable {
 
     /** A fault of R3. */
     enum Fault {
-        /** The worker's process stopped ({@code SIGSTOP}) before the answer. */
+        /**
+         * The worker's process stopped ({@code SIGSTOP}) while it holds {@code pm_wait} for the asked task, before the
+         * answer is delivered ({@link QuestionDriver#stopWhileHolding}): the stop is injected only once the stub shows the asking
+         * generation's {@code pm_wait} started after the ask and not ended. Before 2026-10-23 it was injected at the
+         * ask, before the worker called {@code pm_wait}, so the answer was never delivered and nothing was detected
+         * (R3 smoke attempt, runs {@code fcf8e585} and {@code d0ce71f2}, each open about 1353 s and timed out).
+         */
         STOP_BEFORE_ANSWER,
-        /** The held call cut by the host (a host tool timeout below the hold). */
+        /**
+         * The held call cut by the host: the held {@code pm_wait} gets no progress frame and outlasts the host's limit
+         * on a silent call, which is set per host by {@link QuestionDriver#cutSetting(Host)} (a configured tool timeout
+         * on Claude Code and OpenCode, the fixed call limit on Antigravity). The cut is never simulated: it counts only
+         * where the relay's host-side log or the stub log shows it ({@link QuestionDriver#callCut}), and is then logged
+         * as {@value QuestionDriver#FAULT_INJECTED} naming its evidence; a held call the host does not cut is logged as
+         * {@value QuestionDriver#CALL_NOT_CUT}. Before 2026-10-23 the held call lasted 30 s against a tool timeout of 60 s, with a
+         * progress frame every 5 s, so no host cut it (R3 smoke attempt, runs {@code 81b08a29}, {@code 613cbeb1} and
+         * {@code 9cad3e84}).
+         */
         CALL_CUT,
         /** The model request left hanging after the answer (the process stopped once the answer is delivered). */
         MODEL_HANG,
@@ -237,6 +252,92 @@ final class QuestionDriver implements AutoCloseable {
         KILL,
         /** A resumed process that exits before its first call. */
         RESUMED_EXIT
+    }
+
+    /**
+     * The margin by which the operator's hold of a {@link Fault#CALL_CUT} run outlasts the host's cut, and the stub's
+     * window outlasts that hold.
+     */
+    static final Duration CALL_CUT_MARGIN = Duration.ofSeconds(30);
+
+    /** The tool timeout configured for a {@link Fault#CALL_CUT} run on Claude Code and OpenCode. */
+    static final Duration CALL_CUT_TOOL_TIMEOUT = Duration.ofSeconds(60);
+
+    /**
+     * Antigravity's limit on every tool call, progress or not (evaluation, Part A: "Antigravity ends every call after
+     * 180 s, progress has no effect"); it has no tool timeout to configure.
+     */
+    static final Duration ANTIGRAVITY_CALL_LIMIT = Duration.ofSeconds(180);
+
+    /** The event the driver logs when a {@link Fault#CALL_CUT} run's held call was not cut by the host in time. */
+    static final String CALL_NOT_CUT = "call_not_cut";
+
+    /** The event the driver logs when a fault could not be injected as specified ({@link #stopWhileHolding}). */
+    static final String FAULT_NOT_INJECTED = "fault_not_injected";
+
+    /** The event the driver logs when it reads, after a loss, what the stub made of the lost task ({@link #recovery}). */
+    static final String RECOVERY = "recovery";
+
+    /**
+     * How a {@link Fault#CALL_CUT} run makes the host cut its held {@code pm_wait}: the held call gets no progress
+     * frame (Claude Code and OpenCode reset their timeout on progress; the stub otherwise sends a frame every 5 s), and
+     * the operator answers {@link #CALL_CUT_MARGIN} after the host's cut, so the cut comes while the call is held.
+     *
+     * @param toolTimeout the tool timeout configured at the launch ({@code MCP_TOOL_TIMEOUT} for Claude Code, the MCP
+     *                    server's {@code timeout} in {@code opencode.json} for OpenCode), {@code null} where the host
+     *                    has none to configure (Antigravity)
+     * @param hostCut     when the host is expected to cut a silent held call
+     * @param means       {@value #CONFIGURED_TOOL_TIMEOUT} or {@value #HOST_CALL_LIMIT}
+     */
+    record CutSetting(Duration toolTimeout, Duration hostCut, String means) {
+
+        /** @return the operator's hold: the host's cut plus {@link #CALL_CUT_MARGIN} */
+        Duration hold() {
+            return hostCut.plus(CALL_CUT_MARGIN);
+        }
+
+        /**
+         * @param host the host
+         * @return the stub's bounded wait for the run: the host's own, or the hold plus {@link #CALL_CUT_MARGIN} where
+         *         that is longer, so the stub does not end the held call before the host can cut it
+         */
+        Duration window(Host host) {
+            var needed = hold().plus(CALL_CUT_MARGIN);
+            return needed.compareTo(host.boundedWait()) > 0 ? needed : host.boundedWait();
+        }
+
+        /**
+         * @param window the stub's bounded wait
+         * @return the stub's progress interval for the run: beyond the window, so a held call gets no progress frame
+         */
+        static Duration noProgress(Duration window) {
+            return window.plus(Duration.ofSeconds(1));
+        }
+    }
+
+    /** {@link CutSetting#means()} where a tool timeout is configured below the hold. */
+    static final String CONFIGURED_TOOL_TIMEOUT = "configured_tool_timeout";
+
+    /** {@link CutSetting#means()} where the host's own fixed call limit cuts the held call. */
+    static final String HOST_CALL_LIMIT = "host_call_limit";
+
+    /**
+     * How a host is made to cut a held call ({@link Fault#CALL_CUT}). Claude Code: {@code MCP_TOOL_TIMEOUT} of
+     * {@link #CALL_CUT_TOOL_TIMEOUT}; Part A measured only its default (a silent call ended after 1800 s), so whether the
+     * variable cuts a held call is what the runs show. OpenCode: the MCP server's {@code timeout} of
+     * {@link #CALL_CUT_TOOL_TIMEOUT} in {@code opencode.json}, equal to the 60 s after which Part A saw it end a silent
+     * call. Antigravity: no tool timeout to configure; its fixed limit of {@link #ANTIGRAVITY_CALL_LIMIT} on every call,
+     * which the stub's window is raised above.
+     *
+     * @param host the host
+     * @return its cut setting
+     */
+    static CutSetting cutSetting(Host host) {
+        return switch (host) {
+            case CLAUDE, OPENCODE -> new CutSetting(CALL_CUT_TOOL_TIMEOUT, CALL_CUT_TOOL_TIMEOUT,
+                    CONFIGURED_TOOL_TIMEOUT);
+            case ANTIGRAVITY -> new CutSetting(null, ANTIGRAVITY_CALL_LIMIT, HOST_CALL_LIMIT);
+        };
     }
 
     /**
@@ -696,15 +797,27 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
-     * Injects a fault into a worker; {@link Fault#CALL_CUT} is a launch setting (a host tool timeout) and is only
-     * recorded here.
+     * Injects a fault into a worker; {@link Fault#CALL_CUT} is made by the host ({@link #cutSetting(Host)}) and is
+     * logged by {@link #awaitCallCut} once the logs show it, never here.
      *
      * @param worker the worker
      * @param fault  the fault
      */
     void inject(Worker worker, Fault fault) {
+        inject(worker, fault, Map.of());
+    }
+
+    /**
+     * Injects a fault into a worker and logs it as {@value #FAULT_INJECTED} with further fields.
+     *
+     * @param worker  the worker
+     * @param fault   the fault
+     * @param details the fields beside the worker, its generation and the fault
+     */
+    void inject(Worker worker, Fault fault, Map<String, Object> details) {
         var fields = identity(worker);
         fields.put("fault", fault.name());
+        fields.putAll(details);
         stub.event(FAULT_INJECTED, fields);
         switch (fault) {
             case STOP_BEFORE_ANSWER, MODEL_HANG -> signal(worker, "STOP");
@@ -713,9 +826,348 @@ final class QuestionDriver implements AutoCloseable {
                 worker.process().destroyForcibly();
             }
             case CALL_CUT -> {
-                // set at launch through the tool timeout
+                // made by the host, logged by awaitCallCut
             }
         }
+    }
+
+    /**
+     * Stops ({@code SIGSTOP}) the asking generation while it holds {@code pm_wait} for its asked task, before the
+     * answer is delivered ({@link Fault#STOP_BEFORE_ANSWER}): waits until the stub log shows a {@code pm_wait} of the
+     * generation started at or after the ask and not ended ({@link #heldWait}), then injects the stop with the hold's
+     * start ({@code hold_started_at}), {@code held: true} and the milliseconds since the ask. A generation that does
+     * not hold within the given time, or exits, is not stopped: that is logged as {@value #FAULT_NOT_INJECTED} with
+     * the reason {@code no_hold}.
+     *
+     * @param worker  the asking generation
+     * @param askedAt when it asked (epoch milliseconds, the {@code asked} event)
+     * @param within  how long to wait for its hold
+     * @return the held wait it was stopped in, empty when it was not stopped
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    Optional<QuestionResults.Wait> stopWhileHolding(Worker worker, long askedAt, Duration within)
+            throws IOException, InterruptedException {
+        var held = awaitHold(worker, askedAt, System.currentTimeMillis() + within.toMillis());
+        if (held.isEmpty()) {
+            var fields = identity(worker);
+            fields.put("fault", Fault.STOP_BEFORE_ANSWER.name());
+            fields.put("reason", "no_hold");
+            stub.event(FAULT_NOT_INJECTED, fields);
+            return held;
+        }
+        var details = new LinkedHashMap<String, Object>();
+        details.put("held", true);
+        details.put("hold_started_at", held.get().start());
+        details.put("after_ask_ms", System.currentTimeMillis() - askedAt);
+        inject(worker, Fault.STOP_BEFORE_ANSWER, details);
+        return held;
+    }
+
+    /**
+     * Waits until the stub log shows a generation holding {@code pm_wait} ({@link #heldWait}).
+     *
+     * @param worker      the generation
+     * @param since       the earliest start of the wait (epoch milliseconds)
+     * @param untilMillis the deadline (epoch milliseconds)
+     * @return the held wait, empty at the deadline or once the generation's process exited
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    Optional<QuestionResults.Wait> awaitHold(Worker worker, long since, long untilMillis)
+            throws IOException, InterruptedException {
+        while (true) {
+            var held = heldWait(QuestionResults.readJsonLines(stub.events()), worker.id(), worker.generation(), since);
+            if (held.isPresent() || !worker.process().isAlive() || System.currentTimeMillis() >= untilMillis) {
+                return held.filter(_ -> worker.process().isAlive());
+            }
+            Thread.sleep(POLL);
+        }
+    }
+
+    /**
+     * @param events     the stub log
+     * @param worker     a worker
+     * @param generation its generation
+     * @param since      the earliest start of the wait (epoch milliseconds)
+     * @return the {@code pm_wait} of the generation that started at or after {@code since} and that the log shows
+     *         still held ({@link QuestionResults#waits(List)}), empty when there is none
+     */
+    static Optional<QuestionResults.Wait> heldWait(List<JsonNode> events, String worker, int generation, long since) {
+        return QuestionResults.waits(events).stream().filter(wait -> wait.worker().equals(worker)
+                && wait.generation() == generation && wait.start() >= since && wait.end() == Long.MAX_VALUE)
+                .findFirst();
+    }
+
+    /**
+     * A held call the host cut ({@link Fault#CALL_CUT}), as the logs show it.
+     *
+     * @param worker     the worker
+     * @param generation its generation
+     * @param heldSince  the start of the held {@code pm_wait} (epoch milliseconds, its {@code wait_started})
+     * @param cutAt      when the logs show the cut (epoch milliseconds)
+     * @param evidence   {@value #CUT_CANCELLED} (the host's {@code notifications/cancelled} of the held call in the
+     *                   relay's host-side log), {@value #CUT_SUPERSEDED} (a newer {@code pm_wait} of the generation
+     *                   while the held one was open: the host had given the held call up), {@code reply_failed} or
+     *                   {@code disconnected} (the stub's events)
+     */
+    record CallCut(String worker, int generation, long heldSince, long cutAt, String evidence) {
+
+        /** @return the milliseconds from the start of the held call to its cut */
+        long afterMs() {
+            return cutAt - heldSince;
+        }
+    }
+
+    /** {@link CallCut#evidence()} of the host's {@code notifications/cancelled} of the held call. */
+    static final String CUT_CANCELLED = "cancelled";
+
+    /** {@link CallCut#evidence()} of a newer {@code pm_wait} of the generation that superseded the held one. */
+    static final String CUT_SUPERSEDED = "superseded";
+
+    /**
+     * Waits for the host to cut the held {@code pm_wait} of a generation ({@link Fault#CALL_CUT}, {@link #callCut}),
+     * up to a deadline. A cut is logged as {@value #FAULT_INJECTED} with {@code cut_by: host}, its evidence, the
+     * times, and how the run made the host cut ({@code means}, {@code tool_timeout_ms}, {@code host_cut_ms}); no cut
+     * by the deadline is logged as {@value #CALL_NOT_CUT} with whether and since when the generation held a call.
+     *
+     * @param worker      the generation
+     * @param since       the ask (epoch milliseconds): the held call starts at or after it
+     * @param untilMillis the deadline (epoch milliseconds): the time the operator's answer is due
+     * @param setting     how the run makes the host cut
+     * @return the cut, empty when the logs show none by the deadline
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    Optional<CallCut> awaitCallCut(Worker worker, long since, long untilMillis, CutSetting setting)
+            throws IOException, InterruptedException {
+        while (true) {
+            var events = QuestionResults.readJsonLines(stub.events());
+            var cut = callCut(events, relayLines(worker.relayLog()), worker.id(), worker.generation(), since);
+            if (cut.isPresent() || System.currentTimeMillis() >= untilMillis) {
+                var fields = identity(worker);
+                fields.put("means", setting.means());
+                fields.put("tool_timeout_ms", setting.toolTimeout() == null ? -1 : setting.toolTimeout().toMillis());
+                fields.put("host_cut_ms", setting.hostCut().toMillis());
+                if (cut.isPresent()) {
+                    var value = cut.get();
+                    var details = new LinkedHashMap<String, Object>();
+                    details.put("cut_by", "host");
+                    details.put("evidence", value.evidence());
+                    details.put("held_since", value.heldSince());
+                    details.put("cut_at", value.cutAt());
+                    details.put("after_ms", value.afterMs());
+                    details.putAll(fields);
+                    details.remove(WORKER);
+                    details.remove(GENERATION);
+                    inject(worker, Fault.CALL_CUT, details);
+                } else {
+                    var held = QuestionResults.waits(events).stream().filter(wait -> wait.worker().equals(worker.id())
+                            && wait.generation() == worker.generation() && wait.start() >= since).findFirst();
+                    fields.put("held", held.isPresent());
+                    fields.put("held_since", held.map(QuestionResults.Wait::start).orElse(-1L));
+                    stub.event(CALL_NOT_CUT, fields);
+                }
+                return cut;
+            }
+            Thread.sleep(POLL);
+        }
+    }
+
+    /**
+     * Whether the host cut the held {@code pm_wait} of a generation: the first {@code pm_wait} it started at or after
+     * {@code since} ({@code wait_started}), and the earliest sign that the host gave that call up: its
+     * {@code notifications/cancelled} in the relay's host-side log (for a {@code pm_wait} request the host sent at or
+     * after {@code since}), a newer {@code pm_wait} of the generation that superseded it ({@code wait_again} with the
+     * reason {@code superseded}), a failed reply to it ({@code reply_failed} of {@code pm_wait}), or the generation's
+     * {@code disconnected}, each at or after the start of the held call.
+     *
+     * @param events     the stub log
+     * @param relay      the relay's host-side log of the generation ({@link #relayLines(Path)})
+     * @param worker     the worker
+     * @param generation its generation
+     * @param since      the ask (epoch milliseconds)
+     * @return the cut, empty when the logs show none
+     */
+    static Optional<CallCut> callCut(List<JsonNode> events, List<JsonNode> relay, String worker, int generation,
+            long since) {
+        var held = QuestionResults.waits(events).stream().filter(wait -> wait.worker().equals(worker)
+                && wait.generation() == generation && wait.start() >= since).findFirst();
+        if (held.isEmpty()) {
+            return Optional.empty();
+        }
+        var start = held.get().start();
+        var cutAt = Long.MAX_VALUE;
+        var evidence = "";
+        var waitIds = new HashSet<String>();
+        for (var entry : relay) {
+            var at = entry.path("at").asLong();
+            var message = relayMessage(entry);
+            if (!"from_host".equals(entry.path("dir").asText()) || at < since || message.isEmpty()) {
+                continue;
+            }
+            var method = message.get().path("method").asText();
+            var params = message.get().path("params");
+            if ("tools/call".equals(method) && "pm_wait".equals(params.path("name").asText())) {
+                waitIds.add(message.get().path("id").toString());
+            } else if ("notifications/cancelled".equals(method)
+                    && waitIds.contains(params.path("requestId").toString()) && at >= start && at < cutAt) {
+                cutAt = at;
+                evidence = CUT_CANCELLED;
+            }
+        }
+        for (var event : events) {
+            var at = event.path("at").asLong();
+            if (!matches(event, worker, generation) || at < start || at >= cutAt) {
+                continue;
+            }
+            var name = event.path(EVENT).asText();
+            var sign = switch (name) {
+                case "wait_again" -> CUT_SUPERSEDED.equals(event.path("reason").asText()) ? CUT_SUPERSEDED : "";
+                case "reply_failed" -> "pm_wait".equals(event.path("tool").asText()) ? name : "";
+                case "disconnected" -> name;
+                default -> "";
+            };
+            if (!sign.isEmpty()) {
+                cutAt = at;
+                evidence = sign;
+            }
+        }
+        return evidence.isEmpty() ? Optional.empty()
+                : Optional.of(new CallCut(worker, generation, start, cutAt, evidence));
+    }
+
+    /**
+     * @param relayLog the relay's host-side log of a generation
+     * @return its lines that are JSON ({@code at}, {@code dir}, {@code line}); a line still being written is skipped
+     * @throws IOException if it cannot be read
+     */
+    static List<JsonNode> relayLines(Path relayLog) throws IOException {
+        if (!Files.exists(relayLog)) {
+            return List.of();
+        }
+        var lines = new ArrayList<JsonNode>();
+        for (var line : Files.readAllLines(relayLog, StandardCharsets.UTF_8)) {
+            try {
+                if (!line.isBlank()) {
+                    lines.add(QuestionStub.JSON.readTree(line));
+                }
+            } catch (JsonProcessingException _) {
+                // a line the relay is still writing
+            }
+        }
+        return lines;
+    }
+
+    private static Optional<JsonNode> relayMessage(JsonNode entry) {
+        try {
+            var message = QuestionStub.JSON.readTree(entry.path("line").asText());
+            return message != null && message.isObject() ? Optional.of(message) : Optional.empty();
+        } catch (JsonProcessingException _) {
+            return Optional.empty();
+        }
+    }
+
+    /** What the driver does after a loss, read from the stub ({@link #recovery}). */
+    enum RecoveryStep {
+        /** The lost task waits resumable with its stored session: resume it again. */
+        RESUME,
+        /** The stub continued the decision in a new task that is still queued: start a generation leased on it. */
+        CONTINUE,
+        /** The stub's continuation, or the lost task offered again, is held or closed by a generation: start none. */
+        TAKEN,
+        /** The stub has neither continued the decision nor made the task resumable yet: as before the fix. */
+        WAIT
+    }
+
+    /**
+     * What the stub made of a lost generation's task, read before the driver starts a generation for it.
+     *
+     * @param step   the step
+     * @param task   the task it concerns: the stub's continuation, else the lost task
+     * @param entity the entity of that task, empty when the log does not name it
+     * @param state  that task's state in the stub
+     * @param holder the generation ({@code <worker>#<generation>}) the stub last offered or delivered that task to,
+     *               empty when none
+     */
+    record Recovery(RecoveryStep step, String task, String entity, String state, String holder) {
+    }
+
+    /**
+     * Reads what the stub made of a lost task before the driver starts a generation for it ({@link #recovery(List,
+     * String, String, Function)}), and logs it as {@value #RECOVERY}. The driver starts no generation for a task the
+     * stub already continued or offered again and a generation holds or closed: the R3 smoke attempt's run
+     * {@code cc787dd3} (fault {@link Fault#RESUMED_EXIT}) resumed the session again on the task the stub had already
+     * closed {@code lost} and continued at the resumed process's exit; that generation was refused
+     * {@code job_scope_mismatch} on the closed task, took the continuation over {@code pm_wait}, and left the closed
+     * task offered, so the run timed out.
+     *
+     * @param worker     the lost generation
+     * @param decisionId the decision whose answer the task waited for
+     * @param taskId     the lost task
+     * @return the step
+     * @throws IOException if the event log cannot be read
+     */
+    Recovery recovery(Worker worker, String decisionId, String taskId) throws IOException {
+        var recovery = recovery(QuestionResults.readJsonLines(stub.events()), decisionId, taskId,
+                worker.id() + "#" + worker.generation(), stub::state);
+        var fields = identity(worker);
+        fields.put(DECISION, decisionId);
+        fields.put("step", recovery.step().name().toLowerCase(Locale.ROOT));
+        fields.put(TASK, recovery.task());
+        fields.put("state", recovery.state());
+        fields.put("holder", recovery.holder());
+        stub.event(RECOVERY, fields);
+        return recovery;
+    }
+
+    /**
+     * The rule of {@link #recovery(Worker, String, String)} over a stub log and the stub's task states: a decision the
+     * stub continued in a new task ({@code continued}) gives {@link RecoveryStep#CONTINUE} while that task is queued and
+     * {@link RecoveryStep#TAKEN} once it is not; without a continuation a lost task that is resumable gives
+     * {@link RecoveryStep#RESUME}, one the stub offered or delivered again to another generation than the lost one,
+     * and that is not queued, gives {@link RecoveryStep#TAKEN}, any other {@link RecoveryStep#WAIT}.
+     *
+     * @param events     the stub log
+     * @param decisionId the decision whose answer the task waited for
+     * @param taskId     the lost task
+     * @param lost       the lost generation, {@code <worker>#<generation>}
+     * @param state      the stub's state of a task
+     * @return the step
+     */
+    static Recovery recovery(List<JsonNode> events, String decisionId, String taskId, String lost,
+            Function<String, Optional<String>> state) {
+        var continued = first(events, "continued", event -> decisionId.equals(event.path(DECISION).asText()));
+        if (continued.isPresent()) {
+            var task = continued.get().path(TASK).asText();
+            var current = state.apply(task).orElse("");
+            var step = "task.queued".equals(current) ? RecoveryStep.CONTINUE : RecoveryStep.TAKEN;
+            return new Recovery(step, task, continued.get().path("entity").asText(), current, holder(events, task));
+        }
+        var current = state.apply(taskId).orElse("");
+        var holder = holder(events, taskId);
+        RecoveryStep step;
+        if ("task.resumable".equals(current)) {
+            step = RecoveryStep.RESUME;
+        } else if (!current.isEmpty() && !"task.queued".equals(current) && !holder.isEmpty()
+                && !holder.equals(lost)) {
+            step = RecoveryStep.TAKEN;
+        } else {
+            step = RecoveryStep.WAIT;
+        }
+        return new Recovery(step, taskId, "", current, holder);
+    }
+
+    private static String holder(List<JsonNode> events, String taskId) {
+        String holder = "";
+        for (var event : events) {
+            var name = event.path(EVENT).asText();
+            if (taskId.equals(event.path(TASK).asText()) && ("offered".equals(name)
+                    || "answer_delivered".equals(name)) && event.has(WORKER)) {
+                holder = event.path(WORKER).asText() + "#" + event.path(GENERATION).asInt();
+            }
+        }
+        return holder;
     }
 
     /**
@@ -890,7 +1342,13 @@ final class QuestionDriver implements AutoCloseable {
     /**
      * Supervises the acknowledgement of an answer delivered to a worker, as the supervisor does: a missing
      * acknowledgement within the host's deadline (by silence where the acknowledgement is informational) ends the
-     * worker as lost, and the stub releases its task.
+     * worker as lost, and the stub releases its task. The loss is logged as {@code lost_detected} before the stub
+     * releases the task, so a continuation the release makes follows it in the log (before 2026-10-23 the release came
+     * first, and in run {@code d477db38} of the R3 smoke attempt the {@code continued} event preceded
+     * {@code lost_detected} by a millisecond). The event names who saw the loss first ({@code first_by}): the
+     * {@code driver} at the deadline, or the {@code stub}, which had already released the generation's task on its
+     * own, at the process's exit ({@code stub_reason}, {@code stub_event}, {@code stub_after_ms} after the delivery):
+     * the stub log then shows a reaction earlier than the deadline.
      *
      * @param worker         the worker
      * @param deliveryWithin how long to wait for the delivery of the answer
@@ -919,13 +1377,38 @@ final class QuestionDriver implements AutoCloseable {
                 return true;
             }
         }
-        stub.lost(worker.id(), worker.generation(), by);
         var fields = identity(worker);
         fields.put("by", by);
         fields.put("after_ms", System.currentTimeMillis() - deliveredAt);
-        stub.event("lost_detected", fields);
+        var stubFirst = stubLoss(QuestionResults.readJsonLines(stub.events()), worker.id(), worker.generation(),
+                deliveredAt);
+        fields.put("first_by", stubFirst.isPresent() ? "stub" : "driver");
+        stubFirst.ifPresent(event -> {
+            fields.put("stub_event", event.path(EVENT).asText());
+            fields.put("stub_reason", event.path("reason").asText());
+            fields.put("stub_after_ms", event.path("at").asLong() - deliveredAt);
+        });
+        stub.event(LOST_DETECTED, fields);
+        stub.lost(worker.id(), worker.generation(), by);
         terminate(worker);
         return false;
+    }
+
+    /** The event the driver logs when it detects a lost worker ({@link #superviseAnswer}). */
+    static final String LOST_DETECTED = "lost_detected";
+
+    /**
+     * @param events     the stub log
+     * @param worker     a worker
+     * @param generation its generation
+     * @param since      the delivery of its answer (epoch milliseconds)
+     * @return the stub's own release of a task of the generation at or after {@code since} ({@code lost},
+     *         {@code resumable} or {@code released} with a reason, at its process's exit or fence), empty when none
+     */
+    static Optional<JsonNode> stubLoss(List<JsonNode> events, String worker, int generation, long since) {
+        return events.stream().filter(event -> Set.of("lost", "resumable", "released")
+                .contains(event.path(EVENT).asText()) && event.has("reason") && matches(event, worker, generation)
+                && event.path("at").asLong() >= since).findFirst();
     }
 
     /**
@@ -1880,7 +2363,11 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     private static boolean matches(JsonNode event, Worker worker) {
-        return worker.id().equals(event.path(WORKER).asText()) && worker.generation() == event.path(GENERATION).asInt();
+        return matches(event, worker.id(), worker.generation());
+    }
+
+    private static boolean matches(JsonNode event, String worker, int generation) {
+        return worker.equals(event.path(WORKER).asText()) && generation == event.path(GENERATION).asInt();
     }
 
     private static Map<String, Object> identity(Worker worker) {

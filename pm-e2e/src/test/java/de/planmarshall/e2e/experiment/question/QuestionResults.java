@@ -35,6 +35,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.Fault;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
 
 /**
@@ -432,6 +433,7 @@ final class QuestionResults {
             case "Q6" -> limitOfQ6Votes(result, runs);
             case "Q7" -> limitOfQ7(result, runs);
             case "R2" -> limitOfR2Ages(result, runs, contributing.values());
+            case "R3" -> limitsOfR3(result, runs);
             default -> {
                 // no limit of its own
             }
@@ -2375,6 +2377,53 @@ final class QuestionResults {
                 + "the per-worker data home of the package, accepted by the operator. Its runs ran one at a time, "
                 + "because every OpenCode worker writes the one SQLite database of that data home; their sessions "
                 + "stay in the operator's history.");
+    }
+
+    /** The field of an R3 run record of {@link Fault#CALL_CUT}: whether the logs show the host's cut. */
+    static final String CALL_CUT_FIELD = "call_cut";
+
+    /**
+     * Adds the limits of R3 to its result: how each fault is produced, per host for the call cut, and how many runs
+     * had it as specified (the stop injected while the asker held {@code pm_wait}; the held call cut by the host), and
+     * in how many runs with a detected loss the stub had released the task at the worker's exit, before the
+     * acknowledgement deadline ({@code loss_first_by: stub}). Records of runs before 2026-10-23 carry none of these
+     * fields and count as not held, not cut, and not first seen by the stub.
+     *
+     * @param result the result of R3
+     * @param runs   its run records
+     */
+    static void limitsOfR3(ObjectNode result, List<JsonNode> runs) {
+        var stops = runs.stream().filter(run -> Fault.STOP_BEFORE_ANSWER.name().equals(run.path("fault").asText()))
+                .toList();
+        limit(result, "The stop before the answer (STOP_BEFORE_ANSWER) is injected once the stub shows the asker "
+                + "holding pm_wait after its ask, before the answer is sent; an asker that never holds is not stopped "
+                + "(fault_not_injected). Stopped while holding: " + stops.stream()
+                .filter(run -> run.path("fault_held").asBoolean()).count() + " of " + stops.size() + " runs.");
+        var cuts = new TreeMap<String, long[]>();
+        runs.stream().filter(run -> Fault.CALL_CUT.name().equals(run.path("fault").asText()))
+                .forEach(run -> {
+                    var counts = cuts.computeIfAbsent(run.path(HOST).asText(), _ -> new long[2]);
+                    counts[0] += run.path(CALL_CUT_FIELD).asBoolean() ? 1 : 0;
+                    counts[1]++;
+                });
+        var perHost = new ArrayList<String>();
+        cuts.forEach((host, counts) -> perHost.add(host + " " + counts[0] + " of " + counts[1]));
+        limit(result, "The call cut (CALL_CUT) is made by the host and never simulated: the held pm_wait gets no "
+                + "progress frame, and the operator answers " + QuestionDriver.CALL_CUT_MARGIN.toSeconds() + " s after "
+                + "the host's cut. Claude Code: MCP_TOOL_TIMEOUT of " + QuestionDriver.CALL_CUT_TOOL_TIMEOUT.toSeconds()
+                + " s; Part A measured only its default, a silent call ended after 1800 s. OpenCode: the MCP server's "
+                + "timeout of " + QuestionDriver.CALL_CUT_TOOL_TIMEOUT.toSeconds() + " s in opencode.json, the 60 s "
+                + "after which Part A saw it end a silent call. Antigravity: no tool timeout to configure; its "
+                + QuestionDriver.ANTIGRAVITY_CALL_LIMIT.toSeconds() + " s limit on every call, with the stub's bounded "
+                + "wait raised above it. A cut counts only where the relay's host-side log (notifications/cancelled of "
+                + "the held call) or the stub log (a newer pm_wait superseding it, a failed reply, a disconnect) shows "
+                + "it; a host with no cut did not cut a held call in these runs. Cut: "
+                + (perHost.isEmpty() ? "no run" : String.join(", ", perHost)) + ".");
+        var losses = runs.stream().filter(run -> run.has("loss_by")).toList();
+        limit(result, "In " + losses.stream().filter(run -> "stub".equals(run.path("loss_first_by").asText()))
+                .count() + " of " + losses.size() + " runs with a detected loss the stub had already released the "
+                + "task at the worker's exit, before the acknowledgement deadline (lost_detected first_by stub, with "
+                + "stub_reason and stub_after_ms): their stub log shows a reaction earlier than the deadline.");
     }
 
     private static boolean r3(List<RunView> views, ObjectNode group) {

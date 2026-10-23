@@ -42,6 +42,7 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Fault;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Launch;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.OpenCodeDataHome;
+import de.planmarshall.e2e.experiment.question.QuestionDriver.RecoveryStep;
 import de.planmarshall.e2e.experiment.question.QuestionDriver.Worker;
 import de.planmarshall.e2e.experiment.question.QuestionFixtures.Fixture;
 import de.planmarshall.e2e.experiment.question.QuestionFixtures.Reply;
@@ -129,6 +130,17 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * in the other fresh items, where an asker still running is ended once its silence limit has passed, at the latest by
  * the launch of the continuation. A model that does not end its turn after the ask is a finding of the run, not of
  * the server ({@link QuestionResults#limitOfQ7}).
+ * <p>
+ * R3 injects each fault where the criterion places it ({@link Fault}). The stop before the answer comes once the stub
+ * shows the asker holding {@code pm_wait} after its ask ({@link QuestionDriver#stopWhileHolding}); an asker that never
+ * holds is not stopped and its run says so. The call cut is made by the host, never simulated: the held call gets no
+ * progress frame and the operator answers {@link QuestionDriver#CALL_CUT_MARGIN} after the host's cut, which is a
+ * tool timeout of 60 s on Claude Code ({@code MCP_TOOL_TIMEOUT}) and OpenCode (the MCP server's {@code timeout}) and
+ * Antigravity's fixed 180 s call limit, with the stub's window raised above it ({@link QuestionDriver#cutSetting});
+ * the run records whether the logs show the cut ({@link QuestionDriver#awaitCallCut}). After a loss the driver reads
+ * what the stub made of the task before it starts a generation ({@link QuestionDriver#recovery}): none for a task the
+ * stub continued or offered again and a generation holds or closed, one leased on the stub's queued continuation, and
+ * otherwise the step it took before (a resume again of a resumable task, the continuation of a held one).
  * <p>
  * Antigravity runs without further parameters on the launch verified on 2026-10-21 with agy against the stub
  * ({@link QuestionDriver#AGY_ARGV}, {@link QuestionDriver#AGY_CONFIG}); {@code -Dpm.experiment.agy.argv} (a JSON array
@@ -248,6 +260,8 @@ class QuestionLoopExperiment {
     private static final String TASK_ID = "T-1";
     private static final String EVENT = "event";
     private static final String DECISION = "decision";
+    /** The field of a run record that says whether its R3 fault was injected (or, for the call cut, happened). */
+    private static final String FAULT_INJECTED_FIELD = "fault_injected";
     private static final Duration POLL = Duration.ofSeconds(1);
     private static final Duration ANSWER_WAIT = Duration.ofMinutes(15);
     private static final String R2_AGES = "pm.experiment.r2.ages";
@@ -645,7 +659,7 @@ class QuestionLoopExperiment {
                         for (var fault : Fault.values()) {
                             var form = fault == Fault.RESUMED_EXIT ? Form.RESUME : Form.HOLD;
                             plans.add(RunPlan.of(item, index, host, config.model(host), warm, form, fixture, "entity")
-                                    .holding(Duration.ofSeconds(30)).faulting(fault));
+                                    .holding(r3Hold(host, fault)).faulting(fault));
                         }
                     });
             case "R4" -> plans.addAll(r4(config,
@@ -653,6 +667,52 @@ class QuestionLoopExperiment {
             default -> throw new IllegalArgumentException("unknown item " + item + ": Q1 to Q7, R1 to R4");
         }
         return plans;
+    }
+
+    /** The operator's hold of an R3 run, beside {@link Fault#CALL_CUT}. */
+    static final Duration R3_HOLD = Duration.ofSeconds(30);
+
+    /**
+     * @param host  the host
+     * @param fault the R3 fault
+     * @return the operator's hold of the run: {@link #R3_HOLD}, for {@link Fault#CALL_CUT} the host's cut plus
+     *         {@link QuestionDriver#CALL_CUT_MARGIN} ({@link QuestionDriver.CutSetting#hold()}), so the host cuts the
+     *         held call before the answer comes
+     */
+    static Duration r3Hold(Host host, Fault fault) {
+        return fault == Fault.CALL_CUT ? QuestionDriver.cutSetting(host).hold() : R3_HOLD;
+    }
+
+    /**
+     * The stub's settings of a run: the host's bounded wait as the window, the quorums of a vote run, and progress
+     * every 5 s. A {@link Fault#CALL_CUT} run gets the window of its cut setting
+     * ({@link QuestionDriver.CutSetting#window(Host)}) and no progress frame on a held call
+     * ({@link QuestionDriver.CutSetting#noProgress(Duration)}), because Claude Code and OpenCode reset their timeout on
+     * progress (evaluation, Worker Parameters per Host).
+     *
+     * @param plan    the planned run
+     * @param stubDir the stub directory
+     * @param socket  the stub's socket
+     * @return the settings
+     */
+    static QuestionStub.Settings stubSettings(RunPlan plan, Path stubDir, Path socket) {
+        var settings = QuestionStub.Settings.of(stubDir, socket).withWindow(plan.host().boundedWait())
+                .withQuorums("vote".equals(plan.kind()) ? QUORUMS : Map.of());
+        if (plan.fault() != Fault.CALL_CUT) {
+            return settings;
+        }
+        var window = QuestionDriver.cutSetting(plan.host()).window(plan.host());
+        return new QuestionStub.Settings(settings.directory(), settings.socket(), window,
+                QuestionDriver.CutSetting.noProgress(window), settings.questionBound(), settings.quorums());
+    }
+
+    /**
+     * @param plan a planned run
+     * @return the tool timeout its first generation is launched with: the cut setting's of a {@link Fault#CALL_CUT}
+     *         run ({@code null} on Antigravity, which has none), else {@code null}, the host default
+     */
+    static Duration toolTimeout(RunPlan plan) {
+        return plan.fault() == Fault.CALL_CUT ? QuestionDriver.cutSetting(plan.host()).toolTimeout() : null;
     }
 
     /**
@@ -838,8 +898,7 @@ class QuestionLoopExperiment {
                 plan.fixture().id().replace('/', '_'), plan.index(), suffix);
         var base = config.workspace().resolve(id);
         var stubDir = base.resolve("stub");
-        var stubSettings = QuestionStub.Settings.of(stubDir, Path.of("/tmp", "pmq-" + suffix + ".sock"))
-                .withWindow(plan.host().boundedWait()).withQuorums("vote".equals(plan.kind()) ? QUORUMS : Map.of());
+        var stubSettings = stubSettings(plan, stubDir, Path.of("/tmp", "pmq-" + suffix + ".sock"));
         var record = runRecord(plan, stubDir);
         record.put(QuestionResults.INVOCATION, invocation);
         try (var driver = QuestionDriver.start(stubSettings, new QuestionDriver.Settings(plan.host(), plan.model(),
@@ -931,10 +990,14 @@ class QuestionLoopExperiment {
                             driver.worktreeDigest(current);
                         }
                     }
-                    if (plan.fault() == Fault.STOP_BEFORE_ANSWER) {
-                        driver.inject(current, Fault.STOP_BEFORE_ANSWER);
+                    var hold = plan.hold();
+                    if (rounds == 1 && plan.fault() == Fault.STOP_BEFORE_ANSWER) {
+                        stopWhileHolding(current, asked.get());
                     }
-                    if (!answer(asked.get())) {
+                    if (rounds == 1 && plan.fault() == Fault.CALL_CUT) {
+                        hold = awaitCut(current, asked.get());
+                    }
+                    if (!answer(asked.get(), hold)) {
                         break;
                     }
                     current = continueAfter(asked.get(), current);
@@ -970,8 +1033,7 @@ class QuestionLoopExperiment {
         }
 
         private Worker start(TaskSpec spec) throws IOException {
-            var launch = launch("w1", 1, ROLE, plan.host(), plan.fault() == Fault.CALL_CUT
-                    ? Duration.ofSeconds(60) : null);
+            var launch = launch("w1", 1, ROLE, plan.host(), toolTimeout(plan));
             if (plan.warm()) {
                 driver.stub().queue(spec);
                 return driver.startWarm(launch);
@@ -984,12 +1046,64 @@ class QuestionLoopExperiment {
         }
 
         /**
+         * {@link Fault#STOP_BEFORE_ANSWER}: stops the asker once it holds {@code pm_wait} for the asked task, before
+         * the answer ({@link QuestionDriver#stopWhileHolding}), within its silence limit after the ask, and records
+         * whether the stop was injected ({@value #FAULT_INJECTED_FIELD}), when, and the start of the hold it was injected
+         * in; an asker that never held is not stopped ({@code fault_not_injected_reason: no_hold}).
+         */
+        private void stopWhileHolding(Worker asker, JsonNode asked) throws IOException, InterruptedException {
+            var askedAt = asked.path("at").asLong();
+            var held = driver.stopWhileHolding(asker, askedAt, plan.host().silenceLimit());
+            record.put(FAULT_INJECTED_FIELD, held.isPresent());
+            if (held.isPresent()) {
+                record.put(FAULT_INJECTED_FIELD + "_at", System.currentTimeMillis());
+                record.put("fault_held", true);
+                record.put("fault_hold_started_at", held.get().start());
+                record.put("fault_after_ask_ms", System.currentTimeMillis() - askedAt);
+            } else {
+                record.put("fault_held", false);
+                record.put("fault_not_injected_reason", "no_hold");
+            }
+        }
+
+        /**
+         * {@link Fault#CALL_CUT}: waits, up to the time the operator's answer is due (the ask plus the plan's hold),
+         * for the host to cut the asker's held {@code pm_wait} ({@link QuestionDriver#awaitCallCut}), and records how
+         * the run made the host cut ({@code call_cut_means}, {@code call_cut_tool_timeout_ms},
+         * {@code call_cut_host_cut_ms}, {@code call_cut_window_s}, {@code call_cut_progress}) and whether the logs
+         * show the cut ({@code call_cut}, its evidence, time and milliseconds from the start of the held call).
+         *
+         * @return the rest of the operator's hold
+         */
+        private Duration awaitCut(Worker asker, JsonNode asked) throws IOException, InterruptedException {
+            var setting = QuestionDriver.cutSetting(plan.host());
+            var askedAt = asked.path("at").asLong();
+            var due = askedAt + plan.hold().toMillis();
+            record.put("call_cut_means", setting.means());
+            record.put("call_cut_tool_timeout_ms", setting.toolTimeout() == null ? -1
+                    : setting.toolTimeout().toMillis());
+            record.put("call_cut_host_cut_ms", setting.hostCut().toMillis());
+            record.put("call_cut_window_s", setting.window(plan.host()).toSeconds());
+            record.put("call_cut_progress", false);
+            var cut = driver.awaitCallCut(asker, askedAt, due, setting);
+            record.put(QuestionResults.CALL_CUT_FIELD, cut.isPresent());
+            record.put(FAULT_INJECTED_FIELD, cut.isPresent());
+            cut.ifPresent(value -> {
+                record.put(FAULT_INJECTED_FIELD + "_at", value.cutAt());
+                record.put("call_cut_evidence", value.evidence());
+                record.put("call_cut_at", value.cutAt());
+                record.put("call_cut_after_ms", value.afterMs());
+            });
+            return Duration.ofMillis(Math.max(0, due - System.currentTimeMillis()));
+        }
+
+        /**
          * Waits for the answer of the asked decision ({@link QuestionDriver#awaitAnswer}): the operator's, after the
-         * plan's hold, or, in a vote run, its quorum's decision without an operator; an escalated vote reaches the
+         * given hold, or, in a vote run, its quorum's decision without an operator; an escalated vote reaches the
          * operator and is answered as such. The caller then continues the task alike for both.
          */
-        private boolean answer(JsonNode asked) throws InterruptedException, IOException {
-            var hold = plan.hold();
+        private boolean answer(JsonNode asked, Duration operatorHold) throws InterruptedException, IOException {
+            var hold = operatorHold;
             if (plan.restart()) {
                 Thread.sleep(hold.dividedBy(2));
                 driver.restartStub();
@@ -1004,26 +1118,37 @@ class QuestionLoopExperiment {
             var decision = asked.path(DECISION).asText();
             var task = asked.path("task").asText();
             return switch (plan.form()) {
-                case HOLD -> hold(current, decision);
-                case RESUME -> resume(current, task);
+                case HOLD -> hold(current, decision, task);
+                case RESUME -> resume(current, task, decision);
                 case FALLBACK -> fallback(current, decision);
             };
         }
 
-        private Worker hold(Worker current, String decision) throws IOException, InterruptedException {
+        private Worker hold(Worker current, String decision, String task) throws IOException, InterruptedException {
             if (plan.fault() == Fault.MODEL_HANG || plan.fault() == Fault.KILL) {
                 driver.awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText())
                                 && current.id().equals(event.path("worker").asText()),
                         System.currentTimeMillis() + plan.host().silenceLimit().toMillis());
-                driver.inject(current, plan.fault());
+                injected(current, plan.fault());
             }
             if (driver.superviseAnswer(current, plan.host().silenceLimit().plus(Duration.ofMinutes(1)))) {
+                return current;
+            }
+            if (recordLoss(current) && recover(current, decision, task).step() == RecoveryStep.TAKEN) {
                 return current;
             }
             return continuation(decision, current);
         }
 
-        private Worker resume(Worker current, String task) throws IOException, InterruptedException {
+        /**
+         * Resumes the asker's session after the answer; a resumed generation whose answer acknowledgement is missing
+         * is followed by the step the stub's state gives ({@link QuestionDriver#recovery}): the session resumed again
+         * while the task waits resumable (or the stub has not acted yet, as before), a generation leased on the stub's
+         * continuation while it is queued, and none once a generation holds or closed it. Before 2026-10-23 the
+         * session was always resumed again, also on the task the stub had already closed {@code lost} and continued at
+         * the resumed process's exit (run {@code cc787dd3} of the R3 smoke attempt, which then timed out).
+         */
+        private Worker resume(Worker current, String task, String decision) throws IOException, InterruptedException {
             driver.awaitExit(current, plan.host().silenceLimit());
             var session = driver.sessionId(current);
             if (session.isEmpty()) {
@@ -1032,14 +1157,69 @@ class QuestionLoopExperiment {
             }
             var resumed = driver.resume(current, task, session.get(), ++generation);
             if (plan.fault() == Fault.RESUMED_EXIT) {
-                driver.inject(resumed, Fault.RESUMED_EXIT);
+                injected(resumed, Fault.RESUMED_EXIT);
             }
             if (driver.superviseAnswer(resumed, Duration.ofMinutes(2))) {
                 return resumed;
             }
-            var again = driver.resume(current, task, session.get(), ++generation);
-            driver.superviseAnswer(again, Duration.ofMinutes(2));
-            return again;
+            recordLoss(resumed);
+            var recovery = recover(resumed, decision, task);
+            return switch (recovery.step()) {
+                case TAKEN -> resumed;
+                case CONTINUE -> driver.startLeased(recovery.task(), recovery.entity(),
+                        launch(current.id(), ++generation, ROLE, plan.host(), null));
+                case RESUME, WAIT -> {
+                    var again = driver.resume(current, task, session.get(), ++generation);
+                    driver.superviseAnswer(again, Duration.ofMinutes(2));
+                    yield again;
+                }
+            };
+        }
+
+        /** Injects a fault ({@link QuestionDriver#inject}) and records it and its time. */
+        private void injected(Worker worker, Fault fault) {
+            driver.inject(worker, fault);
+            record.put(FAULT_INJECTED_FIELD, true);
+            record.put(FAULT_INJECTED_FIELD + "_at", System.currentTimeMillis());
+        }
+
+        /**
+         * Records the first loss the driver detected in the run ({@value QuestionDriver#LOST_DETECTED} of the
+         * generation): by what ({@code loss_by}), after how long ({@code loss_after_ms}), and who saw it first
+         * ({@code loss_first_by}: the {@code driver} at the acknowledgement deadline, or the {@code stub} at the
+         * process's exit, with {@code loss_stub_reason} and {@code loss_stub_after_ms}).
+         *
+         * @return whether the driver detected a loss of the generation
+         */
+        private boolean recordLoss(Worker worker) throws IOException {
+            var detected = QuestionResults.readJsonLines(driver.stub().events()).stream()
+                    .filter(event -> QuestionDriver.LOST_DETECTED.equals(event.path(EVENT).asText())
+                            && worker.id().equals(event.path("worker").asText())
+                            && worker.generation() == event.path("generation").asInt())
+                    .findFirst();
+            if (detected.isEmpty()) {
+                return false;
+            }
+            if (!record.has("loss_by")) {
+                var event = detected.get();
+                record.put("loss_by", event.path("by").asText());
+                record.put("loss_after_ms", event.path("after_ms").asLong());
+                record.put("loss_first_by", event.path("first_by").asText());
+                record.put("loss_stub_reason", event.path("stub_reason").asText(""));
+                record.put("loss_stub_after_ms", event.path("stub_after_ms").asLong(-1));
+            }
+            return true;
+        }
+
+        /** Reads what the stub made of the lost task ({@link QuestionDriver#recovery}) and records the step. */
+        private QuestionDriver.Recovery recover(Worker lost, String decision, String task) throws IOException {
+            var recovery = driver.recovery(lost, decision, task);
+            if (!record.has("recovery_step")) {
+                record.put("recovery_step", recovery.step().name().toLowerCase(Locale.ROOT));
+                record.put("recovery_task", recovery.task());
+                record.put("recovery_holder", recovery.holder());
+            }
+            return recovery;
         }
 
         private Worker fallback(Worker current, String decision) throws IOException, InterruptedException {

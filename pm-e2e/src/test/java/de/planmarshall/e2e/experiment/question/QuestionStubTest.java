@@ -29,6 +29,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -40,6 +41,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 
@@ -101,7 +103,11 @@ import org.junit.jupiter.params.provider.EnumSource;
  * {@code pm_wait} when the quorum decided, already took and submitted, given to a new generation that the stub refuses,
  * so the run waited out its limit. Beside them Q7's open time: a fresh asker that holds {@code pm_wait} through the
  * open time, unseen by {@code leases_while_open}, or not ended by the driver before the open time; and a held wait the
- * stopping stub refuses named as {@code generation_fenced}. The recipes, corpus items, repositories and executables of these
+ * stopping stub refuses named as {@code generation_fenced}. Beside them R3's faults: a stop injected before the asker
+ * holds {@code pm_wait}, so the answer is never delivered and nothing is detected; a call cut no host can make (a hold
+ * shorter than the tool timeout, progress frames that reset it), or one counted without the cut in the logs; a second
+ * resume of a task the stub already closed and continued at the resumed process's exit; and a continuation logged before
+ * the detection that caused it. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used.
  */
@@ -3048,6 +3054,471 @@ class QuestionStubTest {
         }
     }
 
+    /**
+     * The faults of R3 against the live stub, with a scripted worker over the socket as the host, a fake
+     * {@code pm-exec} ({@code exec sleep 60}) as its process, and no model. The detections wait out Claude Code's
+     * acknowledgement deadline of 15 s.
+     */
+    @Nested
+    @DisplayName("R3 faults")
+    class R3Faults {
+
+        private static final String CLAUDE_PROPERTY = QuestionDriver.EXECUTABLE_PROPERTY + "claude";
+        private static final String CONTINUATION = "T-1-Q-001";
+        private static final String EVENT = "event";
+        private static final String LOST_DETECTED = QuestionDriver.LOST_DETECTED;
+        private static final Duration WINDOW = Duration.ofSeconds(45);
+        private static final Duration DELIVERY = Duration.ofSeconds(10);
+
+        private String previous;
+
+        @BeforeEach
+        void claudeExecutable() throws IOException {
+            var claude = script(directory.resolve("bin").resolve("claude"), "exit 0");
+            previous = System.getProperty(CLAUDE_PROPERTY);
+            System.setProperty(CLAUDE_PROPERTY, claude.toString());
+        }
+
+        @AfterEach
+        void restoreProperty() {
+            if (previous == null) {
+                System.clearProperty(CLAUDE_PROPERTY);
+            } else {
+                System.setProperty(CLAUDE_PROPERTY, previous);
+            }
+        }
+
+        @Test
+        @DisplayName("STOP_BEFORE_ANSWER: stops the asker only once it holds pm_wait; the missing acknowledgement "
+                + "detects it at the deadline, and the task is offered again with facts.answers once")
+        void shouldStopOnlyWhileHolding() throws Exception {
+            try (var driver = driver(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                var worker = startAsker(driver, Form.HOLD);
+                var asker = askingClient(worker);
+                var askedAt = askedAt(driver);
+                var stop = executor.submit(() -> driver.stopWhileHolding(worker, askedAt, DELIVERY));
+                Thread.sleep(500);
+                var beforeHold = named(driver, QuestionDriver.FAULT_INJECTED);
+
+                asker.request("pm_wait", QuestionStub.JSON.createObjectNode());
+                var held = stop.get(DELIVERY.toSeconds(), TimeUnit.SECONDS);
+                answerAsOperator(driver);
+                var acknowledged = driver.superviseAnswer(worker, DELIVERY);
+                var recovery = driver.recovery(worker, "Q-001", TASK);
+                var continued = continuationText(driver);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var waitStarted = first(events, "wait_started");
+                var injected = first(events, QuestionDriver.FAULT_INJECTED);
+                var lost = first(events, LOST_DETECTED);
+                assertAll("the stop while holding",
+                        () -> assertEquals(List.of(), beforeHold, "stopped before the hold"),
+                        () -> assertTrue(held.isPresent(), events.toString()),
+                        () -> assertEquals("STOP_BEFORE_ANSWER", injected.path("fault").asText()),
+                        () -> assertTrue(injected.path("held").asBoolean(), injected.toString()),
+                        () -> assertEquals(waitStarted.path("at").asLong(), injected.path("hold_started_at").asLong()),
+                        () -> assertTrue(events.indexOf(waitStarted) < events.indexOf(injected), events.toString()),
+                        () -> assertTrue(events.indexOf(injected) < events.indexOf(first(events, "answer_delivered")),
+                                events.toString()),
+                        () -> assertFalse(acknowledged),
+                        () -> assertEquals("answer_ack_missing", lost.path("by").asText()),
+                        () -> assertTrue(lost.path("after_ms").asLong() >= Host.CLAUDE.ackDeadline().toMillis(),
+                                lost.toString()),
+                        () -> assertEquals("driver", lost.path("first_by").asText()),
+                        () -> assertTrue(events.indexOf(lost) < events.indexOf(first(events, "continued")),
+                                "the continuation precedes the detection: " + events),
+                        () -> assertEquals(1, count(events, "continued")),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.CONTINUE, recovery.step()),
+                        () -> assertEquals(CONTINUATION, recovery.task()),
+                        () -> assertTrue(continued.contains("Q-001,null,"), continued));
+            }
+        }
+
+        @Test
+        @DisplayName("STOP_BEFORE_ANSWER: an asker that never holds pm_wait is not stopped, and the run says so")
+        void shouldNotStopWithoutHold() throws Exception {
+            try (var driver = driver()) {
+                var worker = startAsker(driver, Form.HOLD);
+                askingClient(worker);
+
+                var held = driver.stopWhileHolding(worker, askedAt(driver), Duration.ofMillis(500));
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                assertAll("no stop",
+                        () -> assertEquals(Optional.empty(), held),
+                        () -> assertEquals(List.of(), named(driver, QuestionDriver.FAULT_INJECTED)),
+                        () -> assertEquals("no_hold", first(events, QuestionDriver.FAULT_NOT_INJECTED)
+                                .path("reason").asText()),
+                        () -> assertTrue(worker.process().isAlive()));
+            }
+        }
+
+        @Test
+        @DisplayName("CALL_CUT: a fake host that honours its tool timeout cuts the held call; the cut is logged as "
+                + "the fault with its evidence, and the missing acknowledgement detects the loss")
+        void shouldDetectCallCutByHost() throws Exception {
+            var toolTimeout = Duration.ofSeconds(1);
+            var setting = new QuestionDriver.CutSetting(toolTimeout, toolTimeout,
+                    QuestionDriver.CONFIGURED_TOOL_TIMEOUT);
+            try (var driver = driver(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                var worker = startAsker(driver, Form.HOLD);
+                var host = askingClient(worker).relayingTo(worker.relayLog());
+                var askedAt = askedAt(driver);
+                var watch = executor.submit(() -> driver.awaitCallCut(worker, askedAt,
+                        System.currentTimeMillis() + DELIVERY.toMillis(), setting));
+
+                var held = host.request("pm_wait", QuestionStub.JSON.createObjectNode());
+                Thread.sleep(toolTimeout.plusMillis(100));
+                host.cancel(held);
+                var cut = watch.get(DELIVERY.toSeconds(), TimeUnit.SECONDS);
+                answerAsOperator(driver);
+                var acknowledged = driver.superviseAnswer(worker, DELIVERY);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var injected = first(events, QuestionDriver.FAULT_INJECTED);
+                var lost = first(events, LOST_DETECTED);
+                assertAll("the cut",
+                        () -> assertTrue(cut.isPresent(), events.toString()),
+                        () -> assertEquals(QuestionDriver.CUT_CANCELLED, cut.orElseThrow().evidence()),
+                        () -> assertTrue(cut.orElseThrow().afterMs() >= toolTimeout.toMillis(), cut.toString()),
+                        () -> assertEquals("CALL_CUT", injected.path("fault").asText()),
+                        () -> assertEquals("host", injected.path("cut_by").asText()),
+                        () -> assertEquals(QuestionDriver.CUT_CANCELLED, injected.path("evidence").asText()),
+                        () -> assertEquals(QuestionDriver.CONFIGURED_TOOL_TIMEOUT, injected.path("means").asText()),
+                        () -> assertEquals(toolTimeout.toMillis(), injected.path("tool_timeout_ms").asLong()),
+                        () -> assertFalse(acknowledged),
+                        () -> assertEquals("answer_ack_missing", lost.path("by").asText()),
+                        () -> assertTrue(lost.path("after_ms").asLong() >= Host.CLAUDE.ackDeadline().toMillis(),
+                                lost.toString()),
+                        () -> assertEquals(1, count(events, "continued")));
+            }
+        }
+
+        @Test
+        @DisplayName("CALL_CUT: a host that calls pm_wait again after the cut gets the answer over the new call; the "
+                + "cut is recorded, and no loss")
+        void shouldRecordCutRecoveredByNewWait() throws Exception {
+            var setting = QuestionDriver.cutSetting(Host.CLAUDE);
+            try (var driver = driver(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                var worker = startAsker(driver, Form.HOLD);
+                var host = askingClient(worker);
+                var askedAt = askedAt(driver);
+                var watch = executor.submit(() -> driver.awaitCallCut(worker, askedAt,
+                        System.currentTimeMillis() + DELIVERY.toMillis(), setting));
+
+                host.request("pm_wait", QuestionStub.JSON.createObjectNode());
+                Thread.sleep(500);
+                var again = host.request("pm_wait", QuestionStub.JSON.createObjectNode());
+                var cut = watch.get(DELIVERY.toSeconds(), TimeUnit.SECONDS);
+                answerAsOperator(driver);
+                var delivered = host.text(again);
+                host.link("ack", QuestionStub.JSON.createObjectNode());
+                var acknowledged = driver.superviseAnswer(worker, DELIVERY);
+
+                assertAll("the cut recovered by the worker",
+                        () -> assertEquals(QuestionDriver.CUT_SUPERSEDED, cut.orElseThrow().evidence()),
+                        () -> assertTrue(delivered.contains("state: task.answer"), delivered),
+                        () -> assertTrue(acknowledged),
+                        () -> assertEquals(List.of(), named(driver, LOST_DETECTED)));
+            }
+        }
+
+        @Test
+        @DisplayName("CALL_CUT: a held call the host does not cut is logged as not cut, never as the fault")
+        void shouldLogCallNotCut() throws Exception {
+            var setting = QuestionDriver.cutSetting(Host.CLAUDE);
+            try (var driver = driver()) {
+                var worker = startAsker(driver, Form.HOLD);
+                askingClient(worker).relayingTo(worker.relayLog()).request("pm_wait",
+                        QuestionStub.JSON.createObjectNode());
+                var askedAt = askedAt(driver);
+
+                var cut = driver.awaitCallCut(worker, askedAt, System.currentTimeMillis() + 1000, setting);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var notCut = first(events, QuestionDriver.CALL_NOT_CUT);
+                assertAll("no cut",
+                        () -> assertEquals(Optional.empty(), cut),
+                        () -> assertEquals(List.of(), named(driver, QuestionDriver.FAULT_INJECTED)),
+                        () -> assertTrue(notCut.path("held").asBoolean(), notCut.toString()),
+                        () -> assertEquals(QuestionDriver.CONFIGURED_TOOL_TIMEOUT, notCut.path("means").asText()));
+            }
+        }
+
+        @Test
+        @DisplayName("CALL_CUT: the R3 smoke attempt's held call (30 s, progress every 5 s, no cancellation) is no "
+                + "cut; a cancellation of another request is none either")
+        void shouldReadAttemptSequenceAsNoCut() {
+            var events = List.of(logEvent(31_800L, "asked", Map.of("task", TASK, "decision", "Q-001")),
+                    logEvent(34_100L, "wait_started", Map.of()),
+                    logEvent(61_900L, "answer_delivered", Map.of("task", TASK, "decision", "Q-001")));
+            var waitCall = relayEntry(34_090L, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+                    + "\"params\":{\"name\":\"pm_wait\",\"arguments\":{},\"_meta\":{\"progressToken\":5}}}");
+            var progress = relayEntry(39_100L, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\","
+                    + "\"params\":{\"progressToken\":5,\"progress\":1}}");
+            var otherCancel = relayEntry(40_000L, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\","
+                    + "\"params\":{\"requestId\":4}}");
+            var cancel = relayEntry(40_000L, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\","
+                    + "\"params\":{\"requestId\":5}}");
+
+            assertAll("the attempt's sequence",
+                    () -> assertEquals(Optional.empty(), QuestionDriver.callCut(events, List.of(waitCall, progress),
+                            WORKER, 1, 31_800L)),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.callCut(events, List.of(waitCall,
+                            otherCancel), WORKER, 1, 31_800L)),
+                    () -> assertEquals(Optional.of(new QuestionDriver.CallCut(WORKER, 1, 34_100L, 40_000L,
+                            QuestionDriver.CUT_CANCELLED)), QuestionDriver.callCut(events, List.of(waitCall, cancel),
+                            WORKER, 1, 31_800L)));
+        }
+
+        @ParameterizedTest(name = "{0}: tool timeout {1} ms, cut at {2} s, hold {3} s, window {4} s, {5}")
+        @CsvSource({
+                "CLAUDE, 60000, 60, 90, 240, configured_tool_timeout",
+                "OPENCODE, 60000, 60, 90, 240, configured_tool_timeout",
+                "ANTIGRAVITY, -1, 180, 210, 240, host_call_limit"})
+        @DisplayName("CALL_CUT: the held call outlasts the host's cut, without progress, and the stub's window "
+                + "outlasts the hold")
+        void shouldPlanCutPerHost(Host host, long toolTimeoutMs, long cutSeconds, long holdSeconds,
+                long windowSeconds, String means) {
+            var setting = QuestionDriver.cutSetting(host);
+            var plan = r3Plan(host, Fault.CALL_CUT);
+
+            var stubSettings = QuestionLoopExperiment.stubSettings(plan, directory.resolve("stub"), socket);
+
+            assertAll("the cut setting of " + host,
+                    () -> assertEquals(toolTimeoutMs, setting.toolTimeout() == null ? -1
+                            : setting.toolTimeout().toMillis()),
+                    () -> assertEquals(toolTimeoutMs < 0 ? null : Duration.ofMillis(toolTimeoutMs),
+                            QuestionLoopExperiment.toolTimeout(plan)),
+                    () -> assertEquals(cutSeconds, setting.hostCut().toSeconds()),
+                    () -> assertEquals(holdSeconds, plan.hold().toSeconds()),
+                    () -> assertEquals(windowSeconds, stubSettings.window().toSeconds()),
+                    () -> assertTrue(stubSettings.progressEvery().compareTo(stubSettings.window()) > 0,
+                            "a progress frame within the window"),
+                    () -> assertEquals(means, setting.means()));
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(value = Fault.class, names = {"STOP_BEFORE_ANSWER", "MODEL_HANG", "KILL", "RESUMED_EXIT"})
+        @DisplayName("the other faults keep the host's window, progress every 5 s, the 30 s hold and the host's "
+                + "tool timeout")
+        void shouldKeepOtherFaultSettings(Fault fault) {
+            var plan = r3Plan(Host.CLAUDE, fault);
+
+            var stubSettings = QuestionLoopExperiment.stubSettings(plan, directory.resolve("stub"), socket);
+
+            assertAll("the settings of " + fault,
+                    () -> assertEquals(Host.CLAUDE.boundedWait(), stubSettings.window()),
+                    () -> assertEquals(Duration.ofSeconds(5), stubSettings.progressEvery()),
+                    () -> assertEquals(QuestionLoopExperiment.R3_HOLD, plan.hold()),
+                    () -> assertNull(QuestionLoopExperiment.toolTimeout(plan)));
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(value = Fault.class, names = {"MODEL_HANG", "KILL"})
+        @DisplayName("MODEL_HANG and KILL: injected once the answer is delivered over the held wait, detected by the "
+                + "missing acknowledgement at the deadline, and continued in the stub's new task as before")
+        void shouldDetectHangAndKillAsBefore(Fault fault) throws Exception {
+            try (var driver = driver()) {
+                var worker = startAsker(driver, Form.HOLD);
+                askingClient(worker).request("pm_wait", QuestionStub.JSON.createObjectNode());
+                answerAsOperator(driver);
+                driver.awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText()),
+                        System.currentTimeMillis() + DELIVERY.toMillis());
+                driver.inject(worker, fault);
+
+                var acknowledged = driver.superviseAnswer(worker, DELIVERY);
+                var recovery = driver.recovery(worker, "Q-001", TASK);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var lost = first(events, LOST_DETECTED);
+                assertAll("the detection of " + fault,
+                        () -> assertFalse(acknowledged),
+                        () -> assertEquals("answer_ack_missing", lost.path("by").asText()),
+                        () -> assertTrue(lost.path("after_ms").asLong() >= Host.CLAUDE.ackDeadline().toMillis(),
+                                lost.toString()),
+                        () -> assertEquals(fault == Fault.KILL ? "stub" : "driver", lost.path("first_by").asText()),
+                        () -> assertEquals(1, count(events, "continued")),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.CONTINUE, recovery.step()),
+                        () -> assertEquals(CONTINUATION, recovery.task()));
+            }
+        }
+
+        @Test
+        @DisplayName("RESUMED_EXIT: when the stub continued the task at the resumed process's exit, the driver starts "
+                + "no second resume of the closed task, a generation only for the queued continuation, and none "
+                + "once a generation holds it")
+        void shouldNotResumeTaskStubContinued() throws Exception {
+            try (var driver = driver()) {
+                var asker = startAsker(driver, Form.RESUME);
+                askingClient(asker).request("pm_wait", QuestionStub.JSON.createObjectNode());
+                answerAsOperator(driver);
+                var resumed = driver.resume(asker, TASK, "session-1", 2);
+                driver.inject(resumed, Fault.RESUMED_EXIT);
+                driver.awaitEvent(event -> "continued".equals(event.path(EVENT).asText()),
+                        System.currentTimeMillis() + DELIVERY.toMillis());
+
+                var acknowledged = driver.superviseAnswer(resumed, DELIVERY);
+                var recovery = driver.recovery(resumed, "Q-001", TASK);
+                var continuation = driver.startLeased(recovery.task(), recovery.entity(),
+                        new Launch(WORKER, 3, ROLE, "Do it.", true, null, List.of(), null));
+                var afterStart = driver.recovery(resumed, "Q-001", TASK);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var lost = first(events, LOST_DETECTED);
+                assertAll("the recovery",
+                        () -> assertFalse(acknowledged),
+                        () -> assertEquals("stub", lost.path("first_by").asText(), lost.toString()),
+                        () -> assertEquals("exited", lost.path("stub_reason").asText()),
+                        () -> assertTrue(lost.path("stub_after_ms").asLong() < Host.CLAUDE.ackDeadline().toMillis(),
+                                lost.toString()),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.CONTINUE, recovery.step()),
+                        () -> assertEquals(CONTINUATION, recovery.task()),
+                        () -> assertEquals(TASK, recovery.entity()),
+                        () -> assertEquals(3, continuation.generation()),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.TAKEN, afterStart.step()),
+                        () -> assertEquals(WORKER + "#3", afterStart.holder()),
+                        () -> assertEquals(Optional.of("task.lost"), driver.stub().state(TASK)),
+                        () -> assertEquals(1, count(events, "continued")),
+                        () -> assertTrue(events.stream().noneMatch(event -> TASK.equals(event.path("task").asText())
+                                && event.path("generation").asInt() == 3), "the closed task was leased again"));
+            }
+        }
+
+        @ParameterizedTest(name = "lost task {0}, last held by {1} -> {2}")
+        @CsvSource({
+                "task.resumable, w1#2, RESUME",
+                "task.lost, w1#2, WAIT",
+                "task.queued, w1#2, WAIT",
+                "entity.active, w1#3, TAKEN",
+                "entity.completed, w1#3, TAKEN"})
+        @DisplayName("without a continuation of the stub, the lost task's state decides: resumable is resumed again, "
+                + "held or closed by another generation is left alone")
+        void shouldDecideRecoveryWithoutContinuation(String state, String holder, String expected) {
+            var generation = Integer.parseInt(holder.substring(holder.indexOf('#') + 1));
+            var events = List.of(logEvent(1_000L, "answer_delivered", Map.of("task", TASK, "at_spawn", true)),
+                    eventOf(2_000L, "offered", generation, Map.of("task", TASK, "at_spawn", true)));
+
+            var recovery = QuestionDriver.recovery(events, "Q-001", TASK, WORKER + "#2",
+                    task -> TASK.equals(task) ? Optional.of(state) : Optional.empty());
+
+            assertEquals(QuestionDriver.RecoveryStep.valueOf(expected), recovery.step(), recovery.toString());
+        }
+
+        @Test
+        @DisplayName("the result of R3 states in its limits how each fault was produced and how often as specified")
+        void shouldStateFaultsInLimits() {
+            var result = QuestionStub.JSON.createObjectNode();
+            var runs = List.<JsonNode>of(
+                    run(Map.of("fault", "STOP_BEFORE_ANSWER", "fault_held", true)),
+                    run(Map.of("fault", "STOP_BEFORE_ANSWER", "fault_held", false)),
+                    run(Map.of("fault", "CALL_CUT", "host", "claude", QuestionResults.CALL_CUT_FIELD, true)),
+                    run(Map.of("fault", "CALL_CUT", "host", "opencode", QuestionResults.CALL_CUT_FIELD, false)),
+                    run(Map.of("fault", "KILL", "loss_by", "answer_ack_missing", "loss_first_by", "stub")),
+                    run(Map.of("fault", "MODEL_HANG", "loss_by", "answer_ack_missing", "loss_first_by", "driver")));
+
+            QuestionResults.limitsOfR3(result, runs);
+
+            var limits = result.path("limits").toString();
+            assertAll("the limits",
+                    () -> assertTrue(limits.contains("Stopped while holding: 1 of 2 runs."), limits),
+                    () -> assertTrue(limits.contains("Cut: claude 1 of 1, opencode 0 of 1."), limits),
+                    () -> assertTrue(limits.contains("MCP_TOOL_TIMEOUT of 60 s"), limits),
+                    () -> assertTrue(limits.contains("its 180 s limit on every call"), limits),
+                    () -> assertTrue(limits.contains("In 1 of 2 runs with a detected loss the stub"), limits));
+        }
+
+        private QuestionDriver driver() throws IOException {
+            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(WINDOW);
+            return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
+                    directory.resolve("workers"), directory.resolve("run"),
+                    List.of(script(directory.resolve("pm-exec"), "exec sleep 60").toString())));
+        }
+
+        /** Queues the task, leases it to generation 1 and starts its fake process. */
+        private static Worker startAsker(QuestionDriver driver, Form form) throws IOException {
+            return driver.startFresh(task(form), new Launch(WORKER, 1, ROLE, "Do it.", form == Form.RESUME, null,
+                    List.of(), null));
+        }
+
+        /** The asker's relay connects, reads and acknowledges its task, and asks the example envelope. */
+        private Client askingClient(Worker worker) throws IOException {
+            var client = Client.connect(socket, worker.id(), worker.generation());
+            clients.add(client);
+            client.state();
+            client.link("ack", QuestionStub.JSON.createObjectNode());
+            client.ask("ask", validEnvelope());
+            return client;
+        }
+
+        private static long askedAt(QuestionDriver driver) throws IOException, InterruptedException {
+            return driver.awaitEvent(event -> "asked".equals(event.path(EVENT).asText()),
+                    System.currentTimeMillis() + DELIVERY.toMillis()).orElseThrow().path("at").asLong();
+        }
+
+        private static void answerAsOperator(QuestionDriver driver) throws IOException, InterruptedException {
+            assertEquals(Optional.of("Q-001"), driver.awaitAnswer("Q-001", DELIVERY, Duration.ZERO,
+                    decision -> List.of(answer("Q-001"))));
+        }
+
+        /** Leases the stub's continuation to generation 2 and returns it as that generation acknowledges it. */
+        private String continuationText(QuestionDriver driver) throws IOException {
+            driver.stub().leaseAtSpawn(CONTINUATION, WORKER, 2);
+            var client = Client.connect(socket, WORKER, 2);
+            clients.add(client);
+            client.state();
+            return client.link("ack", QuestionStub.JSON.createObjectNode());
+        }
+
+        private static List<JsonNode> named(QuestionDriver driver, String name) throws IOException {
+            return QuestionResults.readJsonLines(driver.stub().events()).stream()
+                    .filter(event -> name.equals(event.path(EVENT).asText())).toList();
+        }
+
+        private static JsonNode first(List<JsonNode> events, String name) {
+            return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).findFirst()
+                    .orElseThrow(() -> new AssertionError("no " + name + " in " + events));
+        }
+
+        private static long count(List<JsonNode> events, String name) {
+            return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).count();
+        }
+
+        private static QuestionLoopExperiment.RunPlan r3Plan(Host host, Fault fault) {
+            return QuestionLoopExperiment.RunPlan.of("R3", 0, host, null, false,
+                    fault == Fault.RESUMED_EXIT ? Form.RESUME : Form.HOLD, QuestionFixtures.probe(), "entity")
+                    .holding(QuestionLoopExperiment.r3Hold(host, fault)).faulting(fault);
+        }
+
+        private static JsonNode logEvent(long at, String name, Map<String, ?> fields) {
+            return eventOf(at, name, 1, fields);
+        }
+
+        private static JsonNode eventOf(long at, String name, int generation, Map<String, ?> fields) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put(EVENT, name);
+            node.put("worker", WORKER);
+            node.put("generation", generation);
+            fields.forEach((key, value) -> node.set(key, QuestionStub.JSON.valueToTree(value)));
+            return node;
+        }
+
+        private static JsonNode relayEntry(long at, String line) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put("dir", "from_host");
+            node.put("line", line);
+            return node;
+        }
+
+        private static JsonNode run(Map<String, ?> fields) {
+            var node = QuestionStub.JSON.createObjectNode();
+            fields.forEach((key, value) -> node.set(key, QuestionStub.JSON.valueToTree(value)));
+            return node;
+        }
+    }
+
     // --- fixtures ---
 
     /** The files of a telemetry branch, written by the test into a directory. */
@@ -3126,6 +3597,7 @@ class QuestionStubTest {
         private final BufferedReader reader;
         private final OutputStream out;
         private int nextId;
+        private Path relayLog;
 
         private Client(SocketChannel channel) {
             this.channel = channel;
@@ -3189,6 +3661,20 @@ class QuestionStubTest {
         }
 
         String call(String tool, ObjectNode arguments) throws IOException {
+            return text(request(tool, arguments));
+        }
+
+        /**
+         * Writes every line this client sends, as the relay's host-side log does ({@code at}, {@code dir}
+         * {@code from_host}, {@code line}), to a file: the relay a fake host would have.
+         */
+        Client relayingTo(Path log) {
+            this.relayLog = log;
+            return this;
+        }
+
+        /** Sends a tool call without waiting for its response, as a host does with a call it holds. */
+        int request(String tool, ObjectNode arguments) throws IOException {
             var id = ++nextId;
             var request = QuestionStub.JSON.createObjectNode();
             request.put("jsonrpc", "2.0");
@@ -3198,7 +3684,18 @@ class QuestionStubTest {
             params.put("name", tool);
             params.set("arguments", arguments);
             send(QuestionStub.JSON.writeValueAsString(request));
+            return id;
+        }
+
+        /** Waits for the response of a call sent by {@link #request} and returns its text. */
+        String text(int id) throws IOException {
             return response(id).path("result").path("content").get(0).path("text").asText();
+        }
+
+        /** Gives a held call up, as a host does at its tool timeout: {@code notifications/cancelled}. */
+        void cancel(int id) throws IOException {
+            send("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":" + id
+                    + ",\"reason\":\"tool timeout\"}}");
         }
 
         private JsonNode response(int id) throws IOException {
@@ -3214,6 +3711,14 @@ class QuestionStubTest {
         private void send(String line) throws IOException {
             out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
             out.flush();
+            if (relayLog != null) {
+                var entry = QuestionStub.JSON.createObjectNode();
+                entry.put("at", System.currentTimeMillis());
+                entry.put("dir", "from_host");
+                entry.put("line", line);
+                Files.writeString(relayLog, QuestionStub.JSON.writeValueAsString(entry) + "\n",
+                        StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            }
         }
 
         @Override
