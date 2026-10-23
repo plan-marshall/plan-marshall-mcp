@@ -42,6 +42,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 
@@ -110,7 +111,10 @@ import org.junit.jupiter.params.provider.EnumSource;
  * shorter than the tool timeout, progress frames that reset it), or one counted without the cut in the logs; a second
  * resume of a task the stub already closed and continued at the resumed process's exit; a continuation logged before
  * the detection that caused it; and a stub of R3 that releases or continues a task at the worker's process exit, so the
- * detection is not made by the acknowledgement, or a stub of another item that no longer does. The recipes, corpus items, repositories and executables of these
+ * detection is not made by the acknowledgement, or a stub of another item that no longer does. Beside them the reading
+ * of a file still being written: a worker's output line longer than a write's buffer, read during the run before its
+ * end reached the file, failing the run as an error instead of being read on the next poll; and the same tolerance
+ * reaching the final evaluation, which must still report a corrupt file. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used, except by the real scenario checkout, which runs only when its property names a scenario
  * and only reads the operator's checkouts.
@@ -1696,6 +1700,46 @@ class QuestionStubTest {
                     () -> assertEquals("", QuestionDriver.earlyExitDetail("", List.of())));
         }
 
+        @Test
+        @DisplayName("the early-exit and quota checks read an output whose last line is still being written")
+        void shouldCheckOutputWithCutOffLine() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_LAUNCHED + "' >&2\nexit 3");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                driver.stub().event(QuestionDriver.CONNECTED, Map.of("worker", WORKER, "generation", 1));
+                assertTrue(driver.awaitExit(worker, Duration.ofSeconds(30)).isPresent());
+                Files.writeString(worker.output(), QuestionStub.JSON.writeValueAsString(stamped(STEP_START)) + "\n"
+                        + OutputReadDuringRun.cutOff(OutputReadDuringRun.LONG_LINE), StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+
+                var quota = driver.quotaError();
+                var early = driver.earlyExit();
+
+                assertAll("the checks on the cut-off output",
+                        () -> assertEquals(Optional.empty(), quota),
+                        () -> assertEquals(Optional.of(new EarlyExit(WORKER, 1, 3, STEP_START, false, false)), early),
+                        () -> assertEquals(Optional.empty(), driver.launchFailure()));
+            }
+        }
+
+        @Test
+        @DisplayName("a quota error line before a line still being written is found")
+        void shouldFindQuotaErrorBeforeCutOffLine() throws Exception {
+            var exec = script(directory.resolve("pm-exec"), "echo '" + PM_EXEC_LAUNCHED + "' >&2\nexec sleep 30");
+            try (var driver = driver(exec)) {
+                var worker = launch(driver);
+                Files.writeString(worker.output(), QuestionStub.JSON.writeValueAsString(stamped(
+                        QuotaShapes.OPENCODE_ERROR)) + "\n" + OutputReadDuringRun.cutOff(OutputReadDuringRun.LONG_LINE),
+                        StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+
+                var quota = driver.quotaError();
+
+                assertEquals(Optional.of(new QuotaError(WORKER, 1, QuotaShapes.OPENCODE_ERROR)), quota);
+            }
+        }
+
+        private static final String STEP_START = "{\"type\":\"step_start\"}";
+
         private static JsonNode stamped(String line) {
             var node = QuestionStub.JSON.createObjectNode();
             node.put("at", 1L);
@@ -1823,6 +1867,183 @@ class QuestionStubTest {
             node.put("at", 1L);
             node.put("line", line);
             return node;
+        }
+    }
+
+    /**
+     * A file read while its writer still appends to it: a line longer than a write's buffer reaches the file in parts,
+     * so a reader during the run sees its start without its end (R4 large work on OpenCode, invocation
+     * R4-2026-10-23T110109124768Z-36b5655d: a tool result of about 120,000 characters ended the run as an error).
+     */
+    @Nested
+    @DisplayName("output read during the run")
+    class OutputReadDuringRun {
+
+        /** A worker output line of 200,000 characters, half of them two bytes long in UTF-8. */
+        static final String LONG_LINE = "ä".repeat(100_000) + "x".repeat(100_000);
+
+        private static final String STEP_START = "{\"type\":\"step_start\"}";
+        private static final String TEXT = "{\"type\":\"text\",\"part\":{\"text\":\"done\"}}";
+
+        static String stampedJson(String line) throws IOException {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", 1L);
+            node.put("line", line);
+            return QuestionStub.JSON.writeValueAsString(node);
+        }
+
+        /** @return the first half of the stamped line, without its end and line break */
+        static String cutOff(String line) throws IOException {
+            var full = stampedJson(line);
+            return full.substring(0, full.length() / 2);
+        }
+
+        @Test
+        @DisplayName("a cut-off last line is skipped and counted, the complete lines are returned")
+        void shouldSkipCutOffLastLine() throws Exception {
+            var file = directory.resolve("output.jsonl");
+            Files.writeString(file, stampedJson(STEP_START) + "\n" + stampedJson(TEXT) + "\n" + cutOff(LONG_LINE),
+                    StandardCharsets.UTF_8);
+
+            var read = QuestionResults.readJsonLinesSoFar(file);
+
+            assertAll("the lines so far",
+                    () -> assertEquals(1, read.skipped()),
+                    () -> assertEquals(List.of(STEP_START, TEXT), read.nodes().stream()
+                            .map(node -> node.path("line").asText()).toList()));
+        }
+
+        @Test
+        @DisplayName("a cut inside a character of the last line is skipped, not a decoding error")
+        void shouldSkipCutInsideCharacter() throws Exception {
+            var file = directory.resolve("output.jsonl");
+            var complete = (stampedJson(STEP_START) + "\n").getBytes(StandardCharsets.UTF_8);
+            var line = stampedJson(LONG_LINE).getBytes(StandardCharsets.UTF_8);
+            var prefix = "{\"at\":1,\"line\":\"".length();
+            try (var out = Files.newOutputStream(file)) {
+                out.write(complete);
+                out.write(line, 0, prefix + 1);
+            }
+
+            var read = QuestionResults.readJsonLinesSoFar(file);
+
+            assertAll("the lines so far",
+                    () -> assertEquals(1, read.skipped()),
+                    () -> assertEquals(1, read.nodes().size()));
+        }
+
+        @Test
+        @DisplayName("a last line with its line break that is no JSON is skipped and counted")
+        void shouldSkipUnparseableLastLine() throws Exception {
+            var file = directory.resolve("output.jsonl");
+            Files.writeString(file, stampedJson(STEP_START) + "\n" + cutOff(LONG_LINE) + "\n", StandardCharsets.UTF_8);
+
+            var read = QuestionResults.readJsonLinesSoFar(file);
+
+            assertAll("the lines so far",
+                    () -> assertEquals(1, read.skipped()),
+                    () -> assertEquals(1, read.nodes().size()));
+        }
+
+        @Test
+        @DisplayName("a line that is no JSON before the last still fails, with or without a cut-off line after it")
+        void shouldFailOnBadMiddleLine() throws Exception {
+            var middle = directory.resolve("middle.jsonl");
+            Files.writeString(middle, stampedJson(STEP_START) + "\n" + cutOff(LONG_LINE) + "\n" + stampedJson(TEXT)
+                    + "\n", StandardCharsets.UTF_8);
+            var beforeCut = directory.resolve("before-cut.jsonl");
+            Files.writeString(beforeCut, stampedJson(STEP_START) + "\n" + cutOff(LONG_LINE) + "\n" + cutOff(TEXT),
+                    StandardCharsets.UTF_8);
+
+            assertAll("the bad middle lines",
+                    () -> assertThrows(IOException.class, () -> QuestionResults.readJsonLinesSoFar(middle)),
+                    () -> assertThrows(IOException.class, () -> QuestionResults.readJsonLinesSoFar(beforeCut)),
+                    () -> assertThrows(IOException.class, () -> QuestionDriver.outputLines(middle)));
+        }
+
+        @Test
+        @DisplayName("the final evaluation's reader stays strict: a cut-off last line fails it")
+        void shouldKeepFinalReadStrict() throws Exception {
+            var file = directory.resolve("output.jsonl");
+            Files.writeString(file, stampedJson(STEP_START) + "\n" + cutOff(LONG_LINE), StandardCharsets.UTF_8);
+
+            assertThrows(IOException.class, () -> QuestionResults.readJsonLines(file));
+        }
+
+        @Test
+        @DisplayName("the output and relay readers of the driver skip a cut-off last line")
+        void shouldReadOutputAndRelayLinesSoFar() throws Exception {
+            var output = directory.resolve("output.jsonl");
+            Files.writeString(output, stampedJson(STEP_START) + "\n" + cutOff(LONG_LINE), StandardCharsets.UTF_8);
+            var relay = directory.resolve("relay.jsonl");
+            Files.writeString(relay, "{\"at\":1,\"dir\":\"connect\",\"line\":\"{}\"}\n{\"at\":2,\"dir\":\"to_host\","
+                    + "\"line\":\"" + "ä".repeat(10_000), StandardCharsets.UTF_8);
+
+            var lines = QuestionDriver.outputLines(output);
+            var relayLines = QuestionDriver.relayLines(relay);
+
+            assertAll("the readers of the driver",
+                    () -> assertEquals(List.of(QuestionStub.JSON.readTree(STEP_START)), lines),
+                    () -> assertEquals(1, relayLines.size()),
+                    () -> assertEquals("connect", relayLines.getFirst().path("dir").asText()));
+        }
+
+        @Test
+        @DisplayName("a missing file reads as no lines")
+        void shouldReadMissingFileAsEmpty() throws Exception {
+            var read = QuestionResults.readJsonLinesSoFar(directory.resolve("missing.jsonl"));
+
+            assertAll("the missing file",
+                    () -> assertEquals(List.of(), read.nodes()),
+                    () -> assertEquals(0, read.skipped()));
+        }
+
+        @Test
+        @DisplayName("a reader polling while a 200,000-char line is written in chunks never fails and reads it whole")
+        void shouldReadLineWrittenInChunks() throws Exception {
+            var file = directory.resolve("output.jsonl");
+            Files.writeString(file, stampedJson(STEP_START) + "\n", StandardCharsets.UTF_8);
+            var bytes = (stampedJson(LONG_LINE) + "\n").getBytes(StandardCharsets.UTF_8);
+            var ends = new ArrayList<Integer>();
+            for (var end = 30_001; end < bytes.length; end += 30_001) {
+                ends.add(end);
+            }
+            ends.add(bytes.length);
+            var written = new Semaphore(0);
+            var polled = new Semaphore(0);
+            var seen = new ArrayList<QuestionResults.JsonLinesSoFar>();
+
+            try (var executor = Executors.newSingleThreadExecutor()) {
+                var writer = executor.submit(() -> {
+                    try (var out = Files.newOutputStream(file, StandardOpenOption.APPEND)) {
+                        var start = 0;
+                        for (var end : ends) {
+                            out.write(bytes, start, end - start);
+                            out.flush();
+                            start = end;
+                            written.release();
+                            assertTrue(polled.tryAcquire(10, TimeUnit.SECONDS), "the reader did not poll");
+                        }
+                    }
+                    return null;
+                });
+                for (var index = 0; index < ends.size(); index++) {
+                    assertTrue(written.tryAcquire(10, TimeUnit.SECONDS), "the writer did not write");
+                    seen.add(QuestionResults.readJsonLinesSoFar(file));
+                    polled.release();
+                }
+                writer.get(10, TimeUnit.SECONDS);
+            }
+
+            var partial = seen.subList(0, seen.size() - 1);
+            var last = seen.getLast();
+            assertAll("the polls",
+                    () -> assertTrue(ends.size() > 5, "too few chunks: " + ends.size()),
+                    () -> assertTrue(partial.stream().allMatch(read -> read.nodes().size() == 1 && read.skipped() == 1),
+                            "a partial poll read the unfinished line"),
+                    () -> assertEquals(0, last.skipped()),
+                    () -> assertEquals(2, last.nodes().size()),
+                    () -> assertEquals(LONG_LINE, last.nodes().getLast().path("line").asText()));
         }
     }
 

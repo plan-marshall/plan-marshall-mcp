@@ -1295,7 +1295,7 @@ class QuestionLoopExperiment {
          * @return whether the driver detected a loss of the generation
          */
         private boolean recordLoss(Worker worker) throws IOException {
-            var events = QuestionResults.readJsonLines(driver.stub().events());
+            var events = QuestionResults.jsonLinesSoFar(driver.stub().events());
             var detected = events.stream()
                     .filter(event -> QuestionDriver.LOST_DETECTED.equals(event.path(EVENT).asText())
                             && worker.id().equals(event.path("worker").asText())
@@ -1624,7 +1624,7 @@ class QuestionLoopExperiment {
             var answered = new HashSet<String>();
             try {
                 while (running.get()) {
-                    for (var event : QuestionResults.readJsonLines(driver.stub().events())) {
+                    for (var event : QuestionResults.jsonLinesSoFar(driver.stub().events())) {
                         var consultation = event.path("consultation").asText();
                         if ("consulted".equals(event.path(EVENT).asText()) && answered.add(consultation)) {
                             driver.stub().answerConsultation(consultation, "Where the description and the examples "
@@ -1647,7 +1647,7 @@ class QuestionLoopExperiment {
                 var warm = driver.startWarm(launch("w-warm", 1, ROLE, plan.host(), null));
                 record.put("warm_worker", warm.id());
                 while (running.get() && warm.process().isAlive()) {
-                    var idle = QuestionResults.readJsonLines(driver.stub().events()).stream()
+                    var idle = QuestionResults.jsonLinesSoFar(driver.stub().events()).stream()
                             .filter(event -> "wait_again".equals(event.path(EVENT).asText())
                                     && warm.id().equals(event.path("worker").asText()))
                             .count();

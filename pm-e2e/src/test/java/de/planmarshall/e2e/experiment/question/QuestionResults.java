@@ -10,6 +10,7 @@
 package de.planmarshall.e2e.experiment.question;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -262,6 +263,92 @@ final class QuestionResults {
     }
 
     /**
+     * The lines of a file read while it may still be written ({@link #writtenLines(Path)}).
+     *
+     * @param complete the lines that end with a line break, without it
+     * @param cutOff   whether the file ends in a line without a line break that is not blank: one still being written
+     */
+    record WrittenLines(List<String> complete, boolean cutOff) {
+    }
+
+    /**
+     * The JSON lines of a file read while it may still be written ({@link #readJsonLinesSoFar(Path)}).
+     *
+     * @param nodes   the complete lines, parsed
+     * @param skipped the final lines not read: none or one
+     */
+    record JsonLinesSoFar(List<JsonNode> nodes, int skipped) {
+    }
+
+    /**
+     * Reads a file that a process or thread may be appending to at the same moment: its writer appends a line and then
+     * its line break, but a line longer than a write's buffer reaches the file in parts, so a reader may see the start
+     * of a line without its end. Only the lines up to the last line break are decoded (strictly as UTF-8, a cut may
+     * split a character); what follows it is the line still being written and is reported as {@code cutOff}, not read.
+     *
+     * @param file a file
+     * @return its complete lines and whether a cut-off line follows them; none when the file does not exist
+     * @throws IOException if it cannot be read, or its complete lines are no UTF-8
+     */
+    static WrittenLines writtenLines(Path file) throws IOException {
+        if (!Files.exists(file)) {
+            return new WrittenLines(List.of(), false);
+        }
+        var bytes = Files.readAllBytes(file);
+        var end = bytes.length;
+        while (end > 0 && bytes[end - 1] != '\n' && bytes[end - 1] != '\r') {
+            end--;
+        }
+        var cutOff = false;
+        for (var index = end; index < bytes.length && !cutOff; index++) {
+            cutOff = bytes[index] != ' ' && bytes[index] != '\t';
+        }
+        var text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes, 0, end)).toString();
+        return new WrittenLines(text.lines().toList(), cutOff);
+    }
+
+    /**
+     * Reads a JSON Lines file while its writer may still append to it, as the driver does during a run (the worker's
+     * output, the stub's event log): a final line still being written is skipped and counted, never an error. That is
+     * a final line without its line break ({@link #writtenLines(Path)}), or a final line that is no JSON. A line that
+     * is no JSON anywhere before it still fails, as in {@link #readJsonLines(Path)}, which reads a file written to the
+     * end and stays strict, so that a corrupt completed file is still reported.
+     *
+     * @param file a JSON Lines file
+     * @return its complete lines, parsed, and the number of final lines skipped; none when the file does not exist
+     * @throws IOException if it cannot be read, or a line before the last is no JSON
+     */
+    static JsonLinesSoFar readJsonLinesSoFar(Path file) throws IOException {
+        var written = writtenLines(file);
+        var lines = written.complete().stream().filter(line -> !line.isBlank()).toList();
+        var nodes = new ArrayList<JsonNode>();
+        var skipped = written.cutOff() ? 1 : 0;
+        for (var index = 0; index < lines.size(); index++) {
+            try {
+                nodes.add(QuestionStub.JSON.readTree(lines.get(index)));
+            } catch (JsonProcessingException e) {
+                if (written.cutOff() || index < lines.size() - 1) {
+                    throw e;
+                }
+                skipped++;
+            }
+        }
+        return new JsonLinesSoFar(List.copyOf(nodes), skipped);
+    }
+
+    /**
+     * @param file a JSON Lines file, read while its writer may still append to it
+     * @return its complete lines, parsed ({@link #readJsonLinesSoFar(Path)})
+     * @throws IOException if it cannot be read, or a line before the last is no JSON
+     */
+    static List<JsonNode> jsonLinesSoFar(Path file) throws IOException {
+        return readJsonLinesSoFar(file).nodes();
+    }
+
+    /**
+     * Reads a JSON Lines file written to the end: every line must be JSON. A file still being written is read with
+     * {@link #readJsonLinesSoFar(Path)} instead.
+     *
      * @param file a JSON Lines file
      * @return its lines, parsed; none when the file does not exist
      * @throws IOException if it cannot be read or a line is no JSON

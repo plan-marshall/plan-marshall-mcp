@@ -761,7 +761,7 @@ final class QuestionDriver implements AutoCloseable {
         if (exited) {
             end = new AskerEnd(asker.id(), asker.generation(), false, System.currentTimeMillis() - askedAt, false);
         } else {
-            var holding = QuestionResults.holdingWait(QuestionResults.readJsonLines(stub.events()), asker.id(),
+            var holding = QuestionResults.holdingWait(QuestionResults.jsonLinesSoFar(stub.events()), asker.id(),
                     asker.generation());
             end = new AskerEnd(asker.id(), asker.generation(), true, System.currentTimeMillis() - askedAt, holding);
             var fields = identity(asker);
@@ -877,7 +877,7 @@ final class QuestionDriver implements AutoCloseable {
     Optional<QuestionResults.Wait> awaitHold(Worker worker, long since, long untilMillis)
             throws IOException, InterruptedException {
         while (true) {
-            var held = heldWait(QuestionResults.readJsonLines(stub.events()), worker.id(), worker.generation(), since);
+            var held = heldWait(QuestionResults.jsonLinesSoFar(stub.events()), worker.id(), worker.generation(), since);
             if (held.isPresent() || !worker.process().isAlive() || System.currentTimeMillis() >= untilMillis) {
                 return held.filter(_ -> worker.process().isAlive());
             }
@@ -942,7 +942,7 @@ final class QuestionDriver implements AutoCloseable {
     Optional<CallCut> awaitCallCut(Worker worker, long since, long untilMillis, CutSetting setting)
             throws IOException, InterruptedException {
         while (true) {
-            var events = QuestionResults.readJsonLines(stub.events());
+            var events = QuestionResults.jsonLinesSoFar(stub.events());
             var cut = callCut(events, relayLines(worker.relayLog()), worker.id(), worker.generation(), since);
             if (cut.isPresent() || System.currentTimeMillis() >= untilMillis) {
                 var fields = identity(worker);
@@ -1039,15 +1039,13 @@ final class QuestionDriver implements AutoCloseable {
 
     /**
      * @param relayLog the relay's host-side log of a generation
-     * @return its lines that are JSON ({@code at}, {@code dir}, {@code line}); a line still being written is skipped
+     * @return its lines that are JSON ({@code at}, {@code dir}, {@code line}); a line still being written (the cut-off
+     *         end of the file, {@link QuestionResults#writtenLines(Path)}) or no JSON is skipped
      * @throws IOException if it cannot be read
      */
     static List<JsonNode> relayLines(Path relayLog) throws IOException {
-        if (!Files.exists(relayLog)) {
-            return List.of();
-        }
         var lines = new ArrayList<JsonNode>();
-        for (var line : Files.readAllLines(relayLog, StandardCharsets.UTF_8)) {
+        for (var line : QuestionResults.writtenLines(relayLog).complete()) {
             try {
                 if (!line.isBlank()) {
                     lines.add(QuestionStub.JSON.readTree(line));
@@ -1109,7 +1107,7 @@ final class QuestionDriver implements AutoCloseable {
      * @throws IOException if the event log cannot be read
      */
     Recovery recovery(Worker worker, String decisionId, String taskId) throws IOException {
-        var recovery = recovery(QuestionResults.readJsonLines(stub.events()), decisionId, taskId,
+        var recovery = recovery(QuestionResults.jsonLinesSoFar(stub.events()), decisionId, taskId,
                 worker.id() + "#" + worker.generation(), stub::state);
         var fields = identity(worker);
         fields.put(DECISION, decisionId);
@@ -1254,7 +1252,7 @@ final class QuestionDriver implements AutoCloseable {
      * @throws IOException if the event log cannot be read
      */
     Optional<HeldContinuation> continuedByHold(String decisionId) throws IOException {
-        var held = heldContinuation(QuestionResults.readJsonLines(stub.events()), decisionId);
+        var held = heldContinuation(QuestionResults.jsonLinesSoFar(stub.events()), decisionId);
         if (held.isPresent()) {
             var value = held.get();
             var fields = new LinkedHashMap<String, Object>();
@@ -1391,7 +1389,7 @@ final class QuestionDriver implements AutoCloseable {
         var fields = identity(worker);
         fields.put("by", by);
         fields.put("after_ms", System.currentTimeMillis() - deliveredAt);
-        var stubFirst = stubLoss(QuestionResults.readJsonLines(stub.events()), worker.id(), worker.generation(),
+        var stubFirst = stubLoss(QuestionResults.jsonLinesSoFar(stub.events()), worker.id(), worker.generation(),
                 deliveredAt);
         fields.put("first_by", stubFirst.isPresent() ? "stub" : "driver");
         stubFirst.ifPresent(event -> {
@@ -1469,7 +1467,7 @@ final class QuestionDriver implements AutoCloseable {
     Optional<JsonNode> awaitEvent(Predicate<JsonNode> match, long untilMillis)
             throws IOException, InterruptedException {
         while (true) {
-            for (var event : QuestionResults.readJsonLines(stub.events())) {
+            for (var event : QuestionResults.jsonLinesSoFar(stub.events())) {
                 if (match.test(event)) {
                     return Optional.of(event);
                 }
@@ -1545,7 +1543,7 @@ final class QuestionDriver implements AutoCloseable {
         if (known != null) {
             return Optional.of(known);
         }
-        var detail = QuestionResults.quotaDetail(stderr(worker), QuestionResults.readJsonLines(worker.output()));
+        var detail = QuestionResults.quotaDetail(stderr(worker), QuestionResults.jsonLinesSoFar(worker.output()));
         if (detail.isEmpty()) {
             return Optional.empty();
         }
@@ -1632,7 +1630,7 @@ final class QuestionDriver implements AutoCloseable {
         }
         var own = new HashSet<String>();
         var askedEarlier = false;
-        for (var event : QuestionResults.readJsonLines(stub.events())) {
+        for (var event : QuestionResults.jsonLinesSoFar(stub.events())) {
             if (matches(event, worker)) {
                 own.add(event.path(EVENT).asText());
             }
@@ -1644,7 +1642,7 @@ final class QuestionDriver implements AutoCloseable {
             return Optional.empty();
         }
         var early = new EarlyExit(worker.id(), worker.generation(), worker.process().exitValue(),
-                earlyExitDetail(stderr(worker), QuestionResults.readJsonLines(worker.output())), askedEarlier,
+                earlyExitDetail(stderr(worker), QuestionResults.jsonLinesSoFar(worker.output())), askedEarlier,
                 voter(worker.id()));
         if (earlyExits.putIfAbsent(key, early) == null) {
             var fields = identity(worker);
@@ -2314,7 +2312,7 @@ final class QuestionDriver implements AutoCloseable {
         var start = System.currentTimeMillis();
         while (worker.process().isAlive()) {
             var lastCall = 0L;
-            for (var event : QuestionResults.readJsonLines(stub.events())) {
+            for (var event : QuestionResults.jsonLinesSoFar(stub.events())) {
                 var name = event.path(EVENT).asText();
                 if (matches(event, worker) && "acknowledged".equals(name)
                         && "answer".equals(event.path("kind").asText())) {
@@ -2337,7 +2335,7 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     private boolean sawEvent(Worker worker, String name) throws IOException {
-        for (var event : QuestionResults.readJsonLines(stub.events())) {
+        for (var event : QuestionResults.jsonLinesSoFar(stub.events())) {
             if (name.equals(event.path(EVENT).asText()) && matches(event, worker)) {
                 return true;
             }
@@ -2400,17 +2398,19 @@ final class QuestionDriver implements AutoCloseable {
         return fields;
     }
 
-    /** Copies the worker's output line by line, each with its arrival time. */
+    /**
+     * Copies the worker's output line by line, each with its arrival time. Each stamped line goes to the file with its
+     * line break in a single write of an unbuffered stream, not in the chunks of a writer's buffer; a reader during the
+     * run still skips a line it meets unfinished ({@link QuestionResults#readJsonLinesSoFar}).
+     */
     private static void stamp(InputStream stream, Path output) {
         try (var reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
-             var writer = Files.newBufferedWriter(output, StandardCharsets.UTF_8, StandardOpenOption.CREATE,
-                     StandardOpenOption.APPEND)) {
+             var writer = Files.newOutputStream(output, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
             for (var line = reader.readLine(); line != null; line = reader.readLine()) {
                 var node = QuestionStub.JSON.createObjectNode();
                 node.put("at", System.currentTimeMillis());
                 node.put("line", line);
-                writer.write(QuestionStub.JSON.writeValueAsString(node));
-                writer.newLine();
+                writer.write((QuestionStub.JSON.writeValueAsString(node) + "\n").getBytes(StandardCharsets.UTF_8));
                 writer.flush();
             }
         } catch (IOException e) {
@@ -2419,13 +2419,15 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
+     * Read during the run: a stamped line still being written is skipped ({@link QuestionResults#readJsonLinesSoFar}).
+     *
      * @param output an arrival-stamped output file
      * @return its lines that are JSON, parsed
-     * @throws IOException if it cannot be read
+     * @throws IOException if it cannot be read, or a stamped line before the last is no JSON
      */
     static List<JsonNode> outputLines(Path output) throws IOException {
         var lines = new ArrayList<JsonNode>();
-        for (var stamped : QuestionResults.readJsonLines(output)) {
+        for (var stamped : QuestionResults.jsonLinesSoFar(output)) {
             try {
                 lines.add(QuestionStub.JSON.readTree(stamped.path("line").asText()));
             } catch (JsonProcessingException _) {
