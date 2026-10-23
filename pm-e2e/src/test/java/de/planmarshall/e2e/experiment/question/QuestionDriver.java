@@ -1348,7 +1348,12 @@ final class QuestionDriver implements AutoCloseable {
      * {@code lost_detected} by a millisecond). The event names who saw the loss first ({@code first_by}): the
      * {@code driver} at the deadline, or the {@code stub}, which had already released the generation's task on its
      * own, at the process's exit ({@code stub_reason}, {@code stub_event}, {@code stub_after_ms} after the delivery):
-     * the stub log then shows a reaction earlier than the deadline.
+     * the stub log then shows a reaction earlier than the deadline. On the stub of R3, which does not lose a worker at
+     * its exit ({@link QuestionStub.Settings#loseOnExit()} false), the task stays leased until this detection, which
+     * is then always the driver's. There an answer that never reached the generation, because its process exited
+     * without a held {@code pm_wait}, cannot be acknowledged or missed: once the delivery wait has passed with the
+     * process gone, the driver logs {@value #ANSWER_UNDELIVERED} and ends the generation as lost, so its task continues
+     * as the stub's loss at the exit continued it before, and no {@value #LOST_DETECTED} is logged.
      *
      * @param worker         the worker
      * @param deliveryWithin how long to wait for the delivery of the answer
@@ -1360,6 +1365,12 @@ final class QuestionDriver implements AutoCloseable {
         var delivered = awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText())
                 && matches(event, worker), System.currentTimeMillis() + deliveryWithin.toMillis());
         if (delivered.isEmpty()) {
+            if (!stub.settings().loseOnExit() && !worker.process().isAlive()) {
+                var fields = identity(worker);
+                fields.put("delivery_wait_ms", deliveryWithin.toMillis());
+                stub.event(ANSWER_UNDELIVERED, fields);
+                stub.lost(worker.id(), worker.generation(), ANSWER_UNDELIVERED);
+            }
             return false;
         }
         var deliveredAt = delivered.get().path("at").asLong();
@@ -1396,6 +1407,13 @@ final class QuestionDriver implements AutoCloseable {
 
     /** The event the driver logs when it detects a lost worker ({@link #superviseAnswer}). */
     static final String LOST_DETECTED = "lost_detected";
+
+    /**
+     * The event the driver logs, on a stub that does not lose a worker at its exit, when the answer never reached a
+     * generation whose process exited ({@link #superviseAnswer}); also the reason of the loss it then ends the
+     * generation with. It is no detection.
+     */
+    static final String ANSWER_UNDELIVERED = "answer_undelivered";
 
     /**
      * @param events     the stub log

@@ -106,8 +106,9 @@ import org.junit.jupiter.params.provider.EnumSource;
  * stopping stub refuses named as {@code generation_fenced}. Beside them R3's faults: a stop injected before the asker
  * holds {@code pm_wait}, so the answer is never delivered and nothing is detected; a call cut no host can make (a hold
  * shorter than the tool timeout, progress frames that reset it), or one counted without the cut in the logs; a second
- * resume of a task the stub already closed and continued at the resumed process's exit; and a continuation logged before
- * the detection that caused it. The recipes, corpus items, repositories and executables of these
+ * resume of a task the stub already closed and continued at the resumed process's exit; a continuation logged before
+ * the detection that caused it; and a stub of R3 that releases or continues a task at the worker's process exit, so the
+ * detection is not made by the acknowledgement, or a stub of another item that no longer does. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
  * real repository is used.
  */
@@ -3428,11 +3429,291 @@ class QuestionStubTest {
                     () -> assertTrue(limits.contains("In 1 of 2 runs with a detected loss the stub"), limits));
         }
 
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(Fault.class)
+        @DisplayName("every R3 run gets a stub that does not lose a worker at its process exit")
+        void shouldNotLoseOnExitInR3(Fault fault) {
+            var stubSettings = QuestionLoopExperiment.stubSettings(r3Plan(Host.CLAUDE, fault),
+                    directory.resolve("stub"), socket);
+
+            assertFalse(stubSettings.loseOnExit(), stubSettings.toString());
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @CsvSource({"Q1, FALLBACK", "Q2, FALLBACK", "Q3, FALLBACK", "Q4, FALLBACK", "Q5, FALLBACK", "Q6, FALLBACK",
+                "Q7, FALLBACK", "R1, HOLD", "R2, RESUME", "R4, HOLD"})
+        @DisplayName("every other item keeps the stub's loss of a worker at its process exit, and its start event "
+                + "unchanged")
+        void shouldKeepLossOnExitOutsideR3(String item, Form form) throws Exception {
+            var plan = QuestionLoopExperiment.RunPlan.of(item, 0, Host.CLAUDE, null, false, form,
+                    QuestionFixtures.probe(), "entity");
+
+            var stubSettings = QuestionLoopExperiment.stubSettings(plan, directory.resolve("stub"), socket);
+            stub = QuestionStub.start(stubSettings);
+
+            var started = first(QuestionResults.readJsonLines(stub.events()), "stub_started");
+            assertAll("the settings of " + item,
+                    () -> assertTrue(stubSettings.loseOnExit()),
+                    () -> assertTrue(Settings.of(directory.resolve("stub"), socket).loseOnExit()),
+                    () -> assertEquals(List.of("at", "nanos", EVENT, "records"), fieldNames(started)));
+        }
+
+        @ParameterizedTest(name = "lose on exit {0}")
+        @CsvSource({"true", "false"})
+        @DisplayName("the exit of a worker whose answer was delivered: the stub of R3 observes it and keeps the "
+                + "lease, every other item's stub closes the task lost and continues it, as before")
+        void shouldObserveExitWithoutLossInR3(boolean loseOnExit) throws Exception {
+            stub = QuestionStub.start(Settings.of(directory.resolve("stub"), socket)
+                    .withWindow(Duration.ofSeconds(30)).withLoseOnExit(loseOnExit));
+            var client = activeWorker(Form.HOLD);
+            client.ask("ask", validEnvelope());
+            stub.answer("Q-001", 1, List.of(answer("Q-001")));
+            var delivered = client.call("pm_wait", QuestionStub.JSON.createObjectNode());
+
+            stub.workerExited(WORKER, 1, false);
+
+            var events = QuestionResults.readJsonLines(stub.events());
+            var names = events.stream().map(event -> event.path(EVENT).asText()).toList();
+            var started = first(events, "stub_started");
+            if (loseOnExit) {
+                assertAll("the loss at the exit",
+                        () -> assertTrue(delivered.contains("state: task.answer"), delivered),
+                        () -> assertEquals(Optional.of("task.lost"), stub.state(TASK)),
+                        () -> assertEquals("exited", first(events, "lost").path("reason").asText()),
+                        () -> assertEquals(1, count(events, "continued")),
+                        () -> assertFalse(names.contains(QuestionStub.EXIT_OBSERVED), names.toString()),
+                        () -> assertTrue(started.path("lose_on_exit").isMissingNode(), started.toString()));
+            } else {
+                var observed = first(events, QuestionStub.EXIT_OBSERVED);
+                assertAll("the observation at the exit",
+                        () -> assertEquals(Optional.of("task.answer"), stub.state(TASK)),
+                        () -> assertEquals("task.answer", observed.path("leased").path(TASK).asText(),
+                                observed.toString()),
+                        () -> assertEquals(1, observed.path("generation").asInt()),
+                        () -> assertFalse(names.contains("lost"), names.toString()),
+                        () -> assertFalse(names.contains("released"), names.toString()),
+                        () -> assertFalse(names.contains("closed"), names.toString()),
+                        () -> assertFalse(names.contains("continued"), names.toString()),
+                        () -> assertFalse(started.path("lose_on_exit").asBoolean(true), started.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("the stub of R3 records a suspended task's stored session at the exit and keeps its lease; the "
+                + "resumed generation's exit leaves its task offered until its loss makes it resumable again")
+        void shouldKeepStoredSessionAtExitInR3() throws Exception {
+            stub = QuestionStub.start(Settings.of(directory.resolve("stub"), socket)
+                    .withWindow(Duration.ofSeconds(30)).withLoseOnExit(false));
+            var asked = activeWorker(Form.RESUME).ask("ask", validEnvelope());
+
+            stub.workerExited(WORKER, 1, true);
+            var suspended = stub.state(TASK);
+            stub.answer("Q-001", 1, List.of(answer("Q-001")));
+            var answered = stub.state(TASK);
+            stub.leaseAtSpawn(TASK, WORKER, 2);
+            stub.workerExited(WORKER, 2, true);
+            var afterResumedExit = stub.state(TASK);
+            stub.lost(WORKER, 2, "answer_ack_missing");
+
+            var events = QuestionResults.readJsonLines(stub.events());
+            var observed = events.stream().filter(event -> QuestionStub.EXIT_OBSERVED.equals(event.path(EVENT)
+                    .asText())).toList();
+            assertAll("the resume on the stub of R3",
+                    () -> assertTrue(asked.contains("state: task.suspended"), asked),
+                    () -> assertEquals(Optional.of("task.suspended"), suspended),
+                    () -> assertTrue(first(events, "session_stored").path("stored").asBoolean()),
+                    () -> assertEquals("task.suspended", observed.getFirst().path("leased").path(TASK).asText()),
+                    () -> assertEquals(Optional.of("task.resumable"), answered),
+                    () -> assertTrue(first(events, "answer_delivered").path("resumed").asBoolean()),
+                    () -> assertEquals("fenced", first(events, "released").path("reason").asText()),
+                    () -> assertEquals("task.offered", observed.get(1).path("leased").path(TASK).asText()),
+                    () -> assertEquals(Optional.of("task.offered"), afterResumedExit),
+                    () -> assertEquals(Optional.of("task.resumable"), stub.state(TASK)),
+                    () -> assertEquals(List.of("", "answer_ack_missing"), events.stream()
+                            .filter(event -> "resumable".equals(event.path(EVENT).asText()))
+                            .map(event -> event.path("reason").asText()).toList()),
+                    () -> assertEquals(0, count(events, "continued")));
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(value = Fault.class, names = {"MODEL_HANG", "KILL"})
+        @DisplayName("MODEL_HANG and KILL on the stub of R3: the task stays leased past the exit, the missing "
+                + "acknowledgement alone detects the loss at the deadline, never earlier, and the task continues "
+                + "once after the detection")
+        void shouldDetectByAcknowledgementOnlyInR3(Fault fault) throws Exception {
+            try (var driver = driver(false)) {
+                var worker = startAsker(driver, Form.HOLD);
+                askingClient(worker).request("pm_wait", QuestionStub.JSON.createObjectNode());
+                answerAsOperator(driver);
+                driver.awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText()),
+                        System.currentTimeMillis() + DELIVERY.toMillis());
+                driver.inject(worker, fault);
+                if (fault == Fault.KILL) {
+                    driver.awaitEvent(event -> QuestionStub.EXIT_OBSERVED.equals(event.path(EVENT).asText()),
+                            System.currentTimeMillis() + DELIVERY.toMillis()).orElseThrow();
+                }
+                var stateAfterFault = driver.stub().state(TASK);
+
+                var acknowledged = driver.superviseAnswer(worker, DELIVERY);
+                var recovery = driver.recovery(worker, "Q-001", TASK);
+                driver.awaitEvent(event -> "worker_exited".equals(event.path(EVENT).asText()),
+                        System.currentTimeMillis() + DELIVERY.toMillis()).orElseThrow();
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var lost = first(events, LOST_DETECTED);
+                var observation = QuestionResults.exitObservation(events, WORKER, 1);
+                assertAll("the detection of " + fault + " on the stub of R3",
+                        () -> assertEquals(Optional.of("task.answer"), stateAfterFault),
+                        () -> assertFalse(acknowledged),
+                        () -> assertEquals("answer_ack_missing", lost.path("by").asText()),
+                        () -> assertTrue(lost.path("after_ms").asLong() >= Host.CLAUDE.ackDeadline().toMillis(),
+                                lost.toString()),
+                        () -> assertEquals("driver", lost.path("first_by").asText(), lost.toString()),
+                        () -> assertTrue(events.indexOf(lost) < events.indexOf(first(events, "lost")),
+                                "the release precedes the detection: " + events),
+                        () -> assertTrue(events.indexOf(lost) < events.indexOf(first(events, "continued")),
+                                "the continuation precedes the detection: " + events),
+                        () -> assertEquals(1, count(events, "continued")),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.CONTINUE, recovery.step()),
+                        () -> assertEquals(fault == Fault.KILL, observation.exitAt() < lost.path("at").asLong(),
+                                observation.toString()),
+                        () -> assertTrue(fault == Fault.MODEL_HANG
+                                || observation.exitAfterDeliveryMs() < lost.path("after_ms").asLong(),
+                                observation.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("RESUMED_EXIT on the stub of R3: the resumed task stays offered past the exit, and the missing "
+                + "acknowledgement detects the loss at the deadline before the task continues")
+        void shouldDetectResumedExitByAcknowledgementInR3() throws Exception {
+            try (var driver = driver(false)) {
+                var asker = startAsker(driver, Form.RESUME);
+                askingClient(asker).request("pm_wait", QuestionStub.JSON.createObjectNode());
+                answerAsOperator(driver);
+                var resumed = driver.resume(asker, TASK, "session-1", 2);
+                driver.inject(resumed, Fault.RESUMED_EXIT);
+                driver.awaitEvent(event -> QuestionStub.EXIT_OBSERVED.equals(event.path(EVENT).asText())
+                        && event.path("generation").asInt() == 2, System.currentTimeMillis() + DELIVERY.toMillis())
+                        .orElseThrow();
+                var stateAfterExit = driver.stub().state(TASK);
+                var continuedBeforeDetection = named(driver, "continued");
+
+                var acknowledged = driver.superviseAnswer(resumed, DELIVERY);
+                var recovery = driver.recovery(resumed, "Q-001", TASK);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var lost = first(events, LOST_DETECTED);
+                assertAll("the resumed exit on the stub of R3",
+                        () -> assertEquals(Optional.of("task.offered"), stateAfterExit),
+                        () -> assertEquals(List.of(), continuedBeforeDetection),
+                        () -> assertFalse(acknowledged),
+                        () -> assertEquals("driver", lost.path("first_by").asText(), lost.toString()),
+                        () -> assertTrue(lost.path("after_ms").asLong() >= Host.CLAUDE.ackDeadline().toMillis(),
+                                lost.toString()),
+                        () -> assertTrue(events.indexOf(lost) < events.indexOf(first(events, "continued")),
+                                events.toString()),
+                        () -> assertEquals(1, count(events, "continued")),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.CONTINUE, recovery.step()),
+                        () -> assertEquals(CONTINUATION, recovery.task()));
+            }
+        }
+
+        @ParameterizedTest(name = "lose on exit {0}")
+        @CsvSource({"true", "false"})
+        @DisplayName("an asker that exits without a held pm_wait never gets its answer: the stub of R3 has the driver "
+                + "end it after the delivery wait, without a detection; every other item's stub at the exit, as "
+                + "before")
+        void shouldContinueUndeliveredAnswerAfterExit(boolean loseOnExit) throws Exception {
+            try (var driver = driver(loseOnExit)) {
+                var worker = startAsker(driver, Form.HOLD);
+                askingClient(worker);
+                answerAsOperator(driver);
+                driver.inject(worker, Fault.KILL);
+                driver.awaitEvent(event -> "worker_exited".equals(event.path(EVENT).asText()),
+                        System.currentTimeMillis() + DELIVERY.toMillis()).orElseThrow();
+                Thread.sleep(200);
+
+                var acknowledged = driver.superviseAnswer(worker, Duration.ofMillis(500));
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var names = events.stream().map(event -> event.path(EVENT).asText()).toList();
+                assertAll("the undelivered answer",
+                        () -> assertFalse(acknowledged),
+                        () -> assertFalse(names.contains(LOST_DETECTED), names.toString()),
+                        () -> assertEquals(!loseOnExit, names.contains(QuestionDriver.ANSWER_UNDELIVERED),
+                                names.toString()),
+                        () -> assertEquals(loseOnExit ? "exited" : QuestionDriver.ANSWER_UNDELIVERED,
+                                first(events, "lost").path("reason").asText()),
+                        () -> assertEquals(Optional.of("task.lost"), driver.stub().state(TASK)),
+                        () -> assertEquals(1, count(events, "continued")));
+            }
+        }
+
+        @Test
+        @DisplayName("the result of R3 reports per run the exit observation beside the detection, and its limits say "
+                + "that the stub did not react to the exit; criterion and verdict logic unchanged")
+        void shouldReportExitObservation() {
+            var killed = new QuestionResults.RunView(run(Map.of("fault", "KILL")), List.of(
+                    logEvent(1_000L, "answer_delivered", Map.of("task", TASK)),
+                    logEvent(1_250L, "worker_exited", Map.of("exit", 137)),
+                    logEvent(16_100L, LOST_DETECTED, Map.of("by", "answer_ack_missing", "after_ms", 15_100,
+                            "first_by", "driver"))), List.of(), List.of());
+            var hung = new QuestionResults.RunView(run(Map.of("fault", "MODEL_HANG")), List.of(
+                    logEvent(1_000L, "answer_delivered", Map.of("task", TASK)),
+                    logEvent(16_000L, LOST_DETECTED, Map.of("by", "answer_ack_missing", "after_ms", 15_000,
+                            "first_by", "driver")),
+                    logEvent(16_400L, "worker_exited", Map.of("exit", 143))), List.of(), List.of());
+            var undetected = new QuestionResults.RunView(run(Map.of("fault", "KILL")), List.of(
+                    logEvent(500L, QuestionDriver.FAULT_INJECTED, Map.of("fault", "KILL")),
+                    logEvent(600L, "worker_exited", Map.of("exit", 137))), List.of(), List.of());
+            var group = QuestionStub.JSON.createObjectNode();
+            var result = QuestionStub.JSON.createObjectNode();
+
+            QuestionResults.exitObservations(List.of(killed, hung, undetected), group);
+            QuestionResults.limitsOfR3(result, List.of(run(Map.of("fault", "KILL",
+                    QuestionResults.STUB_LOSE_ON_EXIT, false)), run(Map.of("fault", "KILL"))));
+
+            var figures = group.path(QuestionResults.EXIT_OBSERVATION);
+            var runs = figures.path("runs");
+            var limits = result.path("limits").toString();
+            assertAll("the exit observation",
+                    () -> assertEquals(250, runs.get(0).path("exit_observed_after_delivery_ms").asLong()),
+                    () -> assertEquals(15_100, runs.get(0).path("detection_after_ms").asLong()),
+                    () -> assertTrue(runs.get(0).path("exit_before_detection").asBoolean()),
+                    () -> assertEquals(15_400, runs.get(1).path("exit_observed_after_delivery_ms").asLong()),
+                    () -> assertFalse(runs.get(1).path("exit_before_detection").asBoolean(true)),
+                    () -> assertTrue(runs.get(2).path("exit_observed_after_delivery_ms").isNull()),
+                    () -> assertTrue(runs.get(2).path("detection_after_ms").isNull()),
+                    () -> assertEquals(2, figures.path("exits_observed").asInt()),
+                    () -> assertEquals(1, figures.path("exits_before_detection").asInt()),
+                    () -> assertEquals(15_100, figures.path("detection_after_ms_median_with_exit").asLong()),
+                    () -> assertTrue(limits.contains("The stub did not react to a worker's process exit in R3"),
+                            limits),
+                    () -> assertTrue(limits.contains("Exit detection itself was measured in Part A"), limits),
+                    () -> assertTrue(limits.contains("Runs with this stub: 1 of 2"), limits),
+                    () -> assertEquals("Every fault detected by the missing answer acknowledgement within the host's "
+                            + "acknowledgement deadline (by silence where the acknowledgement is informational), never "
+                            + "earlier; the task then resumed or offered again with facts.answers exactly once.",
+                            QuestionResults.CRITERIA.get("R3")));
+        }
+
         private QuestionDriver driver() throws IOException {
-            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(WINDOW);
+            return driver(true);
+        }
+
+        private QuestionDriver driver(boolean loseOnExit) throws IOException {
+            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(WINDOW)
+                    .withLoseOnExit(loseOnExit);
             return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
                     directory.resolve("workers"), directory.resolve("run"),
                     List.of(script(directory.resolve("pm-exec"), "exec sleep 60").toString())));
+        }
+
+        private static List<String> fieldNames(JsonNode node) {
+            var names = new ArrayList<String>();
+            node.properties().forEach(entry -> names.add(entry.getKey()));
+            return names;
         }
 
         /** Queues the task, leases it to generation 1 and starts its fake process. */

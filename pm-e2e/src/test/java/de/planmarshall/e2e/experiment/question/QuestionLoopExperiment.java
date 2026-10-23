@@ -131,7 +131,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * the launch of the continuation. A model that does not end its turn after the ask is a finding of the run, not of
  * the server ({@link QuestionResults#limitOfQ7}).
  * <p>
- * R3 injects each fault where the criterion places it ({@link Fault}). The stop before the answer comes once the stub
+ * R3 injects each fault where the criterion places it ({@link Fault}), on a stub that does not lose a worker at its
+ * process exit ({@link #stubSettings}): the exit is logged as an observation ({@value QuestionStub#EXIT_OBSERVED}) and
+ * the task stays leased until the driver detects the missing acknowledgement, the only detection R3 measures; exit
+ * detection itself was measured in Part A. The stop before the answer comes once the stub
  * shows the asker holding {@code pm_wait} after its ask ({@link QuestionDriver#stopWhileHolding}); an asker that never
  * holds is not stopped and its run says so. The call cut is made by the host, never simulated: the held call gets no
  * progress frame and the operator answers {@link QuestionDriver#CALL_CUT_MARGIN} after the host's cut, which is a
@@ -688,7 +691,11 @@ class QuestionLoopExperiment {
      * every 5 s. A {@link Fault#CALL_CUT} run gets the window of its cut setting
      * ({@link QuestionDriver.CutSetting#window(Host)}) and no progress frame on a held call
      * ({@link QuestionDriver.CutSetting#noProgress(Duration)}), because Claude Code and OpenCode reset their timeout on
-     * progress (evaluation, Worker Parameters per Host).
+     * progress (evaluation, Worker Parameters per Host). Every run of R3 gets a stub that does not lose a worker at its
+     * process exit ({@link QuestionStub.Settings#loseOnExit()} false): the exit is logged as an observation and the
+     * task stays leased until the driver detects the missing acknowledgement, so the acknowledgement is the only
+     * detection R3 measures (operator decision of 2026-10-23, taken by the orchestrator on the criterion text). Every
+     * other item keeps the stub's loss at the exit.
      *
      * @param plan    the planned run
      * @param stubDir the stub directory
@@ -698,12 +705,12 @@ class QuestionLoopExperiment {
     static QuestionStub.Settings stubSettings(RunPlan plan, Path stubDir, Path socket) {
         var settings = QuestionStub.Settings.of(stubDir, socket).withWindow(plan.host().boundedWait())
                 .withQuorums("vote".equals(plan.kind()) ? QUORUMS : Map.of());
-        if (plan.fault() != Fault.CALL_CUT) {
-            return settings;
+        if (plan.fault() == Fault.CALL_CUT) {
+            var window = QuestionDriver.cutSetting(plan.host()).window(plan.host());
+            settings = new QuestionStub.Settings(settings.directory(), settings.socket(), window,
+                    QuestionDriver.CutSetting.noProgress(window), settings.questionBound(), settings.quorums());
         }
-        var window = QuestionDriver.cutSetting(plan.host()).window(plan.host());
-        return new QuestionStub.Settings(settings.directory(), settings.socket(), window,
-                QuestionDriver.CutSetting.noProgress(window), settings.questionBound(), settings.quorums());
+        return "R3".equals(plan.item()) ? settings.withLoseOnExit(false) : settings;
     }
 
     /**
@@ -901,6 +908,9 @@ class QuestionLoopExperiment {
         var stubSettings = stubSettings(plan, stubDir, Path.of("/tmp", "pmq-" + suffix + ".sock"));
         var record = runRecord(plan, stubDir);
         record.put(QuestionResults.INVOCATION, invocation);
+        if (!stubSettings.loseOnExit()) {
+            record.put(QuestionResults.STUB_LOSE_ON_EXIT, false);
+        }
         try (var driver = QuestionDriver.start(stubSettings, new QuestionDriver.Settings(plan.host(), plan.model(),
                      base.resolve("workers"), config.results().resolve("runs").resolve(id), config.exec(),
                      config.openCodeDataHome()))) {
@@ -1187,12 +1197,17 @@ class QuestionLoopExperiment {
          * Records the first loss the driver detected in the run ({@value QuestionDriver#LOST_DETECTED} of the
          * generation): by what ({@code loss_by}), after how long ({@code loss_after_ms}), and who saw it first
          * ({@code loss_first_by}: the {@code driver} at the acknowledgement deadline, or the {@code stub} at the
-         * process's exit, with {@code loss_stub_reason} and {@code loss_stub_after_ms}).
+         * process's exit, with {@code loss_stub_reason} and {@code loss_stub_after_ms}). A run with a fault (R3) also
+         * records, next to the detection time ({@code loss_detected_at}), the time the generation's process exit was
+         * observed ({@code loss_exit_observed_at}, the driver's {@code worker_exited}) and its milliseconds after the
+         * delivery of the answer ({@code loss_exit_observed_after_ms}), each {@code null} without an exit before the
+         * record is written.
          *
          * @return whether the driver detected a loss of the generation
          */
         private boolean recordLoss(Worker worker) throws IOException {
-            var detected = QuestionResults.readJsonLines(driver.stub().events()).stream()
+            var events = QuestionResults.readJsonLines(driver.stub().events());
+            var detected = events.stream()
                     .filter(event -> QuestionDriver.LOST_DETECTED.equals(event.path(EVENT).asText())
                             && worker.id().equals(event.path("worker").asText())
                             && worker.generation() == event.path("generation").asInt())
@@ -1207,6 +1222,13 @@ class QuestionLoopExperiment {
                 record.put("loss_first_by", event.path("first_by").asText());
                 record.put("loss_stub_reason", event.path("stub_reason").asText(""));
                 record.put("loss_stub_after_ms", event.path("stub_after_ms").asLong(-1));
+                if (plan.fault() != null) {
+                    var observation = QuestionResults.exitObservation(events, worker.id(), worker.generation());
+                    record.put("loss_detected_at", event.path("at").asLong());
+                    record.set("loss_exit_observed_at", QuestionStub.JSON.valueToTree(observation.exitAt()));
+                    record.set("loss_exit_observed_after_ms",
+                            QuestionStub.JSON.valueToTree(observation.exitAfterDeliveryMs()));
+                }
             }
             return true;
         }

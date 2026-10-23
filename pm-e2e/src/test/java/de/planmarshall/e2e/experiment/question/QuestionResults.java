@@ -1136,6 +1136,9 @@ final class QuestionResults {
         if ("R2".equals(item)) {
             restartBreakdown(views, group);
         }
+        if ("R3".equals(item)) {
+            exitObservations(views, group);
+        }
         var pass = judge(item, views, group);
         group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
         var withoutQuota = new ArrayList<RunView>();
@@ -2383,11 +2386,118 @@ final class QuestionResults {
     static final String CALL_CUT_FIELD = "call_cut";
 
     /**
+     * The field of a run record whose stub did not lose a worker at its process exit
+     * ({@link QuestionStub.Settings#loseOnExit()} false, every R3 run from 2026-10-23); absent otherwise.
+     */
+    static final String STUB_LOSE_ON_EXIT = "stub_lose_on_exit";
+
+    /**
+     * The R3 group figure of the exit observations ({@link #exitObservations}): per run the time from the delivery of
+     * the answer to the observed exit of the generation's process and, where it has one, the time of the detection by
+     * the acknowledgement; an additional figure, no verdict reads it.
+     */
+    static final String EXIT_OBSERVATION = "exit_observation";
+
+    /**
+     * When a generation's answer was delivered and its process exit observed, from a stub log
+     * ({@link #exitObservation(List, String, int)}).
+     *
+     * @param deliveredAt         its first {@code answer_delivered} (epoch milliseconds), {@code null} without one
+     * @param exitAt              its first {@code worker_exited}, the driver's observation of the exit (epoch
+     *                            milliseconds), {@code null} without one
+     * @param exitAfterDeliveryMs the milliseconds from the delivery to the exit (negative for an exit before the
+     *                            delivery), {@code null} without either
+     */
+    record ExitObservation(Long deliveredAt, Long exitAt, Long exitAfterDeliveryMs) {
+    }
+
+    /**
+     * @param events     a stub log
+     * @param worker     a worker
+     * @param generation its generation
+     * @return when the generation's answer was delivered and its process exit observed
+     */
+    static ExitObservation exitObservation(List<JsonNode> events, String worker, int generation) {
+        var delivered = firstAt(events, "answer_delivered", worker, generation);
+        var exited = firstAt(events, "worker_exited", worker, generation);
+        return new ExitObservation(delivered, exited, delivered == null || exited == null ? null
+                : exited - delivered);
+    }
+
+    private static Long firstAt(List<JsonNode> events, String name, String worker, int generation) {
+        return events.stream().filter(event -> name.equals(event.path(EVENT).asText())
+                && same(event, worker, generation)).findFirst().map(event -> event.path("at").asLong()).orElse(null);
+    }
+
+    /**
+     * Adds {@value #EXIT_OBSERVATION} to an R3 group, for each run the generation the driver detected as lost
+     * ({@code lost_detected}), else the one the fault was injected into: the milliseconds from the delivery of its
+     * answer to its observed process exit ({@code exit_observed_after_delivery_ms}), the detection's milliseconds after
+     * the delivery and by what ({@code detection_after_ms}, {@code detection_by}), and whether the exit was observed
+     * before the detection; the group sums the exits observed, the exits before the detection, the median of the exit
+     * times, and the median detection time of the runs with an exit. An additional figure: the verdict logic of R3 is
+     * unchanged.
+     *
+     * @param views the group's runs
+     * @param group the group
+     */
+    static void exitObservations(List<RunView> views, ObjectNode group) {
+        var node = group.putObject(EXIT_OBSERVATION);
+        var perRun = QuestionStub.JSON.createArrayNode();
+        var exitTimes = new ArrayList<Long>();
+        var detectionsWithExit = new ArrayList<Long>();
+        var exitsBeforeDetection = 0;
+        for (var view : views) {
+            var figures = perRun.addObject();
+            figures.put("run", view.run().has("stub_dir") ? runId(view.run()) : "");
+            var detection = view.named(QuestionDriver.LOST_DETECTED).stream().findFirst();
+            var subject = detection.or(() -> view.named(QuestionDriver.FAULT_INJECTED).stream().findFirst());
+            if (subject.isEmpty()) {
+                figures.putNull(WORKER);
+                figures.putNull("exit_observed_after_delivery_ms");
+                figures.putNull("detection_after_ms");
+                continue;
+            }
+            var worker = subject.get().path(WORKER).asText();
+            var generation = subject.get().path(GENERATION).asInt();
+            var observation = exitObservation(view.events(), worker, generation);
+            figures.put(WORKER, worker);
+            figures.put(GENERATION, generation);
+            putOrNull(figures, "exit_observed_after_delivery_ms", observation.exitAfterDeliveryMs());
+            putOrNull(figures, "detection_after_ms", detection.map(event -> event.path("after_ms").asLong())
+                    .orElse(null));
+            if (detection.isPresent()) {
+                figures.put("detection_by", detection.get().path("by").asText());
+            } else {
+                figures.putNull("detection_by");
+            }
+            if (observation.exitAfterDeliveryMs() != null) {
+                exitTimes.add(observation.exitAfterDeliveryMs());
+            }
+            if (observation.exitAt() != null && detection.isPresent()) {
+                detectionsWithExit.add(detection.get().path("after_ms").asLong());
+                var before = observation.exitAt() < detection.get().path("at").asLong();
+                figures.put("exit_before_detection", before);
+                exitsBeforeDetection += before ? 1 : 0;
+            } else {
+                figures.putNull("exit_before_detection");
+            }
+        }
+        node.put("exits_observed", exitTimes.size());
+        node.put("exits_before_detection", exitsBeforeDetection);
+        node.put("exit_observed_after_delivery_ms_median", median(exitTimes));
+        node.put("detection_after_ms_median_with_exit", median(detectionsWithExit));
+        node.set(RUNS, perRun);
+    }
+
+    /**
      * Adds the limits of R3 to its result: how each fault is produced, per host for the call cut, and how many runs
      * had it as specified (the stop injected while the asker held {@code pm_wait}; the held call cut by the host), and
      * in how many runs with a detected loss the stub had released the task at the worker's exit, before the
      * acknowledgement deadline ({@code loss_first_by: stub}). Records of runs before 2026-10-23 carry none of these
-     * fields and count as not held, not cut, and not first seen by the stub.
+     * fields and count as not held, not cut, and not first seen by the stub. A last limit states that the stub of R3
+     * does not react to a worker's process exit ({@value #STUB_LOSE_ON_EXIT}), that exit detection was measured in
+     * Part A, and in how many runs the stub ran so.
      *
      * @param result the result of R3
      * @param runs   its run records
@@ -2424,6 +2534,18 @@ final class QuestionResults {
                 .count() + " of " + losses.size() + " runs with a detected loss the stub had already released the "
                 + "task at the worker's exit, before the acknowledgement deadline (lost_detected first_by stub, with "
                 + "stub_reason and stub_after_ms): their stub log shows a reaction earlier than the deadline.");
+        limit(result, "The stub did not react to a worker's process exit in R3 (" + STUB_LOSE_ON_EXIT + " false, from "
+                + "2026-10-23): it logged the exit as an observation (" + QuestionStub.EXIT_OBSERVED + ") and closed, "
+                + "released or continued no task at it, so the task stayed leased until the driver detected the "
+                + "missing answer acknowledgement at the host's deadline (by silence where the acknowledgement is "
+                + "informational). Exit detection itself was measured in Part A (evaluation.adoc: 205 to 302 ms on "
+                + "Claude Code). Where the answer never reached a generation whose process had exited without a held "
+                + "pm_wait, the driver ended the generation after its delivery wait (" + QuestionDriver.ANSWER_UNDELIVERED
+                + "), no detection. " + EXIT_OBSERVATION + " reports per run the time from the delivery to the exit "
+                + "observation and the detection time, additional figures; the verdict logic is unchanged. Runs with "
+                + "this stub: " + runs.stream().filter(run -> run.has(STUB_LOSE_ON_EXIT)
+                        && !run.path(STUB_LOSE_ON_EXIT).asBoolean(true)).count() + " of " + runs.size()
+                + "; the stub of the others, recorded before it, lost the worker at its exit.");
     }
 
     private static boolean r3(List<RunView> views, ObjectNode group) {

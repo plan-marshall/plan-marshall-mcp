@@ -100,6 +100,11 @@ final class QuestionStub implements AutoCloseable {
     static final String VOTE_PREFIX = "vote-";
     /** The reason a held {@code pm_wait} is refused with when the stub stops (also the stop of a restart). */
     static final String STUB_STOPPED = "stub_stopped";
+    /**
+     * The event a stub that does not lose a worker at its process exit ({@link Settings#loseOnExit()} false) logs at
+     * that exit: the observation, with the tasks still leased to the generation and their states.
+     */
+    static final String EXIT_OBSERVED = "exit_observed";
 
     private static final Set<String> DECISION_KINDS = Set.of("interpretation", "approach", "granularity",
             "placement", "test_strategy", "scope", "product_behaviour", "assurance", "external_fact");
@@ -273,15 +278,35 @@ final class QuestionStub implements AutoCloseable {
      * @param progressEvery the interval of progress frames on a wait that carries a progress token
      * @param questionBound the question bound
      * @param quorums       the quorum declaration per decision kind; a kind without one is {@code ask}
+     * @param loseOnExit    whether a worker's process exit ends the generation as lost
+     *                      ({@link QuestionStub#workerExited}): {@code true} for every item but R3; in R3
+     *                      ({@code false}) the exit is only observed ({@value QuestionStub#EXIT_OBSERVED}) and the
+     *                      task stays leased until the driver's supervision detects
+     *                      the missing acknowledgement, so the acknowledgement is the only detection R3 measures
      */
     record Settings(Path directory, Path socket, Duration window, Duration progressEvery, int questionBound,
-    Map<String, Quorum> quorums) {
+    Map<String, Quorum> quorums, boolean loseOnExit) {
+
+        /**
+         * Settings that lose a worker at its process exit, as every item but R3 runs.
+         *
+         * @param directory     the stub directory
+         * @param socket        the socket
+         * @param window        the bounded wait of {@code pm_wait}
+         * @param progressEvery the interval of progress frames
+         * @param questionBound the question bound
+         * @param quorums       the quorum declaration per decision kind
+         */
+        Settings(Path directory, Path socket, Duration window, Duration progressEvery, int questionBound,
+                Map<String, Quorum> quorums) {
+            this(directory, socket, window, progressEvery, questionBound, quorums, true);
+        }
 
         /**
          * @param directory the stub directory
          * @param socket    the socket
          * @return the settings with the bounded wait of Claude Code and OpenCode ({@code 240 s}), progress every
-         *         {@code 5 s}, the compiled question bound and no quorum
+         *         {@code 5 s}, the compiled question bound, no quorum, and the loss of a worker at its process exit
          */
         static Settings of(Path directory, Path socket) {
             return new Settings(directory, socket, Duration.ofSeconds(240), Duration.ofSeconds(5), QUESTION_BOUND,
@@ -289,15 +314,20 @@ final class QuestionStub implements AutoCloseable {
         }
 
         Settings withWindow(Duration value) {
-            return new Settings(directory, socket, value, progressEvery, questionBound, quorums);
+            return new Settings(directory, socket, value, progressEvery, questionBound, quorums, loseOnExit);
         }
 
         Settings withQuestionBound(int value) {
-            return new Settings(directory, socket, window, progressEvery, value, quorums);
+            return new Settings(directory, socket, window, progressEvery, value, quorums, loseOnExit);
         }
 
         Settings withQuorums(Map<String, Quorum> value) {
-            return new Settings(directory, socket, window, progressEvery, questionBound, Map.copyOf(value));
+            return new Settings(directory, socket, window, progressEvery, questionBound, Map.copyOf(value),
+                    loseOnExit);
+        }
+
+        Settings withLoseOnExit(boolean value) {
+            return new Settings(directory, socket, window, progressEvery, questionBound, quorums, value);
         }
     }
 
@@ -461,7 +491,12 @@ final class QuestionStub implements AutoCloseable {
         server.bind(UnixDomainSocketAddress.of(settings.socket()));
         var stub = new QuestionStub(settings, server);
         stub.replay();
-        stub.event("stub_started", Map.of("records", stub.decisions.size()));
+        var started = new LinkedHashMap<String, Object>();
+        started.put("records", stub.decisions.size());
+        if (!settings.loseOnExit()) {
+            started.put("lose_on_exit", false);
+        }
+        stub.event("stub_started", started);
         Thread.ofPlatform().daemon().name("question-stub-accept").start(stub::acceptLoop);
         return stub;
     }
@@ -583,7 +618,8 @@ final class QuestionStub implements AutoCloseable {
 
     /**
      * Reports a worker process that exited: a suspended task keeps its stored session; every other lease of the
-     * generation is handled as a lost worker's.
+     * generation is handled as a lost worker's. A stub that does not lose a worker at its exit
+     * ({@link Settings#loseOnExit()} false, the R3 runs) only observes it ({@link #observeExit}).
      *
      * @param worker        the worker
      * @param generation    its generation
@@ -593,6 +629,10 @@ final class QuestionStub implements AutoCloseable {
         lock.lock();
         try {
             var key = worker + "#" + generation;
+            if (!settings.loseOnExit()) {
+                observeExit(key, worker, generation, sessionStored);
+                return;
+            }
             for (var task : List.copyOf(tasks.values())) {
                 if (task.leasedTo(key) && STATE_SUSPENDED.equals(task.state)) {
                     task.worker = null;
@@ -603,6 +643,37 @@ final class QuestionStub implements AutoCloseable {
             lost(worker, generation, "exited");
         } finally {
             lock.unlock();
+        }
+    }
+
+    /**
+     * The exit of a worker's process as the stub of R3 sees it: logged as {@value #EXIT_OBSERVED} with the tasks still
+     * leased to the generation and their states, and nothing else. No task is closed, released or continued, so a task
+     * whose answer was delivered stays leased until the driver's supervision detects the missing acknowledgement (or
+     * silence where the acknowledgement is informational) and ends the generation ({@link #lost}); the
+     * acknowledgement is then the only detection, as R3 measures it. A suspended task records whether its session was
+     * stored ({@code session_stored}), as at every exit, keeping its lease: the next generation's fence releases it.
+     * Before 2026-10-23 the stub of R3 lost the generation at the exit, about 15 s before the driver's detection, so the
+     * detection was not made by the acknowledgement (R3 smoke attempt, runs {@code 8a799961}, {@code f8d38a77},
+     * {@code 153d88f2}, fault {@code KILL}, and {@code cc787dd3}, fault {@code RESUMED_EXIT}).
+     */
+    private void observeExit(String key, String worker, int generation, boolean sessionStored) {
+        var leased = new LinkedHashMap<String, String>();
+        var suspended = new ArrayList<Task>();
+        for (var task : tasks.values()) {
+            if (task.leasedTo(key)) {
+                leased.put(task.spec.taskId(), task.state);
+                if (STATE_SUSPENDED.equals(task.state)) {
+                    suspended.add(task);
+                }
+            }
+        }
+        var fields = identity(worker, generation);
+        fields.put("leased", leased);
+        event(EXIT_OBSERVED, fields);
+        for (var task : suspended) {
+            task.sessionStored = sessionStored;
+            event("session_stored", Map.of(TASK, task.spec.taskId(), "stored", sessionStored));
         }
     }
 
