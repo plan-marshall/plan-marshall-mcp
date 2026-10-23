@@ -68,6 +68,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -83,7 +84,8 @@ import org.junit.jupiter.params.provider.EnumSource;
  * twice, so Q7 measured the stub instead of the loop (PM-WF-12); a continuing task without {@code facts.answers}, so
  * Q4 measured a worker that never saw its answer; and an ask link offered beyond the question bound, so Q5 never
  * reached the bound. Beside the stub: a scenario recipe read into a fixture with an invented check, or another recipe
- * than the two large ones used, so R4 measured work nobody chose; a checkout that changes the local clone; and
+ * than the two large ones used, so R4 measured work nobody chose; a checkout that changes the local clone, or that
+ * cannot reach a start commit the clone holds but none of its refs contains; and
  * Antigravity's tokens read as 0 or its missing-session resume, which starts a new conversation, counted as hung or as
  * failed. Beside them the launch: Claude Code or OpenCode handed to {@code pm-exec} by a bare name, which it refuses;
  * a worker that fails to launch noticed only at the run's deadline, or one killed by an injected fault, or one whose
@@ -110,7 +112,8 @@ import org.junit.jupiter.params.provider.EnumSource;
  * the detection that caused it; and a stub of R3 that releases or continues a task at the worker's process exit, so the
  * detection is not made by the acknowledgement, or a stub of another item that no longer does. The recipes, corpus items, repositories and executables of these
  * tests ({@code pm-exec} and the harness are shell scripts) are written by the tests; no network, model, harness or
- * real repository is used.
+ * real repository is used, except by the real scenario checkout, which runs only when its property names a scenario
+ * and only reads the operator's checkouts.
  */
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 @DisplayName("QuestionStub: the question loop of a worker without a model")
@@ -1958,16 +1961,47 @@ class QuestionStubTest {
         }
 
         @Test
-        @DisplayName("a start commit the local clone cannot give is a setup failure with the first line of git's "
+        @DisplayName("checks out a start commit that no ref of the clone contains, through the clone's object store, "
+                + "without changing the clone")
+        void shouldCheckOutUnreferencedCommit() throws Exception {
+            var clone = Files.createDirectories(directory.resolve("clones").resolve(REPOSITORY));
+            QuestionFixtures.git(null, "init", "--quiet", clone.toString());
+            QuestionFixtures.git(clone, "config", "gc.auto", "0");
+            var first = commit(clone, "one");
+            var unreferenced = danglingCommit(clone, first, "two");
+            var before = snapshot(clone);
+            var worker = directory.resolve("worker");
+
+            QuestionFixtures.prepare(new QuestionFixtures.Fixture("q-demo", "large", "", "", null, false,
+                    new QuestionFixtures.Checkout(clone, unreferenced)), worker);
+            var head = QuestionFixtures.git(worker, "rev-parse", "HEAD").strip();
+            var content = Files.readString(worker.resolve("file.txt"));
+            var log = QuestionFixtures.git(worker, "log", "--format=%H");
+            var status = QuestionFixtures.git(worker, "status", "--porcelain");
+            var workerCommit = commit(worker, "three");
+
+            assertAll("the checkout",
+                    () -> assertEquals("", QuestionFixtures.git(clone, "for-each-ref", "--contains", unreferenced)),
+                    () -> assertEquals(unreferenced, head),
+                    () -> assertEquals("two", content),
+                    () -> assertEquals(List.of(unreferenced, first), log.lines().toList()),
+                    () -> assertEquals("?? " + QuestionFixtures.CANARY_FILE + "\n", status),
+                    () -> assertThrows(QuestionFixtures.GitFailure.class,
+                            () -> QuestionFixtures.git(clone, "cat-file", "-e", workerCommit)),
+                    () -> assertEquals("one", Files.readString(clone.resolve("file.txt"))),
+                    () -> assertEquals(before, snapshot(clone)));
+        }
+
+        @Test
+        @DisplayName("a start commit no object store holds is a setup failure with the first line of git's "
                 + "output, before any worker launches")
         void shouldFailSetupWithoutStartCommit() throws Exception {
             var clone = Files.createDirectories(directory.resolve("clones").resolve(REPOSITORY));
             QuestionFixtures.git(null, "init", "--quiet", clone.toString());
             commit(clone, "one");
-            QuestionFixtures.git(clone, "checkout", "--quiet", "-b", "gone");
-            var unreachable = commit(clone, "two");
-            QuestionFixtures.git(clone, "checkout", "--quiet", "-");
-            QuestionFixtures.git(clone, "branch", "--quiet", "-D", "gone");
+            var elsewhere = Files.createDirectories(directory.resolve("elsewhere"));
+            QuestionFixtures.git(null, "init", "--quiet", elsewhere.toString());
+            var unreachable = commit(elsewhere, "two");
             var fixture = new QuestionFixtures.Fixture("q-demo", "large", "", "", null, false,
                     new QuestionFixtures.Checkout(clone, unreachable));
             var worker = directory.resolve("worker");
@@ -2047,6 +2081,49 @@ class QuestionStubTest {
             var file = source.root().resolve(path);
             Files.createDirectories(file.getParent());
             Files.writeString(file, QuestionStub.JSON.writeValueAsString(content));
+        }
+    }
+
+    /**
+     * The real case, read only and off by default: {@code -Dpm.experiment.checkout-check=<scenario id>} prepares the
+     * worker directory of that scenario from the operator's telemetry checkout and local clone (the defaults of
+     * {@link QuestionLoopExperiment}, {@code pm.experiment.telemetry}, {@code pm.experiment.telemetry.ref} and
+     * {@code pm.experiment.clones} override them) in a temporary directory and checks that it is at the start commit
+     * and the clone is unchanged. No model, no worker and no measured run; its assertions name no scenario content.
+     */
+    @Nested
+    @DisplayName("real scenario checkout (-Dpm.experiment.checkout-check=<scenario id>)")
+    @EnabledIfSystemProperty(named = "pm.experiment.checkout-check", matches = ".+")
+    class RealScenarioCheckout {
+
+        @Test
+        @Timeout(value = 10, unit = TimeUnit.MINUTES)
+        @DisplayName("prepares the scenario's worker directory at its start commit without changing the clone")
+        void shouldPrepareRealScenario() throws Exception {
+            var root = Path.of("").toAbsolutePath().getParent();
+            var siblings = QuestionFixtures.siblingRepositories(root);
+            var telemetry = Path.of(System.getProperty("pm.experiment.telemetry",
+                    siblings.resolve("plan-marshall-telemetry").toString()));
+            var clones = Path.of(System.getProperty("pm.experiment.clones", siblings.toString()));
+            var source = QuestionFixtures.telemetry(telemetry,
+                    System.getProperty("pm.experiment.telemetry.ref", QuestionFixtures.TELEMETRY_REF));
+            var fixture = QuestionFixtures.scenario(source, System.getProperty("pm.experiment.checkout-check"),
+                    clones);
+            var clone = fixture.checkout().localClone();
+            var before = snapshot(clone);
+            var worker = directory.resolve("worker");
+
+            QuestionFixtures.prepare(fixture, worker);
+            var head = QuestionFixtures.git(worker, "rev-parse", "HEAD").strip();
+            var start = QuestionFixtures.git(worker, "rev-parse", fixture.checkout().commit() + "^{commit}").strip();
+            var status = QuestionFixtures.git(worker, "status", "--porcelain");
+            var after = snapshot(clone);
+
+            assertAll("the real checkout",
+                    () -> assertTrue(start.equals(head), "the worker directory is not at the start commit"),
+                    () -> assertTrue(("?? " + QuestionFixtures.CANARY_FILE + "\n").equals(status),
+                            "the worker directory is not a clean checkout beside the canary"),
+                    () -> assertTrue(before.equals(after), "the local clone changed"));
         }
     }
 
@@ -4168,6 +4245,35 @@ class QuestionStubTest {
         QuestionFixtures.git(repository, "-c", "user.name=test", "-c", "user.email=test@example.org", "-c",
                 "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", content);
         return QuestionFixtures.git(repository, "rev-parse", "HEAD").strip();
+    }
+
+    /**
+     * Writes a commit object on top of {@code parent} that no ref, no reflog and no index of the repository names, and
+     * resets the working tree and index to {@code HEAD}: only the object remains.
+     */
+    private static String danglingCommit(Path repository, String parent, String content) throws IOException {
+        Files.writeString(repository.resolve("file.txt"), content);
+        QuestionFixtures.git(repository, "add", "file.txt");
+        var tree = QuestionFixtures.git(repository, "write-tree").strip();
+        var commit = QuestionFixtures.git(repository, "-c", "user.name=test", "-c", "user.email=test@example.org",
+                "commit-tree", tree, "-p", parent, "-m", content).strip();
+        QuestionFixtures.git(repository, "reset", "--quiet", "--hard");
+        return commit;
+    }
+
+    /**
+     * What a checkout must leave unchanged in the repository it reads, read without writing to it: its {@code HEAD},
+     * refs, objects, index entries and configuration.
+     */
+    static Map<String, String> snapshot(Path repository) throws IOException {
+        var snapshot = new LinkedHashMap<String, String>();
+        snapshot.put("head", QuestionFixtures.git(repository, "rev-parse", "HEAD"));
+        snapshot.put("refs", QuestionFixtures.git(repository, "for-each-ref"));
+        snapshot.put("objects", QuestionFixtures.git(repository, "count-objects", "-v"));
+        snapshot.put("index", QuestionFixtures.git(repository, "ls-files", "--stage"));
+        snapshot.put("config", Files.readString(repository.resolve(
+                QuestionFixtures.git(repository, "rev-parse", "--git-path", "config").strip())));
+        return snapshot;
     }
 
     /** Writes a shell script and makes it executable: a fake {@code pm-exec} or harness, never a real one. */

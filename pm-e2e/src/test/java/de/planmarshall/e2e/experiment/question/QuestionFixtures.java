@@ -55,8 +55,9 @@ import de.planmarshall.e2e.experiment.question.QuestionStub.TaskSpec;
  * repository. A recipe names the repository and its start commit, the archived plan and its asking task (whose title
  * and description are the worker's task), the reply to deliver, and the corpus item whose {@code input.choices} and
  * {@code target.answer} are the closed check ({@link #scenario(Source, String, Path)}). The worker directory is a new
- * repository fetched from the local clone of the recipe's repository and checked out at the start commit, so the
- * clone's checkout, branch and index stay untouched.</li>
+ * repository that reads the object store of the local clone of the recipe's repository and is checked out at the start
+ * commit, also one no ref of the clone contains, so the clone's checkout, refs, index and objects stay untouched
+ * ({@link #checkout(Checkout, Path)}).</li>
  * <li>The probe task of the {@code resumability} stage of the profile verification: the worker reads a canary, asks,
  * and after the answer names the canary without reading it again.</li>
  * </ul>
@@ -178,7 +179,8 @@ final class QuestionFixtures {
     /**
      * The repository of a scenario.
      *
-     * @param localClone the local clone of the scenario's repository, read only
+     * @param localClone the local clone of the scenario's repository, read only; it must hold the start commit, which
+     *                   need not be contained in any of its refs
      * @param commit     the start commit
      */
     record Checkout(Path localClone, String commit) {
@@ -440,8 +442,8 @@ final class QuestionFixtures {
 
     /**
      * The fixture or workspace setup of a run failed before any worker launched ({@link #prepare}): the scenario's
-     * local clone is missing, or a git step of its checkout failed, for example a start commit the clone cannot give
-     * ({@code fatal: unable to read tree}). The run is recorded as {@value QuestionResults#SETUP_FAILED} with
+     * local clone is missing, or a git step of its checkout failed, for example a start commit that neither the
+     * clone's object store nor the worker directory's holds. The run is recorded as {@value QuestionResults#SETUP_FAILED} with
      * {@link #reason()}, never as {@code no_ask}, timed out or launched.
      */
     static final class SetupFailure extends IOException {
@@ -515,23 +517,39 @@ final class QuestionFixtures {
     }
 
     /**
-     * Checks a scenario's repository out into an empty worker directory: a new repository that fetches every ref of
-     * the local clone (which only reads the clone) and checks out the start commit detached.
+     * Checks a scenario's repository out into an empty worker directory: a new repository that reads the objects of
+     * the local clone through git's alternates ({@code .git/objects/info/alternates} names the clone's object
+     * directory, {@code git rev-parse --git-path objects} in the clone) and checks out the start commit detached. A start
+     * commit the clone holds is reached so even when no ref of the clone contains it (a commit known on the remote only
+     * as the head of a merged pull request whose branch is gone), which fetching the clone's refs never brings.
+     * <p>
+     * The clone is only read: nothing is fetched into it, no ref, remote or configuration of it is written, and the
+     * worker directory has no remote, so no push reaches it. Every object the worker writes (a commit, an index, a
+     * stash) goes to the worker directory's own object store, never into the clone's. The worker directory is
+     * otherwise a self-contained checkout, but it depends on the clone's object store while it exists: the clone must
+     * not be garbage collected ({@code git gc}, {@code git prune}) during a run, or the worker directory loses the
+     * objects of the start commit.
      *
      * @param checkout  the scenario's repository
      * @param directory the worker directory
      * @throws SetupFailure if there is no local clone
-     * @throws GitFailure   if a git step fails
-     * @throws IOException  if git cannot be run
+     * @throws GitFailure   if a git step fails, for example a start commit no object store holds
+     * @throws IOException  if git cannot be run or the alternates file cannot be written
      */
     static void checkout(Checkout checkout, Path directory) throws IOException {
-        if (!Files.exists(checkout.localClone().resolve(".git"))) {
-            var reason = "no local clone at " + checkout.localClone();
+        var clone = checkout.localClone();
+        if (!Files.exists(clone.resolve(".git"))) {
+            var reason = "no local clone at " + clone;
             throw new SetupFailure(reason, reason + ": set -Dpm.experiment.clones to the directory of the local clones",
                     null);
         }
+        var objects = clone.toAbsolutePath().resolve(git(clone, "rev-parse", "--git-path", "objects").strip())
+                .normalize();
         git(null, "init", "--quiet", directory.toString());
-        git(directory, "fetch", "--quiet", "--no-tags", checkout.localClone().toString(), "+refs/*:refs/source/*");
+        var info = directory.toAbsolutePath()
+                .resolve(git(directory, "rev-parse", "--git-path", "objects/info").strip()).normalize();
+        Files.createDirectories(info);
+        Files.writeString(info.resolve("alternates"), objects + "\n", StandardCharsets.UTF_8);
         git(directory, "checkout", "--quiet", "--detach", checkout.commit());
     }
 
