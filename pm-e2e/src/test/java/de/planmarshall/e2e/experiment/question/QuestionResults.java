@@ -238,6 +238,7 @@ final class QuestionResults {
     private static final String DECISION = "decision";
     private static final String TASK = "task";
     private static final String VERDICT = "verdict";
+    private static final String QUESTION_ID_FIELD = "question_id";
 
     private QuestionResults() {
     }
@@ -546,6 +547,7 @@ final class QuestionResults {
         limitOfQuotaErrors(result, runs);
         limitOfSetupFailures(result, runs, contributing.values());
         limitOfReidentifiedGenerations(result, runs);
+        limitOfAnswerFallbacks(result, runs);
         switch (item) {
             case "Q3" -> limitOfQ3Times(result);
             case "Q4" -> limitOfQ4CrossHost(result, runs);
@@ -1371,7 +1373,8 @@ final class QuestionResults {
      * ({@link #continuationExit(RunView)} is {@link ContinuationExit#EXITED}), {@value #VOTER_EARLY_EXIT}
      * ({@link #voterEarlyExit(RunView)}), {@value #QUOTA_ERROR}
      * ({@link #quotaError(RunView)}), {@value #SETUP_FAILED} ({@link #setupFailed(JsonNode)}), {@code asked},
-     * {@code continued} and {@code submitted} (runs with at least one such event). A quota-error run counts in
+     * {@code continued} and {@code submitted} (runs with at least one such event), and {@value #ANSWER_FALLBACK_OWN}
+     * (runs whose record says an operator answer fell back to the operator's own option). A quota-error run counts in
      * {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask}, {@code early_exit} or
      * {@value #CONTINUATION_EARLY_EXIT}; a continuation early exit not in {@code timed_out}, even where its record,
      * written before the driver ended the wait on it, says timed out; a run whose setup failed in
@@ -1392,11 +1395,13 @@ final class QuestionResults {
         var setupFailures = 0;
         var continued = 0;
         var submitted = 0;
+        var fallbacks = 0;
         for (var view : views) {
             if (setupFailed(view.run())) {
                 setupFailures++;
                 continue;
             }
+            fallbacks += view.run().path(ANSWER_FALLBACK_OWN).asBoolean() ? 1 : 0;
             var askedHere = !view.named(ASKED).isEmpty();
             asked += askedHere ? 1 : 0;
             if (quotaError(view)) {
@@ -1423,6 +1428,7 @@ final class QuestionResults {
         group.put(ASKED, asked);
         group.put("continued", continued);
         group.put(SUBMITTED, submitted);
+        group.put(ANSWER_FALLBACK_OWN, fallbacks);
     }
 
     /**
@@ -3351,6 +3357,295 @@ final class QuestionResults {
             }
         }
         return total;
+    }
+
+    // --- answer audit ---
+
+    /**
+     * The field of a run record with how each of its operator answers was composed
+     * ({@link QuestionFixtures#composeAnswer}): per part the decision, question id, reply, chosen branch and label, and
+     * whether the fixture has a consistency hint, the chosen option matched it, or the answer fell back to the
+     * operator's own option. Records written before 2026-10-24 have none.
+     */
+    static final String ANSWER_COMPOSITIONS = "answer_compositions";
+    /**
+     * The field of a run record, and the group figure, of a run in which an operator answer fell back to the
+     * operator's own option because no option of the asker matched the fixture's consistency hint: a reported figure,
+     * no verdict reads it.
+     */
+    static final String ANSWER_FALLBACK_OWN = "answer_fallback_own";
+    /** The audit figure of a recorded operator answer whose chosen branch contradicts its own reply text. */
+    static final String CONTRADICTING = "contradicting";
+
+    /**
+     * Records how an operator answer of a run was composed: appends one entry per part to
+     * {@value #ANSWER_COMPOSITIONS} ({@link QuestionDriver#compositionFields}) and sets {@value #ANSWER_FALLBACK_OWN}
+     * once any part of any answer of the run fell back to the operator's own option.
+     *
+     * @param run         the run record, changed in place
+     * @param decisionId  the decision answered
+     * @param reply       the reply form
+     * @param composition the composed answer
+     */
+    static void recordComposition(ObjectNode run, String decisionId, QuestionFixtures.Reply reply,
+            QuestionFixtures.Composition composition) {
+        var entries = run.get(ANSWER_COMPOSITIONS) instanceof ArrayNode existing ? existing
+                : run.putArray(ANSWER_COMPOSITIONS);
+        for (var note : composition.notes()) {
+            entries.add(QuestionStub.JSON.valueToTree(QuestionDriver.compositionFields(decisionId, reply, note)));
+        }
+        run.put(ANSWER_FALLBACK_OWN, run.path(ANSWER_FALLBACK_OWN).asBoolean() || composition.fallbackOwn());
+    }
+
+    /**
+     * Adds a limit naming the runs whose operator answer fell back to the operator's own option
+     * ({@value #ANSWER_FALLBACK_OWN}): on a fixture with a consistency hint, no option of the asker read as the
+     * reference direction (for a delegated answer: the recommendation did not), so the reply went as the operator's own
+     * option instead of beside a branch that contradicts it. The group figure {@value #ANSWER_FALLBACK_OWN} counts them;
+     * the verdict logic is unchanged and reads them as any other run.
+     *
+     * @param result the result
+     * @param runs   its run records
+     */
+    static void limitOfAnswerFallbacks(ObjectNode result, List<JsonNode> runs) {
+        var composed = runs.stream().filter(run -> run.has(ANSWER_COMPOSITIONS)).count();
+        if (composed == 0) {
+            return;
+        }
+        var fallbacks = new TreeMap<String, List<String>>();
+        for (var run : runs) {
+            if (run.path(ANSWER_FALLBACK_OWN).asBoolean()) {
+                fallbacks.computeIfAbsent(run.path(HOST).asText(), _ -> new ArrayList<>()).add(runId(run));
+            }
+        }
+        limit(result, "An operator answer never pairs a branch with a reply text that contradicts it: on a fixture "
+                + "with a consistency hint (he-0, he-106, the probe) an answered option takes the asker's recommended "
+                + "option where it reads as the fixture's reference direction, else the first option that does, and a "
+                + "delegated answer only a recommendation that does; where none does, the reply goes as the "
+                + "operator's own option (" + ANSWER_FALLBACK_OWN + "). Each run record carries "
+                + ANSWER_COMPOSITIONS + " (" + composed + " of " + runs.size() + " records here); records without it "
+                + "were answered with the recommended branch beside the fixture's reply, also where the two "
+                + "contradict. The verdict logic is unchanged" + (fallbacks.isEmpty() ? "; no answer fell back."
+                : "; fell back: " + namedRuns(fallbacks) + "."));
+    }
+
+    /**
+     * The answer audit over stored runs, without a model: reads each run's question records ({@code questions.jsonl}
+     * of its stub directory), and classifies every answer the driver gave on the operator's behalf (channel
+     * {@code cli}) by the fixture's consistency hint ({@link QuestionFixtures#hint(String)}): the chosen option of a
+     * {@code chosen} or {@code delegated} answer reads as the reference direction ({@code consistent}), as the opposite
+     * direction ({@value #CONTRADICTING}: the branch contradicts the fixture's reply text beside it), or as neither
+     * ({@code unclear}); an answer with the operator's own option ({@code own}) chooses no branch; a fixture without a
+     * hint is counted {@code unhinted}; an answer of a quorum ({@code quorum}) carries no reply text. Per group (item,
+     * host, model, warmth, kind, reply, fixture) it counts the runs, the runs with an operator answer, the runs with a
+     * contradicting answer and among them those whose last submission does not follow the reference, the answers per
+     * class, and how many of the stored operator answers the composition with the hint would answer with the
+     * operator's own option ({@code recomposed_fallback_own}). It lists the contradicting runs, the result groups of
+     * the items they belong to ({@code affected_result_groups}, as {@link #evaluate} keys them), and per fixture with a
+     * hint every option the askers offered with its class, how often it was offered and recommended
+     * ({@code options}). The records are only read.
+     *
+     * @param runs the run records
+     * @return the audit
+     * @throws IOException if a run's files cannot be read
+     */
+    static ObjectNode answerAudit(List<JsonNode> runs) throws IOException {
+        var groups = new TreeMap<String, ObjectNode>();
+        var affected = new TreeSet<String>();
+        var options = new TreeMap<String, TreeMap<String, ObjectNode>>();
+        for (var run : runs) {
+            if (setupFailed(run)) {
+                continue;
+            }
+            var group = groups.computeIfAbsent(auditKey(run), _ -> auditGroup(run));
+            var view = view(run);
+            var counts = auditRun(view, options);
+            group.put(RUNS, group.path(RUNS).asInt() + 1);
+            for (var entry : counts.properties()) {
+                if (entry.getValue().isArray()) {
+                    var list = group.get(entry.getKey()) instanceof ArrayNode existing ? existing
+                            : group.putArray(entry.getKey());
+                    list.addAll((ArrayNode) entry.getValue());
+                } else {
+                    group.put(entry.getKey(), group.path(entry.getKey()).asInt() + entry.getValue().asInt());
+                }
+            }
+            if (counts.path("operator_answers").asInt() > 0) {
+                group.put("runs_with_operator_answer", group.path("runs_with_operator_answer").asInt() + 1);
+            }
+            if (counts.path(CONTRADICTING).asInt() > 0) {
+                group.put("contradicting_runs", group.path("contradicting_runs").asInt() + 1);
+                if (!followsReference(view)) {
+                    group.put("contradicting_runs_not_following",
+                            group.path("contradicting_runs_not_following").asInt() + 1);
+                }
+                ((ArrayNode) group.get("contradicting_run_ids")).add(runId(run));
+                affected.add(run.path("item").asText() + " " + groupKey(run.path("item").asText(), run));
+            }
+        }
+        var audit = QuestionStub.JSON.createObjectNode();
+        var array = audit.putArray("groups");
+        var totals = audit.putObject("totals");
+        for (var group : groups.values()) {
+            array.add(group);
+            for (var field : List.of(RUNS, "runs_with_operator_answer", "contradicting_runs",
+                    "contradicting_runs_not_following", "operator_answers", CONTRADICTING, "consistent", "unclear",
+                    "own", "unhinted", "quorum", "recomposed_fallback_own")) {
+                totals.put(field, totals.path(field).asInt() + group.path(field).asInt());
+            }
+        }
+        var groupsToRerun = audit.putArray("affected_result_groups");
+        affected.forEach(groupsToRerun::add);
+        var catalogue = audit.putObject("options");
+        options.forEach((fixture, labels) -> {
+            var list = catalogue.putArray(fixture);
+            labels.values().forEach(list::add);
+        });
+        return audit;
+    }
+
+    private static String auditKey(JsonNode run) {
+        var key = new StringBuilder();
+        for (var field : List.of("item", HOST, MODEL, "form", "kind", "reply", "fixture")) {
+            key.append(field).append('=').append(MODEL.equals(field) ? model(run) : run.path(field).asText())
+                    .append(' ');
+        }
+        return key.toString().strip();
+    }
+
+    private static ObjectNode auditGroup(JsonNode run) {
+        var group = QuestionStub.JSON.createObjectNode();
+        group.put("item", run.path("item").asText());
+        group.put(HOST, run.path(HOST).asText());
+        group.put(MODEL, model(run));
+        group.put("form", run.path("form").asText());
+        group.put("kind", run.path("kind").asText());
+        group.put("reply", run.path("reply").asText());
+        group.put("fixture", run.path("fixture").asText());
+        group.put("hinted", QuestionFixtures.hint(run.path("fixture").asText()).isPresent());
+        for (var field : List.of(RUNS, "runs_with_operator_answer", "contradicting_runs",
+                "contradicting_runs_not_following", "operator_answers", CONTRADICTING, "consistent", "unclear", "own",
+                "unhinted", "quorum", "recomposed_fallback_own")) {
+            group.put(field, 0);
+        }
+        group.putArray("contradicting_run_ids");
+        return group;
+    }
+
+    /**
+     * Classifies the answers of one run ({@link #answerAudit}) and adds the options its askers offered to the
+     * catalogue.
+     *
+     * @param view    the run
+     * @param options the catalogue per fixture and option label, changed in place
+     * @return the counts of the run per class
+     */
+    static ObjectNode auditRun(RunView view, Map<String, TreeMap<String, ObjectNode>> options) {
+        var fixture = view.run().path("fixture").asText();
+        var hint = QuestionFixtures.hint(fixture);
+        var reply = view.run().path("reply").asText();
+        var parts = new HashMap<String, JsonNode>();
+        var counts = QuestionStub.JSON.createObjectNode();
+        for (var line : view.records()) {
+            var name = line.path("line").asText();
+            if (ASKED.equals(name)) {
+                var ids = line.path("question_ids");
+                var envelopeParts = line.path("envelope").path("parts");
+                for (var index = 0; index < envelopeParts.size(); index++) {
+                    var part = envelopeParts.get(index);
+                    parts.put(ids.path(index).asText(), part);
+                    hint.ifPresent(value -> catalogue(options, fixture, part, value));
+                }
+            } else if ("answered".equals(name)) {
+                for (var item : line.path("items")) {
+                    var part = parts.get(item.path(QUESTION_ID_FIELD).asText());
+                    var answerClass = answerClass(line.path("channel").asText(), item, part, hint);
+                    counts.put(answerClass, counts.path(answerClass).asInt() + 1);
+                    if ("unclear".equals(answerClass)) {
+                        var unclear = counts.get("unclear_labels") instanceof ArrayNode existing ? existing
+                                : counts.putArray("unclear_labels");
+                        unclear.add(item.path("label").asText());
+                    }
+                    if (!"quorum".equals(answerClass)) {
+                        counts.put("operator_answers", counts.path("operator_answers").asInt() + 1);
+                        if (recomposedFallback(reply, part, hint)) {
+                            counts.put("recomposed_fallback_own", counts.path("recomposed_fallback_own").asInt() + 1);
+                        }
+                    }
+                }
+            }
+        }
+        return counts;
+    }
+
+    /**
+     * @param channel the channel of the answer ({@code cli} for the driver's, {@code quorum})
+     * @param item    the recorded answer item ({@code branch_key}, {@code kind})
+     * @param part    the part it answers, {@code null} when its record is missing
+     * @param hint    the fixture's consistency hint
+     * @return {@code quorum}, {@code own}, {@code unhinted}, {@code consistent}, {@value #CONTRADICTING} or
+     *         {@code unclear}
+     */
+    static String answerClass(String channel, JsonNode item, JsonNode part,
+            Optional<QuestionFixtures.ConsistencyHint> hint) {
+        if (!"cli".equals(channel)) {
+            return "quorum";
+        }
+        var branch = item.path("branch_key").asText();
+        if ("own".equals(branch) || "own_option".equals(item.path("kind").asText())) {
+            return "own";
+        }
+        if (hint.isEmpty()) {
+            return "unhinted";
+        }
+        JsonNode chosen = null;
+        if (part != null) {
+            for (var option : part.path("options")) {
+                if (branch.equals(option.path("branch_key").asText())) {
+                    chosen = option;
+                }
+            }
+        }
+        if (chosen == null) {
+            return "unclear";
+        }
+        return switch (hint.get().classify(chosen)) {
+            case CONSISTENT -> "consistent";
+            case CONTRADICTING -> CONTRADICTING;
+            case UNCLEAR -> "unclear";
+        };
+    }
+
+    private static boolean recomposedFallback(String reply, JsonNode part,
+            Optional<QuestionFixtures.ConsistencyHint> hint) {
+        if (part == null || hint.isEmpty() || part.path("options").isEmpty()
+                || !Set.of("option", "default").contains(reply)) {
+            return false;
+        }
+        var recommended = part.path("recommendation").path("branch_key").asText("own");
+        return QuestionFixtures.consistentChoice(part, hint.get(), recommended, "default".equals(reply)).isEmpty();
+    }
+
+    private static void catalogue(Map<String, TreeMap<String, ObjectNode>> options, String fixture, JsonNode part,
+            QuestionFixtures.ConsistencyHint hint) {
+        var recommended = part.path("recommendation").path("branch_key").asText("");
+        for (var option : part.path("options")) {
+            var label = option.path("label").asText();
+            var node = options.computeIfAbsent(fixture, _ -> new TreeMap<>()).computeIfAbsent(label, _ -> {
+                var created = QuestionStub.JSON.createObjectNode();
+                created.put("label", label);
+                created.put("description", option.path("description").asText());
+                created.put("class", hint.classify(option).name().toLowerCase(Locale.ROOT));
+                created.put("choosable", hint.consistent(option));
+                created.put("offered", 0);
+                created.put("recommended", 0);
+                return created;
+            });
+            node.put("offered", node.path("offered").asInt() + 1);
+            if (recommended.equals(option.path("branch_key").asText())) {
+                node.put("recommended", node.path("recommended").asInt() + 1);
+            }
+        }
     }
 
     // --- helpers ---

@@ -4438,6 +4438,477 @@ class QuestionStubTest {
         }
     }
 
+    /**
+     * The operator's answer of the driver never pairs a chosen branch with a reply text that contradicts it. The option
+     * lists are the stored questions of the named runs ({@code questions.jsonl} of their stub directories), copied
+     * verbatim; the reply texts are those of the corpus items.
+     */
+    @Nested
+    @DisplayName("operator answer")
+    class OperatorAnswer {
+
+        private static final String HE_106 = "question/apply-answer/he-106";
+        private static final String HE_0 = "question/apply-answer/he-0";
+        private static final String HE_106_REPLY = "The description is right and the example is wrong: the element for "
+                + "i, counted from 1, is the factorial of i for even i and the sum 1 + ... + i for odd i, in the order "
+                + "of i.";
+        private static final String HE_0_REPLY = "Closer: return True if any two numbers in the list are closer to "
+                + "each other than the threshold, otherwise False.";
+        private static final String CHOSEN = "chosen";
+        private static final String OWN = "own";
+        private static final String OWN_OPTION = "own_option";
+
+        /** Q4-opencode-fresh-question_apply-answer_he-106-000-fbbb77bc: the example recommended, two options. */
+        private static final String EXAMPLE_RECOMMENDED = """
+                {"question_text": "Which behaviour should f(n) implement?", "decision_kind": "interpretation", \
+                "answer_type": "one", "own_words": true, "note": true, "delegation": false, "options": [\
+                {"branch_key": "description", "label": "Follow the docstring forward order", "description": "List \
+                elements correspond to i=1..n in increasing order: element 0 uses i=1, element n-1 uses i=n.", \
+                "consequences": "f(5) would be [1, 2, 6, 24, 15] (different from the example)."}, \
+                {"branch_key": "examples", "label": "Follow the example (reverse order)", "description": "List \
+                elements correspond to i=n..1 in decreasing order: element 0 uses i=n, element n-1 uses i=1.", \
+                "consequences": "f(5) matches the example as [15, 24, 6, 2, 1]."}], "recommendation": \
+                {"branch_key": "examples", "confidence": 70, "rationale": "The provided example f(5) matches the \
+                reverse-order interpretation of the same i->value rules."}}""";
+
+        /** Q4-opencode-fresh-question_apply-answer_he-106-002-de7d804e (reply default): descending recommended. */
+        private static final String DESCENDING_RECOMMENDED = """
+                {"question_text": "In which order should f(n) return the values for i = 1..n?", "decision_kind": \
+                "interpretation", "answer_type": "one", "options": [{"branch_key": "ascending", "label": \
+                "Ascending: i = 1 first", "description": "Return [value(1), value(2), ..., value(n)], following the \
+                rule that i starts from 1.", "consequences": "f(5) = [1, 2, 6, 24, 15] and f(7) = [1, 2, 6, 24, 15, \
+                720, 28]; the docstring example is treated as reversed by mistake."}, {"branch_key": "descending", \
+                "label": "Descending: i = n first", "description": "Return [value(n), value(n-1), ..., value(1)], \
+                matching the worked example exactly.", "consequences": "f(5) = [15, 24, 6, 2, 1] and f(7) = [28, \
+                720, 15, 24, 6, 2, 1]; the phrase 'i starts from 1' then describes the last element rather than the \
+                first."}], "recommendation": {"branch_key": "descending", "confidence": 55, "rationale": "The only \
+                concrete output in the docstring, f(5) == [15, 24, 6, 2, 1], lists the values for i = 5 down to 1 \
+                and reproduces all five values exactly, so the example outweighs the conflicting ordering phrase."}, \
+                "own_words": true, "note": true, "delegation": false}""";
+
+        /** Q4-opencode-fresh-question_apply-answer_he-106-002-e137c211 (reply default): the description recommended. */
+        private static final String DESCRIPTION_RECOMMENDED = """
+                {"question_text": "Which list should f(n) return?", "decision_kind": "interpretation", "answer_type": \
+                "one", "options": [{"branch_key": "description_order", "label": "Follow the description, in \
+                ascending i", "description": "Return n elements where position i-1 holds i! for even i and 1+...+i \
+                for odd i, for i = 1..n. f(5) = [1, 2, 6, 24, 15].", "consequences": "The docstring example is wrong \
+                and is ignored as a typo."}, {"branch_key": "example_order", "label": "Follow the example, \
+                descending i", "description": "Return the same values as the description but ordered from i = n \
+                down to i = 1. f(5) = [15, 24, 6, 2, 1], matching the example.", "consequences": "The description's \
+                phrase 'element at index i' is wrong; the example is authoritative."}, {"branch_key": \
+                "swapped_parity", "label": "Swap the parity of factorial and sum", "description": "Return n elements \
+                where position i-1 holds i! for odd i and 1+...+i for even i, for i = 1..n. f(5) = [1, 3, 6, 10, \
+                120].", "consequences": "Both the description's parity rule and its example are contradicted."}], \
+                "recommendation": {"branch_key": "description_order", "confidence": 60, "rationale": "The \
+                description states the computation rule explicitly and at length, and its only defect is the index \
+                base, which ascending i = 1..n resolves consistently; the example matches those values exactly but \
+                in reverse, which looks like a transcription slip rather than a different rule."}, "own_words": true, \
+                "note": true, "delegation": false}""";
+
+        /** Q4-opencode-fresh-question_apply-answer_he-106-000-8087e4e1: three options, the example recommended. */
+        private static final String THREE_OPTIONS = """
+                {"question_text": "Which behaviour should f implement?", "decision_kind": "interpretation", \
+                "answer_type": "one", "options": [{"branch_key": "text_order", "label": "Follow the text: ascending, \
+                even -> factorial", "description": "For i = 1..n in order, put i! at position i when i is even and \
+                1+...+i when i is odd; f(5) = [1, 2, 6, 24, 15].", "consequences": "The stated example is treated as \
+                wrong; f(7) = [1, 2, 6, 24, 15, 720, 28]."}, {"branch_key": "example_order", "label": "Follow the \
+                example: descending", "description": "Use the same values but place them from i = n down to i = 1; \
+                f(5) = [15, 24, 6, 2, 1].", "consequences": "'index i starts from 1' is read as filling from the \
+                end; f(7) = [28, 720, 15, 24, 6, 2, 1]."}, {"branch_key": "swapped_parity", "label": "Swap the \
+                parity, ascending", "description": "For i = 1..n ascending, use 1+...+i when i is even and i! when i \
+                is odd; f(5) = [1, 3, 6, 10, 120].", "consequences": "The example is wrong on both order and \
+                condition; f(7) = [1, 3, 6, 10, 120, 21, 5040]."}], "recommendation": {"branch_key": \
+                "example_order", "confidence": 60, "rationale": "pm://qlv/T-1 quotes the concrete example f(5) == \
+                [15, 24, 6, 2, 1], which is exactly the rule's values in reverse order. A concrete expected output is \
+                stronger evidence of intent than prose the task itself calls flawed."}, "own_words": true, "note": \
+                true, "delegation": false}""";
+
+        /** R3-claude-warm-question_apply-answer_he-106-000-e631ac8d: no option reads as the reference direction. */
+        private static final String NO_MATCHING_OPTION = """
+                {"question_text": "Should the function use 1-based indexing and reverse the result, or use 0-based \
+                indexing with a different rule?", "decision_kind": "interpretation", "answer_type": "one", \
+                "options": [{"branch_key": "reverse_1based", "label": "1-based indexing, reversed result", \
+                "description": "For i from 1 to n: if i even use factorial(i), else use sum(1 to i). Then reverse the \
+                final list.", "consequences": "Matches the example f(5) == [15, 24, 6, 2, 1]"}, {"branch_key": \
+                "forward_0based", "label": "0-based indexing, forward result", "description": "For index i from 0 to \
+                n-1: if i even use one formula, else use another formula.", "consequences": "Needs clarification on \
+                even/odd calculation with 0-based indices"}], "recommendation": {"branch_key": "reverse_1based", \
+                "confidence": 75, "rationale": "The example output [15, 24, 6, 2, 1] matches 1-based iteration \
+                [1,2,6,24,15] reversed; the phrase 'i starts from 1' strongly suggests 1-based numbering"}, \
+                "own_words": true, "note": true, "delegation": false}""";
+
+        /** Q1-claude-fresh-question_apply-answer_he-0-000-1abe381e: he-0, the consistent option recommended. */
+        private static final String HE_0_PART = """
+                {"question_text": "Which behavior should the function implement?", "decision_kind": \
+                "interpretation", "answer_type": "one", "options": [{"branch_key": "within_threshold", "label": \
+                "Within threshold distance", "description": "Return True if any two numbers have absolute \
+                difference ≤ threshold", "consequences": "candidate([1.0, 2.0, 3.0], 0.5) = False; \
+                candidate([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3) = True"}, {"branch_key": "at_least_threshold", \
+                "label": "At least threshold distance apart", "description": "Return True if any two numbers have \
+                absolute difference ≥ threshold", "consequences": "candidate([1.0, 2.0, 3.0], 0.5) = True; \
+                candidate([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3) = True"}], "recommendation": {"branch_key": \
+                "within_threshold", "confidence": 75, "rationale": "The examples provided match this interpretation, \
+                and 'closer to ... than threshold' suggests proximity within a distance threshold."}, "own_words": \
+                true, "note": true, "delegation": false}""";
+
+        /** R1-claude-fresh-probe-resumability-000-e76e523e: the probe, formal recommended. */
+        private static final String PROBE_PART = """
+                {"question_text": "Is the greeting formal or informal?", "decision_kind": "approach", "answer_type": \
+                "one", "options": [{"branch_key": "formal", "label": "Formal greeting", "description": "Write a \
+                formal, respectful greeting.", "consequences": "The greeting will use formal language and \
+                professional tone."}, {"branch_key": "informal", "label": "Informal greeting", "description": "Write \
+                a casual, friendly greeting.", "consequences": "The greeting will use casual and friendly \
+                language."}], "recommendation": {"branch_key": "formal", "confidence": 50, "rationale": "No context \
+                provided; formal is a neutral default."}, "own_words": true, "note": true, "delegation": false}""";
+
+        /** Q5-claude-fresh-question_ask-or-proceed_he-12-2ac-000-7ecd1311: a two-flaw fixture, without a hint. */
+        private static final String TWO_FLAW_PART = """
+                {"question_text": "When there are multiple strings of the same length, should the function return \
+                the first or the last?", "decision_kind": "interpretation", "answer_type": "one", "options": [\
+                {"branch_key": "first", "label": "Return the first one", "description": "Return the first string of \
+                the target length (as stated in the docstring).", "consequences": "Example 1 is wrong: should return \
+                'a', not 'c'."}, {"branch_key": "last", "label": "Return the last one", "description": "Return the \
+                last string of the target length (as shown in example 1).", "consequences": "The docstring rule is \
+                wrong and should be updated to 'Return the last one'."}], "recommendation": {"branch_key": "last", \
+                "confidence": 75, "rationale": "Example 1 returns 'c' which is the last of the equal-length strings, \
+                not the first."}, "own_words": true, "note": true, "delegation": false}""";
+
+        /** The he-106 option lists of the stored runs above. */
+        private static final List<String> HE_106_PARTS = List.of(EXAMPLE_RECOMMENDED, DESCENDING_RECOMMENDED,
+                DESCRIPTION_RECOMMENDED, THREE_OPTIONS, NO_MATCHING_OPTION);
+
+        @ParameterizedTest(name = "{0}: {1} -> {3}")
+        @CsvSource(delimiter = ';', textBlock = """
+                question/apply-answer/he-106; Follow the description; Implement what the text says.; CONSISTENT
+                question/apply-answer/he-106; Follow the examples; Implement what the examples show.; CONTRADICTING
+                question/apply-answer/he-106; Compute forward (i=1 to n), then reverse the result; Iterate i from 1 to n, computing factorial for even i and sum for odd i, storing results at index 0 to n-1 in order, then reverse the entire list.; CONTRADICTING
+                question/apply-answer/he-106; Reverse order, description as stated; Compute values for i=n,n-1,...,1 (or reverse after computing forward). Result for f(7) would be [28, 720, 15, 24, 6, 2, 1].; CONTRADICTING
+                question/apply-answer/he-106; Natural order (match description, not example); For each position i from 1 to n: even i gets factorial(i), odd i gets sum(1..i). Returns [1, 2, 6, 24, 15, 720, 28] for f(7).; CONSISTENT
+                question/apply-answer/he-106; Docstring literal: factorial if i is even (0-indexed), sum 1..i if odd; Follow the docstring exactly with 0-based indexing: position i gets factorial(i) if i is even, else sum(1..i). This gives f(7) = [1, 1, 2, 6, 24, 120, 720]; CONTRADICTING
+                question/apply-answer/he-106; Operator specifies; Request correct specification from operator; UNCLEAR
+                question/apply-answer/he-0; Within threshold distance; Return True if any two numbers have absolute difference ≤ threshold; CONSISTENT
+                question/apply-answer/he-0; At least threshold distance apart; Return True if any two numbers have absolute difference ≥ threshold; CONTRADICTING
+                question/apply-answer/he-0; Any pair no farther apart than the threshold; Return True iff there are two distinct elements a, b with |a - b| <= threshold.; CONSISTENT
+                question/apply-answer/he-0; Check consecutive pairs; Return True if any two consecutive numbers have an absolute difference <= threshold; CONTRADICTING
+                probe-resumability; Formal greeting; Write a formal, respectful greeting.; CONSISTENT
+                probe-resumability; Informal greeting; Write a casual, friendly greeting.; CONTRADICTING
+                """)
+        @DisplayName("reads a stored option of the askers by its fixture's consistency hint, its label first")
+        void shouldReadStoredOptionByHint(String fixture, String label, String description,
+                QuestionFixtures.Direction expected) {
+            var option = QuestionStub.JSON.createObjectNode();
+            option.put("label", label);
+            option.put("description", description);
+
+            var direction = QuestionFixtures.hint(fixture).orElseThrow().classify(option);
+
+            assertEquals(expected, direction, label);
+        }
+
+        @Test
+        @DisplayName("answers the option of the description where the asker recommended the example (fixture he-106)")
+        void shouldChooseConsistentOptionOverContradictingRecommendation() throws IOException {
+            var composition = QuestionFixtures.composeAnswer(he106(), decision(EXAMPLE_RECOMMENDED),
+                    QuestionFixtures.Reply.OPTION);
+
+            var note = composition.notes().getFirst();
+            assertAll("the answer",
+                    () -> assertEquals(List.of(new PartAnswer("Q-001", "description", HE_106_REPLY, CHOSEN)),
+                            composition.parts()),
+                    () -> assertEquals("Follow the docstring forward order", note.label()),
+                    () -> assertTrue(note.hinted()),
+                    () -> assertTrue(note.hintMatched()),
+                    () -> assertFalse(note.fallbackOwn()),
+                    () -> assertFalse(composition.fallbackOwn()));
+        }
+
+        @Test
+        @DisplayName("answers an option of each stored he-106 question that reads as the reference, else its own")
+        void shouldAnswerEachStoredQuestionConsistently() throws IOException {
+            var expected = new LinkedHashMap<String, String>();
+            expected.put(EXAMPLE_RECOMMENDED, "description");
+            expected.put(DESCENDING_RECOMMENDED, "ascending");
+            expected.put(DESCRIPTION_RECOMMENDED, "description_order");
+            expected.put(THREE_OPTIONS, "text_order");
+            expected.put(NO_MATCHING_OPTION, OWN);
+            var chosen = new LinkedHashMap<String, String>();
+
+            for (var part : expected.keySet()) {
+                chosen.put(part, QuestionFixtures.composeAnswer(he106(), decision(part),
+                        QuestionFixtures.Reply.OPTION).parts().getFirst().branchKey());
+            }
+
+            assertEquals(List.copyOf(expected.values()), List.copyOf(chosen.values()));
+        }
+
+        @ParameterizedTest
+        @EnumSource(value = QuestionFixtures.Reply.class, names = {"OPTION", "DEFAULT"})
+        @DisplayName("never pairs a branch that reads against the reference with the reply text, on any stored question")
+        void shouldNeverContradictReply(QuestionFixtures.Reply reply) throws IOException {
+            var hint = QuestionFixtures.hint(HE_106).orElseThrow();
+            for (var stored : HE_106_PARTS) {
+                var part = QuestionStub.JSON.readTree(stored);
+
+                var composition = QuestionFixtures.composeAnswer(he106(), decision(stored), reply);
+
+                var answer = composition.parts().getFirst();
+                var chosen = option(part, answer.branchKey());
+                assertAll(answer.toString(),
+                        () -> assertEquals(HE_106_REPLY, answer.text()),
+                        () -> assertTrue(chosen.isPresent() ? hint.consistent(chosen.get())
+                                : OWN.equals(answer.branchKey()) && composition.fallbackOwn()),
+                        () -> assertFalse(chosen.isPresent()
+                                && hint.classify(chosen.get()) == QuestionFixtures.Direction.CONTRADICTING));
+            }
+        }
+
+        @Test
+        @DisplayName("sends the reply as the operator's own option and marks the fallback when no option matches")
+        void shouldFallBackToOwnOptionWithoutMatchingOption() throws IOException {
+            var composition = QuestionFixtures.composeAnswer(he106(), decision(NO_MATCHING_OPTION),
+                    QuestionFixtures.Reply.OPTION);
+
+            var note = composition.notes().getFirst();
+            assertAll("the fallback",
+                    () -> assertEquals(List.of(new PartAnswer("Q-001", OWN, HE_106_REPLY, OWN_OPTION)),
+                            composition.parts()),
+                    () -> assertEquals("", note.label()),
+                    () -> assertFalse(note.hintMatched()),
+                    () -> assertTrue(note.fallbackOwn()),
+                    () -> assertTrue(composition.fallbackOwn()));
+        }
+
+        @Test
+        @DisplayName("delegates only to a recommendation that reads as the reference, else answers with its own option")
+        void shouldDelegateOnlyToConsistentRecommendation() throws IOException {
+            var contradicting = QuestionFixtures.composeAnswer(he106(), decision(DESCENDING_RECOMMENDED),
+                    QuestionFixtures.Reply.DEFAULT);
+            var consistent = QuestionFixtures.composeAnswer(he106(), decision(DESCRIPTION_RECOMMENDED),
+                    QuestionFixtures.Reply.DEFAULT);
+
+            assertAll("the delegations",
+                    () -> assertEquals(List.of(new PartAnswer("Q-001", OWN, HE_106_REPLY, OWN_OPTION)),
+                            contradicting.parts()),
+                    () -> assertTrue(contradicting.fallbackOwn()),
+                    () -> assertEquals(List.of(new PartAnswer("Q-001", "description_order", HE_106_REPLY,
+                            "delegated")), consistent.parts()),
+                    () -> assertTrue(consistent.notes().getFirst().hintMatched()),
+                    () -> assertFalse(consistent.fallbackOwn()));
+        }
+
+        @ParameterizedTest
+        @EnumSource(QuestionFixtures.Reply.class)
+        @DisplayName("answers byte-identically to before wherever the answer did not contradict its reply")
+        void shouldAnswerAsBeforeWhereNoContradiction(QuestionFixtures.Reply reply) throws IOException {
+            var twoFlaw = fixture("question/ask-or-proceed/he-12-2ac", "");
+            var unchanged = new ArrayList<Map.Entry<QuestionFixtures.Fixture, ObjectNode>>();
+            unchanged.add(Map.entry(fixture(HE_0, HE_0_REPLY), decision(HE_0_PART)));
+            unchanged.add(Map.entry(QuestionFixtures.probe(), decision(PROBE_PART)));
+            unchanged.add(Map.entry(twoFlaw, decision(TWO_FLAW_PART, TWO_FLAW_PART)));
+            unchanged.add(Map.entry(he106(), decision(DESCRIPTION_RECOMMENDED)));
+            unchanged.add(Map.entry(fixture(twoFlaw.id(), HE_106_REPLY), decision(EXAMPLE_RECOMMENDED,
+                    DESCENDING_RECOMMENDED)));
+            if (reply != QuestionFixtures.Reply.OPTION && reply != QuestionFixtures.Reply.DEFAULT) {
+                unchanged.add(Map.entry(he106(), decision(HE_106_PARTS.toArray(String[]::new))));
+            }
+            var expected = new ArrayList<List<PartAnswer>>();
+            var answers = new ArrayList<List<PartAnswer>>();
+
+            for (var entry : unchanged) {
+                expected.add(legacyAnswer(entry.getKey(), entry.getValue(), reply));
+                answers.add(QuestionFixtures.answer(entry.getKey(), entry.getValue(), reply));
+            }
+
+            assertEquals(expected, answers, reply.name());
+        }
+
+        @Test
+        @DisplayName("records each composed part on the run record and keeps a fallback once one happened")
+        void shouldRecordCompositionOnRunRecord() throws IOException {
+            var run = QuestionStub.JSON.createObjectNode();
+
+            QuestionResults.recordComposition(run, "Q-001", QuestionFixtures.Reply.OPTION,
+                    QuestionFixtures.composeAnswer(he106(), decision(NO_MATCHING_OPTION),
+                            QuestionFixtures.Reply.OPTION));
+            QuestionResults.recordComposition(run, "Q-002", QuestionFixtures.Reply.OPTION,
+                    QuestionFixtures.composeAnswer(he106(), decision(EXAMPLE_RECOMMENDED),
+                            QuestionFixtures.Reply.OPTION));
+
+            var entries = run.path(QuestionResults.ANSWER_COMPOSITIONS);
+            assertAll("the run record",
+                    () -> assertEquals(2, entries.size()),
+                    () -> assertEquals("own", entries.get(0).path("branch_key").asText()),
+                    () -> assertTrue(entries.get(0).path(QuestionResults.ANSWER_FALLBACK_OWN).asBoolean()),
+                    () -> assertEquals("Q-002", entries.get(1).path("decision").asText()),
+                    () -> assertEquals("Follow the docstring forward order", entries.get(1).path("label").asText()),
+                    () -> assertTrue(entries.get(1).path("hint_matched").asBoolean()),
+                    () -> assertEquals("option", entries.get(1).path("reply").asText()),
+                    () -> assertTrue(run.path(QuestionResults.ANSWER_FALLBACK_OWN).asBoolean()));
+        }
+
+        @Test
+        @DisplayName("logs each composed part as answer_composed and hands its parts to the stub")
+        void shouldLogComposedAnswer() throws IOException {
+            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(Duration.ofMillis(300));
+            try (var driver = QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
+                    directory.resolve("workers"), directory.resolve("run"), List.of("/bin/false")))) {
+                var composition = QuestionFixtures.composeAnswer(he106(), decision(EXAMPLE_RECOMMENDED),
+                        QuestionFixtures.Reply.OPTION);
+
+                var parts = driver.answerComposed("Q-001", QuestionFixtures.Reply.OPTION, composition);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events()).stream()
+                        .filter(event -> QuestionDriver.ANSWER_COMPOSED.equals(event.path("event").asText()))
+                        .toList();
+                assertAll("the log",
+                        () -> assertEquals(composition.parts(), parts),
+                        () -> assertEquals(1, events.size()),
+                        () -> assertEquals("description", events.getFirst().path("branch_key").asText()),
+                        () -> assertTrue(events.getFirst().path("hint_matched").asBoolean()),
+                        () -> assertFalse(events.getFirst().path(QuestionResults.ANSWER_FALLBACK_OWN).asBoolean()));
+            }
+        }
+
+        @Test
+        @DisplayName("audits stored answers: a branch against the reply counts as contradicting and names its group")
+        void shouldAuditContradictingAnswer() throws IOException {
+            var runs = List.<JsonNode>of(
+                    auditRun("a1", "option", "examples", "Follow the example (reverse order)", CHOSEN),
+                    auditRun("a2", "option", "description", "Follow the docstring forward order", CHOSEN),
+                    auditRun("a3", "text", OWN, OWN, OWN_OPTION));
+
+            var audit = QuestionResults.answerAudit(runs);
+
+            var totals = audit.path("totals");
+            assertAll("the audit",
+                    () -> assertEquals(3, totals.path("runs").asInt()),
+                    () -> assertEquals(1, totals.path("contradicting_runs").asInt()),
+                    () -> assertEquals(1, totals.path("contradicting_runs_not_following").asInt()),
+                    () -> assertEquals(1, totals.path("consistent").asInt()),
+                    () -> assertEquals(1, totals.path("own").asInt()),
+                    () -> assertEquals(0, totals.path("recomposed_fallback_own").asInt()),
+                    () -> assertEquals("[\"Q4 host=opencode model=opencode-go/deepseek-v4.1-flash form=fresh "
+                            + "continuation=fallback reply=option\"]", audit.path("affected_result_groups").toString()),
+                    () -> assertTrue(audit.path("groups").toString().contains("\"contradicting_run_ids\":[\"a1\"]"),
+                            audit.toString()),
+                    () -> assertEquals(2, audit.path("options").path(HE_106).size()));
+        }
+
+        @Test
+        @DisplayName("counts the runs with a fallback answer per group and names them in a limit, verdicts unchanged")
+        void shouldReportFallbacksWithoutChangingVerdict() throws IOException {
+            var fallback = (ObjectNode) auditRun("f1", "option", OWN, OWN, OWN_OPTION);
+            QuestionResults.recordComposition(fallback, "Q-001", QuestionFixtures.Reply.OPTION,
+                    QuestionFixtures.composeAnswer(he106(), decision(NO_MATCHING_OPTION),
+                            QuestionFixtures.Reply.OPTION));
+            var runs = List.<JsonNode>of(fallback);
+
+            var result = QuestionResults.evaluate("Q4", runs);
+            QuestionResults.limitOfAnswerFallbacks(result, runs);
+
+            var limits = result.path("limits").toString();
+            assertAll("the result",
+                    () -> assertEquals(1, result.path("groups").get(0).path(QuestionResults.ANSWER_FALLBACK_OWN)
+                            .asInt()),
+                    () -> assertTrue(limits.contains("fell back: opencode 1 (f1)"), limits),
+                    () -> assertEquals("fail", result.path("verdict").asText()),
+                    () -> assertEquals("The decision follows the answer in at least 95 % of the runs; no answered "
+                            + "question asked again; no submitted plan task done again.",
+                            QuestionResults.CRITERIA.get("Q4")));
+        }
+
+        /** A run record of Q4 on he-106 whose stub directory holds one asked and one answered question record. */
+        private JsonNode auditRun(String id, String reply, String branch, String label, String kind)
+                throws IOException {
+            var stubDir = Files.createDirectories(directory.resolve(id).resolve("stub"));
+            var asked = QuestionStub.JSON.createObjectNode();
+            asked.put("line", "asked");
+            asked.put("decision_id", "Q-001");
+            asked.putArray("question_ids").add("Q-001");
+            asked.putObject("envelope").putArray("parts").add(QuestionStub.JSON.readTree(EXAMPLE_RECOMMENDED));
+            var answered = QuestionStub.JSON.createObjectNode();
+            answered.put("line", "answered");
+            answered.put("decision_id", "Q-001");
+            answered.put("channel", "cli");
+            var item = answered.putArray("items").addObject();
+            item.put("question_id", "Q-001");
+            item.put("branch_key", branch);
+            item.put("label", label);
+            item.put("text", HE_106_REPLY);
+            item.put("kind", kind);
+            Files.writeString(stubDir.resolve("questions.jsonl"), QuestionStub.JSON.writeValueAsString(asked) + "\n"
+                    + QuestionStub.JSON.writeValueAsString(answered) + "\n");
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put("item", "Q4");
+            run.put("host", "opencode");
+            run.put("model", "opencode-go/deepseek-v4.1-flash");
+            run.put("form", "fresh");
+            run.put("continuation", "fallback");
+            run.put("kind", "entity");
+            run.put("reply", reply);
+            run.put("fixture", HE_106);
+            run.put("reference", "[1, 2, 6, 24, 15, 720, 28]");
+            run.put("stub_dir", stubDir.toString());
+            return run;
+        }
+
+        private static QuestionFixtures.Fixture he106() {
+            return fixture(HE_106, HE_106_REPLY);
+        }
+
+        private static QuestionFixtures.Fixture fixture(String id, String reply) {
+            return new QuestionFixtures.Fixture(id, "test", "Implement f.", reply, null, false, null);
+        }
+
+        /** A decision snapshot as {@link QuestionStub#decision(String)} gives it, one part per stored question. */
+        private static ObjectNode decision(String... parts) throws IOException {
+            var decision = QuestionStub.JSON.createObjectNode();
+            decision.put("id", "Q-001");
+            decision.put("revision", 1);
+            var array = decision.putObject("envelope").putArray("parts");
+            for (var part : parts) {
+                array.add(QuestionStub.JSON.readTree(part));
+            }
+            decision.putArray("items");
+            return decision;
+        }
+
+        private static Optional<JsonNode> option(JsonNode part, String branchKey) {
+            for (var option : part.path("options")) {
+                if (branchKey.equals(option.path("branch_key").asText())) {
+                    return Optional.of(option);
+                }
+            }
+            return Optional.empty();
+        }
+
+        /** The answer composition before the consistency hints, verbatim: the reference of byte-identity. */
+        private static List<PartAnswer> legacyAnswer(QuestionFixtures.Fixture fixture, JsonNode decision,
+                QuestionFixtures.Reply reply) {
+            var answers = new ArrayList<PartAnswer>();
+            var parts = decision.path("envelope").path("parts");
+            for (var index = 0; index < parts.size(); index++) {
+                var part = parts.get(index);
+                var questionId = "Q-%03d".formatted(1 + index);
+                var recommended = part.path("recommendation").path("branch_key").asText("own");
+                var first = index == 0;
+                var labels = new ArrayList<String>();
+                part.path("options").forEach(option -> labels.add(option.path("label").asText()));
+                answers.add(switch (reply) {
+                    case OPTION -> new PartAnswer(questionId, recommended, fixture.reply(), CHOSEN);
+                    case TEXT -> new PartAnswer(questionId, OWN, fixture.reply(), OWN_OPTION);
+                    case DEFAULT -> new PartAnswer(questionId, recommended, fixture.reply(), "delegated");
+                    case FIRST_ONLY -> first ? new PartAnswer(questionId, recommended,
+                            "This settles what you asked; nothing else is settled.", CHOSEN)
+                            : new PartAnswer(questionId, OWN, "Not settled by this answer.", OWN_OPTION);
+                    case RESTATE_OPTIONS -> new PartAnswer(questionId, OWN,
+                            "It is one of these: " + String.join("; ", labels) + ".", OWN_OPTION);
+                });
+            }
+            return answers;
+        }
+    }
+
     // --- fixtures ---
 
     /** The files of a telemetry branch, written by the test into a directory. */

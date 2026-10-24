@@ -1338,6 +1338,52 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
+     * The event the driver logs for each part of an operator answer it composed
+     * ({@link QuestionFixtures#composeAnswer}): the decision, the question id, the reply form, the chosen branch and its
+     * label, whether the fixture has a consistency hint, whether the chosen option matched it, and whether the reply
+     * fell back to the operator's own option.
+     */
+    static final String ANSWER_COMPOSED = "answer_composed";
+
+    /**
+     * Logs how an operator answer was composed ({@value #ANSWER_COMPOSED}, one event per part) and returns its parts,
+     * for the reply function of {@link #awaitAnswer}.
+     *
+     * @param decisionId  the decision answered
+     * @param reply       the reply form
+     * @param composition the composed answer
+     * @return its parts
+     */
+    List<PartAnswer> answerComposed(String decisionId, QuestionFixtures.Reply reply,
+            QuestionFixtures.Composition composition) {
+        for (var note : composition.notes()) {
+            stub.event(ANSWER_COMPOSED, compositionFields(decisionId, reply, note));
+        }
+        return composition.parts();
+    }
+
+    /**
+     * @param decisionId the decision answered
+     * @param reply      the reply form
+     * @param note       how one part was composed
+     * @return the fields of its {@value #ANSWER_COMPOSED} event and of its entry in a run record's
+     *         {@value QuestionResults#ANSWER_COMPOSITIONS}
+     */
+    static Map<String, Object> compositionFields(String decisionId, QuestionFixtures.Reply reply,
+            QuestionFixtures.PartNote note) {
+        var fields = new LinkedHashMap<String, Object>();
+        fields.put(DECISION, decisionId);
+        fields.put("question_id", note.questionId());
+        fields.put("reply", reply.name().toLowerCase(Locale.ROOT));
+        fields.put("branch_key", note.branchKey());
+        fields.put("label", note.label());
+        fields.put("hinted", note.hinted());
+        fields.put("hint_matched", note.hintMatched());
+        fields.put(QuestionResults.ANSWER_FALLBACK_OWN, note.fallbackOwn());
+        return fields;
+    }
+
+    /**
      * Supervises the acknowledgement of an answer delivered to a worker, as the supervisor does: a missing
      * acknowledgement within the host's deadline (by silence where the acknowledgement is informational) ends the
      * worker as lost, and the stub releases its task. The loss is logged as {@code lost_detected} before the stub

@@ -12,6 +12,7 @@ package de.planmarshall.e2e.experiment.question;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
@@ -33,17 +34,21 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * was part of their settings, marked in the result as supplied at re-aggregation
  * ({@link QuestionResults#supplyRunTimeouts}). R4 reads the telemetry checkout for its unused scenario recipes
  * ({@link QuestionLoopExperiment#telemetryFromProperties()}).
+ * <p>
+ * Beside it, the answer audit ({@link QuestionResults#answerAudit}) over every run record of the results directory,
+ * disabled unless {@code -Dpm.experiment.answer-audit=true} is set: it writes
+ * {@code target/verification-results/question-loop/answer-audit.json} and reads the records and the stub directories
+ * they name only.
  */
 @DisplayName("Question loop re-aggregation: one item's result from its records with -Dpm.experiment.reaggregate=<item>")
-@EnabledIfSystemProperty(named = "pm.experiment.reaggregate", matches = ".+")
 class QuestionReaggregation {
 
     @Test
+    @EnabledIfSystemProperty(named = "pm.experiment.reaggregate", matches = ".+")
     @DisplayName("writes the result of the item named by pm.experiment.reaggregate from its existing records")
     void reaggregate() throws Exception {
         var item = System.getProperty("pm.experiment.reaggregate").strip().toUpperCase(Locale.ROOT);
-        var results = Path.of(System.getProperty("pm.experiment.reaggregate.results", "target/question-loop"))
-                .toAbsolutePath();
+        var results = results();
         var runs = QuestionResults.runs(results, item);
         assertFalse(runs.isEmpty(), "no run record of " + item + " in " + results);
         var invocations = QuestionResults.supplyRunTimeouts(QuestionResults.invocations(results, item),
@@ -54,5 +59,27 @@ class QuestionReaggregation {
         var file = QuestionResults.write(item, result);
 
         assertTrue(Files.isRegularFile(file), "no result written for " + item);
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "pm.experiment.answer-audit", matches = "true")
+    @DisplayName("writes the answer audit of every stored run record")
+    void auditAnswers() throws Exception {
+        var results = results();
+        var runs = QuestionResults.readJsonLines(results.resolve("runs.jsonl"));
+        assertFalse(runs.isEmpty(), "no run record in " + results);
+
+        var audit = QuestionResults.answerAudit(runs);
+        var directory = Files.createDirectories(Path.of("target", "verification-results", "question-loop"));
+        var file = directory.resolve("answer-audit.json");
+        Files.writeString(file, QuestionStub.JSON.writerWithDefaultPrettyPrinter().writeValueAsString(audit) + "\n",
+                StandardCharsets.UTF_8);
+
+        assertTrue(Files.isRegularFile(file), "no answer audit written");
+    }
+
+    private static Path results() {
+        return Path.of(System.getProperty("pm.experiment.reaggregate.results", "target/question-loop"))
+                .toAbsolutePath();
     }
 }

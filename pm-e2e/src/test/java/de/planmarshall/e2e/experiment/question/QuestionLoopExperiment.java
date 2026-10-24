@@ -115,6 +115,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * taken as answered at once, without an operator, and the task continues with the decided answer as after an
  * operator's answer (hold, resume, or the fallback task with {@code facts.answers}); a set the quorum escalates reaches
  * the operator and is answered so. The consult runs of Q6 have no quorum, and their questions take the operator's path.
+ * The operator's answer never pairs a branch with a reply text that contradicts it
+ * ({@link QuestionFixtures#composeAnswer}): each run record lists how its answers were composed
+ * ({@value QuestionResults#ANSWER_COMPOSITIONS}) and whether one fell back to the operator's own option
+ * ({@value QuestionResults#ANSWER_FALLBACK_OWN}), and the driver logs each as {@value QuestionDriver#ANSWER_COMPOSED}.
  * When the quorum decides while the asker still holds {@code pm_wait}, the stub offers the continuing task to that
  * generation within the hold; once the asker has taken and closed it, the driver starts no new generation for it
  * ({@link QuestionDriver#continuedByHold(String)}): the run records the continuation as made by hold
@@ -1208,8 +1212,12 @@ class QuestionLoopExperiment {
                 driver.restartStub();
                 hold = hold.dividedBy(2);
             }
-            var answered = driver.awaitAnswer(asked.path(DECISION).asText(), ANSWER_WAIT, hold,
-                    decision -> QuestionFixtures.answer(plan.fixture(), decision, plan.reply()));
+            var answered = driver.awaitAnswer(asked.path(DECISION).asText(), ANSWER_WAIT, hold, decision -> {
+                var composition = QuestionFixtures.composeAnswer(plan.fixture(), decision, plan.reply());
+                var decisionId = decision.path("id").asText();
+                QuestionResults.recordComposition(record, decisionId, plan.reply(), composition);
+                return driver.answerComposed(decisionId, plan.reply(), composition);
+            });
             return answered.isPresent();
         }
 

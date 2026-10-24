@@ -19,6 +19,8 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -94,6 +96,10 @@ final class QuestionFixtures {
     private static final String ASK_OR_PROCEED = "question/ask-or-proceed";
     private static final String APPLY_ANSWER = "question/apply-answer";
     private static final String CHECK_SUBMIT = "answer:text[1..200],judgment:text[0..2000]";
+    private static final String OWN = "own";
+    private static final String OWN_OPTION = "own_option";
+    private static final String OPTIONS = "options";
+    private static final String BRANCH = "branch_key";
     private static final String IMPLEMENT = "Implement the Python function below as its docstring describes, in the "
             + "file solution.py of your working directory.";
 
@@ -131,18 +137,193 @@ final class QuestionFixtures {
     static final String CHECK_AFTER_ANSWER = "The closed question to submit after the operator's answer: once the "
             + "answer is in facts.answers, implement the function as it settles it, then answer: ";
 
-    /** How the operator answers a decision. */
+    /** How the operator answers a decision ({@link #composeAnswer}). */
     enum Reply {
-        /** An answered option: the recommended option, with the fixture's reply as the note. */
+        /**
+         * An answered option: the recommended option, with the fixture's reply as the note; on a fixture with a
+         * consistency hint an option that reads as the reference direction, else the reply as the operator's own
+         * option.
+         */
         OPTION,
         /** An answer with a text: the fixture's reply as the operator's own option. */
         TEXT,
-        /** An assumed default: the choice delegated to the asker's recommendation, with the reply as the note. */
+        /**
+         * An assumed default: the choice delegated to the asker's recommendation, with the reply as the note; on a
+         * fixture with a consistency hint only a recommendation that reads as the reference direction, else the reply
+         * as the operator's own option.
+         */
         DEFAULT,
         /** Only the question asked first is answered (the recommended option); a second flaw stays open. */
         FIRST_ONLY,
         /** The reply only restates the question's options, so the flaw stays open. */
         RESTATE_OPTIONS
+    }
+
+    /** How an option of the asker reads against the reference direction of a fixture ({@link ConsistencyHint}). */
+    enum Direction {
+        /** The option states the direction the fixture's reply and reference settle. */
+        CONSISTENT,
+        /** The option states the opposite direction: chosen with the fixture's reply, the answer contradicts itself. */
+        CONTRADICTING,
+        /** The option states neither, or both. */
+        UNCLEAR
+    }
+
+    /**
+     * The consistency hint of a fixture whose reply asserts a direction: two regular expressions, matched
+     * case-insensitively, one for an option text that states the reference direction and one for an option text that
+     * states the opposite one. An option is read by its label first and, where its label states neither or both, by its
+     * description ({@link #classify(JsonNode)}); an answer chooses only an option that reads as the reference direction
+     * and whose description does not read as the opposite one ({@link #consistent(JsonNode)}). The expressions are
+     * written from the fixture's reply and reference, and checked against the options the askers offered in the stored
+     * runs (the {@code options} of the answer audit, {@link QuestionResults#answerAudit}), not guessed from a model's
+     * wording at answer time. An option they cannot read either way is never chosen: the reply then goes as the
+     * operator's own option.
+     *
+     * @param consistent    matches a text that states the reference direction
+     * @param contradicting matches a text that states the opposite direction
+     * @param reference     the reference direction in words, for the records
+     */
+    record ConsistencyHint(Pattern consistent, Pattern contradicting, String reference) {
+
+        /**
+         * @param option an option of the asker's envelope ({@code label}, {@code description})
+         * @return how it reads: by its label, else by its description
+         */
+        Direction classify(JsonNode option) {
+            var byLabel = classify(option.path("label").asText(""));
+            return byLabel == Direction.UNCLEAR ? classify(option.path("description").asText("")) : byLabel;
+        }
+
+        /**
+         * @param option an option of the asker's envelope
+         * @return whether an answer may choose it: it reads as the reference direction ({@link #classify(JsonNode)})
+         *         and its description does not read as the opposite direction
+         */
+        boolean consistent(JsonNode option) {
+            return classify(option) == Direction.CONSISTENT
+                    && classify(option.path("description").asText("")) != Direction.CONTRADICTING;
+        }
+
+        /**
+         * @param text an option text
+         * @return {@link Direction#CONSISTENT} when only the consistent expression matches,
+         *         {@link Direction#CONTRADICTING} when only the contradicting one does or its last match starts after
+         *         the last match of the consistent one ("compute forward, then reverse"), else
+         *         {@link Direction#UNCLEAR}: neither, or a consistent term after a contradicting one ("reverse order,
+         *         description as stated"), which is never read as consistent
+         */
+        Direction classify(String text) {
+            var lastConsistent = lastMatch(consistent, text);
+            var lastContradicting = lastMatch(contradicting, text);
+            if (lastContradicting < 0) {
+                return lastConsistent < 0 ? Direction.UNCLEAR : Direction.CONSISTENT;
+            }
+            return lastContradicting > lastConsistent ? Direction.CONTRADICTING : Direction.UNCLEAR;
+        }
+
+        private static int lastMatch(Pattern pattern, String text) {
+            var matcher = pattern.matcher(text);
+            var last = -1;
+            while (matcher.find()) {
+                last = matcher.start();
+            }
+            return last;
+        }
+    }
+
+    /**
+     * The consistency hints by fixture id: the apply-answer fixtures and the probe, whose replies assert a direction.
+     * A fixture without one (the Q2 controls, never answered; the two-flaw fixtures of Q5, answered by
+     * {@link Reply#FIRST_ONLY} and {@link Reply#RESTATE_OPTIONS}; the large scenarios of R4, whose replies are the
+     * operator's own words of the recipe) is answered as before. Added after the Q4/Q6 OpenCode run on {@code he-106},
+     * whose operator answer chose the asker's recommended branch (follow the example, descending) beside the fixture's
+     * reply that the description is right and the order that of i, so the model followed the branch and the run was
+     * scored as not following the answer.
+     * <ul>
+     * <li>{@code he-0} (has_close_elements, reference {@code False}): the reply settles "True if any two numbers in the
+     * list are closer to each other than the threshold"; consistent are closer, within, below, less than, at most,
+     * {@code <} or {@code ≤} the threshold, and any two numbers or all pairs; opposite are farther, further, larger,
+     * greater, above, more than, at least the threshold or apart, far, exceeding, {@code >}, {@code ≥} or {@code !=} the
+     * threshold, only consecutive or adjacent pairs, and any pair at all. The reference holds for {@code <} and
+     * {@code ≤} alike (no two of its numbers are within 0.8).</li>
+     * <li>{@code he-106} (f, reference {@code [1, 2, 6, 24, 15, 720, 28]}): the reply settles that the description is
+     * right and the example wrong, the factorial of i for even i and the sum 1..i for odd i, i counted from 1, in the
+     * order of i; consistent are the description, docstring, prose, text or literal reading, ascending, increasing,
+     * forward or natural order, i from 1 or 1 to n, and the reference values {@code [1, 2, 6, 24, 15}; opposite are
+     * the example (not "not the example", nor "the example is wrong" or "treated as erroneous"), descending,
+     * decreasing, reversed (not "without reversal"), backward or from n down to 1 order, a swapped, flipped or inverted
+     * parity rule (the factorial for odd i), a 0-based or 0-indexed i or parity (not a 0-based list position), and
+     * the values of the other readings ({@code [15,}, {@code [28,}, {@code [1, 3, 6}, {@code [1, 1, 2}, {@code [0, 1},
+     * {@code [120}).</li>
+     * <li>{@code probe-resumability} (reference {@code formal}): the reply is {@code Formal.}; consistent is formal,
+     * opposite informal or casual.</li>
+     * </ul>
+     */
+    static final Map<String, ConsistencyHint> CONSISTENCY_HINTS = Map.of(
+            "question/apply-answer/he-0", new ConsistencyHint(
+                    Pattern.compile("closer|\\bclose\\b|within|below|less than|smaller|at most|no (?:farther|further|"
+                            + "more)|any (?:two|pair)|all (?:possible )?pairs|<\\s*=?\\s*(?:the\\s+)?(?:threshold|t\\b)"
+                            + "|≤", Pattern.CASE_INSENSITIVE),
+                    Pattern.compile("(?<!no )farther|(?<!no )further|larger|greater|above|(?<!no )more than|"
+                            + "at least (?:the )?(?:threshold|t\\b)"
+                            + "|at least .{0,20}apart|exceed|\\bfar\\b|consecutive|adjacent|at all|whenever|not exactly"
+                            + "|>\\s*=?\\s*(?:the\\s+)?(?:threshold|t\\b)|≥|!=\\s*(?:the\\s+)?threshold|≠",
+                            Pattern.CASE_INSENSITIVE),
+                    "closer than the threshold"),
+            "question/apply-answer/he-106", new ConsistencyHint(
+                    Pattern.compile("descri|docstring|prose|\\btext\\b|wording|literal|ascend|increas|forward|"
+                            + "natural order|in (?:that|index|normal) order|left[- ]to[- ]right|from 1\\b|\\b1 to n\\b|"
+                            + "\\b1\\.\\.n\\b|\\[\\s*1,\\s*2,\\s*6,\\s*24,\\s*15", Pattern.CASE_INSENSITIVE),
+                    Pattern.compile("(?<!not )(?<!not the )(?<!no )exampl(?!es?(?:'s order)? (?:is |are |must be )?"
+                            + "(?:treated )?(?:as )?(?:wrong|erroneous|incorrect|a typo))|descend|decreas|"
+                            + "(?<!not )(?<!no )(?<!without )revers|backward|down to|\\bfrom n\\b|\\bn to 1\\b|"
+                            + "\\bn\\.\\.1\\b|\\bn\\s*-\\s*[jk]\\b|largest i first|swap|flip|invert|opposite|"
+                            + "0-based (?:index|indexing|parity|i)\\b|0-indexed|zero-based (?:index|i)\\b|"
+                            + "i starts at 0|from 0\\b|\\bi\\s*=\\s*0\\b|(?:factorial|i!)(?:\\(i\\))? "
+                            + "(?:for|on|when|if) (?:i is )?odd|odd i (?:gives|gets|uses) (?:the )?factorial|"
+                            + "\\[\\s*15,|\\[\\s*28,|\\[\\s*1,\\s*3,\\s*6|\\[\\s*1,\\s*1,\\s*2|\\[\\s*0,\\s*1|"
+                            + "\\[\\s*120", Pattern.CASE_INSENSITIVE),
+                    "the description, in the order of i (ascending)"),
+            "probe-resumability", new ConsistencyHint(
+                    Pattern.compile("(?<!in)formal", Pattern.CASE_INSENSITIVE),
+                    Pattern.compile("informal|casual", Pattern.CASE_INSENSITIVE),
+                    "formal"));
+
+    /**
+     * @param fixtureId a fixture id
+     * @return its consistency hint, empty for a fixture without one
+     */
+    static Optional<ConsistencyHint> hint(String fixtureId) {
+        return Optional.ofNullable(CONSISTENCY_HINTS.get(fixtureId));
+    }
+
+    /**
+     * How the answer to one part was composed ({@link #composeAnswer}).
+     *
+     * @param questionId  the part's question id
+     * @param branchKey   the branch the answer chose, {@code own} for the operator's own option
+     * @param label       the label of the chosen option, empty for {@code own}
+     * @param hinted      whether the fixture has a consistency hint
+     * @param hintMatched whether the chosen option reads as the hint's reference direction
+     * @param fallbackOwn whether no option of the asker matched the hint, so the reply went as the operator's own option
+     */
+    record PartNote(String questionId, String branchKey, String label, boolean hinted, boolean hintMatched,
+    boolean fallbackOwn) {
+    }
+
+    /**
+     * An operator's answer with how it was composed.
+     *
+     * @param parts one answer per part
+     * @param notes one note per part, in the same order
+     */
+    record Composition(List<PartAnswer> parts, List<PartNote> notes) {
+
+        /** @return whether any part fell back to the operator's own option */
+        boolean fallbackOwn() {
+            return notes.stream().anyMatch(PartNote::fallbackOwn);
+        }
     }
 
     /**
@@ -639,7 +820,7 @@ final class QuestionFixtures {
     }
 
     /**
-     * Composes the operator's answer to a decision.
+     * Composes the operator's answer to a decision ({@link #composeAnswer}).
      *
      * @param fixture  the fixture
      * @param decision the decision's snapshot ({@link QuestionStub#decision(String)})
@@ -647,25 +828,108 @@ final class QuestionFixtures {
      * @return one answer per part
      */
     static List<PartAnswer> answer(Fixture fixture, JsonNode decision, Reply reply) {
+        return composeAnswer(fixture, decision, reply).parts();
+    }
+
+    /**
+     * Composes the operator's answer to a decision so that it never contradicts itself: the reply text of an
+     * apply-answer fixture asserts the reference direction, so a chosen branch must state the same direction.
+     * <ul>
+     * <li>{@link Reply#OPTION} ({@code chosen}) on a fixture with a consistency hint ({@link #hint(String)}): the asker's
+     * recommended option when it reads as the reference direction, else the first of its options that does, with the
+     * fixture's reply as the note; when none does, the reply goes as the operator's own option ({@code own},
+     * {@code own_option}) and the part is marked {@link PartNote#fallbackOwn()}.</li>
+     * <li>{@link Reply#DEFAULT} ({@code delegated}: the operator accepts the asker's recommendation) on such a fixture:
+     * the recommendation when it reads as the reference direction; otherwise no delegation can carry the reply without
+     * contradicting it, and the reply goes as the operator's own option, marked {@link PartNote#fallbackOwn()}. A
+     * neutral delegation text with the reference taken from the recommendation is not used, because the evaluation
+     * scores every run, {@code delegated} included, against the fixture's reference ({@code followsReference} of
+     * {@link QuestionResults}): a delegation to a contradicting recommendation would be scored as not following.</li>
+     * <li>A part without options (a value part) and every fixture without a hint: answered as before, the recommended
+     * branch with the reply.</li>
+     * <li>{@link Reply#TEXT}, {@link Reply#FIRST_ONLY} and {@link Reply#RESTATE_OPTIONS}: as before.</li>
+     * </ul>
+     * Where the recommended option reads as the reference direction, the answer is the one composed before the hint.
+     *
+     * @param fixture  the fixture
+     * @param decision the decision's snapshot ({@link QuestionStub#decision(String)})
+     * @param reply    how the operator answers
+     * @return the answer per part and how each was composed
+     */
+    static Composition composeAnswer(Fixture fixture, JsonNode decision, Reply reply) {
         var answers = new ArrayList<PartAnswer>();
+        var notes = new ArrayList<PartNote>();
         var parts = decision.path("envelope").path("parts");
         var ids = decision.path("items");
+        var hint = hint(fixture.id());
         for (var index = 0; index < parts.size(); index++) {
             var part = parts.get(index);
             var questionId = questionId(decision, index, ids);
-            var recommended = part.path("recommendation").path("branch_key").asText("own");
+            var recommended = part.path("recommendation").path("branch_key").asText(OWN);
             var first = index == 0;
-            answers.add(switch (reply) {
-                case OPTION -> new PartAnswer(questionId, recommended, fixture.reply(), "chosen");
-                case TEXT -> new PartAnswer(questionId, "own", fixture.reply(), "own_option");
-                case DEFAULT -> new PartAnswer(questionId, recommended, fixture.reply(), "delegated");
-                case FIRST_ONLY -> first ? new PartAnswer(questionId, recommended,
+            var fallback = false;
+            PartAnswer answer;
+            switch (reply) {
+                case OPTION, DEFAULT -> {
+                    var delegated = reply == Reply.DEFAULT;
+                    var choice = hint.isEmpty() || part.path(OPTIONS).isEmpty() ? Optional.of(recommended)
+                            : consistentChoice(part, hint.get(), recommended, delegated);
+                    fallback = choice.isEmpty();
+                    answer = choice.map(key -> new PartAnswer(questionId, key, fixture.reply(),
+                            delegated ? "delegated" : "chosen"))
+                            .orElseGet(() -> new PartAnswer(questionId, OWN, fixture.reply(), OWN_OPTION));
+                }
+                case TEXT -> answer = new PartAnswer(questionId, OWN, fixture.reply(), OWN_OPTION);
+                case FIRST_ONLY -> answer = first ? new PartAnswer(questionId, recommended,
                         "This settles what you asked; nothing else is settled.", "chosen")
-                        : new PartAnswer(questionId, "own", "Not settled by this answer.", "own_option");
-                case RESTATE_OPTIONS -> new PartAnswer(questionId, "own", restate(part), "own_option");
-            });
+                        : new PartAnswer(questionId, OWN, "Not settled by this answer.", OWN_OPTION);
+                case RESTATE_OPTIONS -> answer = new PartAnswer(questionId, OWN, restate(part), OWN_OPTION);
+                default -> throw new IllegalArgumentException("unknown reply " + reply);
+            }
+            answers.add(answer);
+            var option = option(part, answer.branchKey());
+            var matched = option.isPresent() && hint.map(value -> value.consistent(option.get())).orElse(false);
+            notes.add(new PartNote(questionId, answer.branchKey(), option.map(value -> value.path("label").asText())
+                    .orElse(""), hint.isPresent(), matched, fallback));
         }
-        return answers;
+        return new Composition(List.copyOf(answers), List.copyOf(notes));
+    }
+
+    /**
+     * The branch an {@link Reply#OPTION} or {@link Reply#DEFAULT} answer chooses on a fixture with a consistency hint:
+     * the recommended option when it reads as the reference direction; for {@link Reply#OPTION} otherwise the first
+     * option in the asker's order that does; empty when none qualifies.
+     *
+     * @param part        the part, with options
+     * @param hint        the fixture's hint
+     * @param recommended the recommended branch
+     * @param delegated   whether the operator delegates to the recommendation ({@link Reply#DEFAULT})
+     * @return the branch, empty when the reply must go as the operator's own option
+     */
+    static Optional<String> consistentChoice(JsonNode part, ConsistencyHint hint, String recommended,
+            boolean delegated) {
+        var recommendedOption = option(part, recommended);
+        if (recommendedOption.isPresent() && hint.consistent(recommendedOption.get())) {
+            return Optional.of(recommended);
+        }
+        if (delegated) {
+            return Optional.empty();
+        }
+        for (var option : part.path(OPTIONS)) {
+            if (hint.consistent(option)) {
+                return Optional.of(option.path(BRANCH).asText());
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<JsonNode> option(JsonNode part, String branchKey) {
+        for (var option : part.path(OPTIONS)) {
+            if (branchKey.equals(option.path(BRANCH).asText())) {
+                return Optional.of(option);
+            }
+        }
+        return Optional.empty();
     }
 
     private static String questionId(JsonNode decision, int index, JsonNode items) {
