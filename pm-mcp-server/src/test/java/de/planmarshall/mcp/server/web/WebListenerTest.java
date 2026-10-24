@@ -141,7 +141,7 @@ class WebListenerTest {
             assertEquals(200, status.status(), status.body());
             assertTrue(new JsonObject(status.body()).getJsonObject("web").getBoolean("open"));
             assertEquals(port, new JsonObject(status.body()).getJsonObject("web").getInteger("port"));
-            WebRequestHandler.SECURITY_HEADERS.forEach((name, value) -> assertEquals(value,
+            WebRequestHandler.securityHeaders(StaticWebApp.fromContextClassLoader()).forEach((name, value) -> assertEquals(value,
                     status.headers().get(name.toLowerCase(Locale.ROOT)), name));
             assertFalse(status.headers().keySet().stream().anyMatch(name -> name.startsWith("access-control-")));
 

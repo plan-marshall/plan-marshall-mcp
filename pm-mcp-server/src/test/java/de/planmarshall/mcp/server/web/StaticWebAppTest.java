@@ -231,4 +231,54 @@ class StaticWebAppTest {
             }
         }
     }
+
+    @Test
+    @DisplayName("extracts the SHA-256 hash of an inline script from HTML")
+    void shouldExtractInlineScriptHash() {
+        var html = """
+                <!doctype html>
+                <html>
+                  <head>
+                    <script>console.log('hello');</script>
+                  </head>
+                </html>
+                """;
+        var hash = StaticWebApp.extractScriptHash(html);
+
+        assertTrue(hash.isPresent());
+        assertEquals(StaticWebApp.sha256Hash("console.log('hello');"), hash.get());
+    }
+
+    @Test
+    @DisplayName("ignores external scripts with a src attribute and empty scripts")
+    void shouldIgnoreExternalAndEmptyScripts() {
+        var html = """
+                <!doctype html>
+                <html>
+                  <head>
+                    <script src="/_app/immutable/app.js"></script>
+                    <script></script>
+                    <script src="https://example.com/ext.js">ignored inline body</script>
+                  </head>
+                </html>
+                """;
+        assertTrue(StaticWebApp.extractScriptHash(html).isEmpty());
+        assertTrue(StaticWebApp.extractScriptHash("<!doctype html><html></html>").isEmpty());
+        assertTrue(StaticWebApp.extractScriptHash(null).isEmpty());
+        assertTrue(StaticWebApp.extractScriptHash("   ").isEmpty());
+    }
+
+    @Test
+    @DisplayName("computes inlineScriptHash for an app loaded from a class loader fixture")
+    void shouldComputeInlineScriptHashForAppFixture() throws Exception {
+        var inlineScript = "window.__boot = 42;";
+        var customHtml = "<!doctype html><html><script>" + inlineScript + "</script></html>";
+        var appDir = root.resolve("custom-app");
+        write(appDir.resolve(RESOURCES), "index.html", customHtml);
+        try (var customLoader = new URLClassLoader(new URL[]{appDir.toUri().toURL()}, null)) {
+            var customApp = new StaticWebApp(customLoader);
+            assertTrue(customApp.inlineScriptHash().isPresent());
+            assertEquals(StaticWebApp.sha256Hash(inlineScript), customApp.inlineScriptHash().get());
+        }
+    }
 }

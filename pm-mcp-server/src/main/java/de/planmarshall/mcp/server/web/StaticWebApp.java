@@ -13,12 +13,18 @@ import java.io.IOException;
 import java.net.JarURLConnection;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 
 import io.vertx.core.buffer.Buffer;
@@ -89,8 +95,12 @@ final class StaticWebApp {
             Map.entry("xml", "application/xml"),
             Map.entry("wasm", "application/wasm"));
 
+    private static final Pattern INLINE_SCRIPT = Pattern.compile(
+            "(?is)<script\\b(?![^>]*\\bsrc=)[^>]*>(.*?)</script>");
+
     private final ClassLoader loader;
     private final boolean present;
+    private final Optional<String> inlineScriptHash;
 
     /**
      * @param loader the class loader that sees the resource JAR
@@ -98,6 +108,7 @@ final class StaticWebApp {
     StaticWebApp(ClassLoader loader) {
         this.loader = Objects.requireNonNull(loader, "loader");
         this.present = loader.getResource(ROOT + URL_PATH_SEPARATOR + INDEX) != null;
+        this.inlineScriptHash = present ? extractInlineScriptHash(loader) : Optional.empty();
     }
 
     /**
@@ -123,6 +134,58 @@ final class StaticWebApp {
      */
     boolean present() {
         return present;
+    }
+
+    /**
+     * @return the CSP hash expression of the entry document's inline scripts, e.g. {@code 'sha256-...'},
+     *         or empty if no inline script is present
+     */
+    Optional<String> inlineScriptHash() {
+        return inlineScriptHash;
+    }
+
+    private static Optional<String> extractInlineScriptHash(ClassLoader loader) {
+        var url = loader.getResource(ROOT + URL_PATH_SEPARATOR + INDEX);
+        if (url == null) {
+            return Optional.empty();
+        }
+        try (var in = url.openStream()) {
+            var html = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return extractScriptHash(html);
+        } catch (IOException _) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Extracts all inline script elements from the given HTML and computes their SHA-256 base64 CSP expressions.
+     *
+     * @param html the HTML content of the entry document
+     * @return the space-separated CSP hash tokens (e.g. {@code 'sha256-<base64>'}), or empty if none
+     */
+    static Optional<String> extractScriptHash(String html) {
+        if (html == null || html.isBlank()) {
+            return Optional.empty();
+        }
+        var matcher = INLINE_SCRIPT.matcher(html);
+        var hashes = new LinkedHashSet<String>();
+        while (matcher.find()) {
+            var body = matcher.group(1);
+            if (!body.isBlank()) {
+                hashes.add(sha256Hash(body));
+            }
+        }
+        return hashes.isEmpty() ? Optional.empty() : Optional.of(String.join(" ", hashes));
+    }
+
+    static String sha256Hash(String scriptBody) {
+        try {
+            var md = MessageDigest.getInstance("SHA-256");
+            var digest = md.digest(scriptBody.getBytes(StandardCharsets.UTF_8));
+            return "'sha256-" + Base64.getEncoder().encodeToString(digest) + "'";
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not supported", e);
+        }
     }
 
     /**

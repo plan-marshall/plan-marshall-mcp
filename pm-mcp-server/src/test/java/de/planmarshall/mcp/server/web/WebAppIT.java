@@ -14,13 +14,30 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.WebSocket;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.regex.Pattern;
 
 
@@ -31,6 +48,7 @@ import de.planmarshall.mcp.server.test.VerificationResults;
 import de.planmarshall.runtime.test.TestBases;
 import io.vertx.core.json.JsonObject;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -102,7 +120,19 @@ class WebAppIT {
     }
 
     private static void assertSecurityHeaders(UdsHttp.Response response) {
-        WebRequestHandler.SECURITY_HEADERS.forEach((name, value) -> assertEquals(value, header(response, name), name));
+        assertEquals("DENY", header(response, "X-Frame-Options"));
+        assertEquals("nosniff", header(response, "X-Content-Type-Options"));
+        assertEquals("no-referrer", header(response, "Referrer-Policy"));
+        var csp = header(response, "Content-Security-Policy");
+        assertNotNull(csp, "Content-Security-Policy");
+        assertTrue(csp.startsWith("default-src 'self'; script-src 'self' 'sha256-"),
+                "CSP script-src must carry sha256 hash: " + csp);
+        assertFalse(csp.contains("'unsafe-inline'"), "CSP must never contain 'unsafe-inline'");
+        assertTrue(csp.contains("connect-src 'self'"), "CSP connect-src");
+        assertTrue(csp.contains("object-src 'none'"), "CSP object-src");
+        assertTrue(csp.contains("base-uri 'none'"), "CSP base-uri");
+        assertTrue(csp.contains("frame-ancestors 'none'"), "CSP frame-ancestors");
+        assertTrue(csp.contains("require-trusted-types-for 'script'"), "CSP Trusted Types");
     }
 
     @Test
@@ -174,5 +204,238 @@ class WebAppIT {
             assertTrue(header(response, "Content-Type").startsWith("text/html"));
             assertNotNull(header(response, "Content-Security-Policy"));
         }
+    }
+
+    @Test
+    @DisplayName("boots the packaged web app in a headless browser under its own CSP")
+    void shouldBootInHeadlessBrowserUnderCsp() throws Exception {
+        var chrome = findChromeBinary();
+        Assumptions.assumeTrue(chrome != null,
+                "Chromium or Google Chrome not found on host; skipping browser smoke");
+        try (var listener = enabled()) {
+            var port = listener.port();
+            var result = smokeInBrowser(chrome, port);
+
+            assertEquals(List.of(), result.cspViolations(),
+                    "Browser console must have no CSP violations: " + result.cspViolations());
+            assertEquals("plan-marshall", result.title());
+            assertTrue(result.hasVisibleElement(), "App must render a known visible element");
+            assertEquals(401, result.apiStatus(), "In-page fetch to /api/v1/status must succeed without CSP violation");
+
+            var values = new LinkedHashMap<String, Object>();
+            values.put("browser_tested", true);
+            values.put("browser_title", result.title());
+            values.put("browser_element_rendered", result.hasVisibleElement());
+            values.put("browser_api_status", result.apiStatus());
+            values.put("browser_csp_clean", result.cspViolations().isEmpty());
+            VerificationResults.write("web-app-browser-proof", values, true);
+        }
+    }
+
+    record BrowserResult(String title, boolean hasVisibleElement, int apiStatus, List<String> cspViolations) {
+    }
+
+    private static Path findChromeBinary() {
+        var env = System.getenv("CHROME_BIN");
+        if (env != null && Files.isExecutable(Path.of(env))) {
+            return Path.of(env);
+        }
+        var candidates = List.of(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Users/oliver/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/usr/bin/google-chrome",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser");
+        for (var candidate : candidates) {
+            var path = Path.of(candidate);
+            if (Files.isExecutable(path)) {
+                return path;
+            }
+        }
+        var pathEnv = System.getenv("PATH");
+        if (pathEnv != null) {
+            for (var dir : pathEnv.split(Pattern.quote(File.pathSeparator))) {
+                for (var name : List.of("google-chrome", "chromium", "chromium-browser", "chrome")) {
+                    var candidate = Path.of(dir, name);
+                    if (Files.isExecutable(candidate)) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static BrowserResult smokeInBrowser(Path chrome, int port) throws Exception {
+        var tempProfile = Files.createTempDirectory("chrome-smoke-");
+        int cdpPort;
+        try (var s = new ServerSocket(0)) {
+            cdpPort = s.getLocalPort();
+        }
+        var pb = new ProcessBuilder(
+                chrome.toString(),
+                "--headless=new",
+                "--remote-debugging-port=" + cdpPort,
+                "--user-data-dir=" + tempProfile.toAbsolutePath(),
+                "--no-sandbox",
+                "--disable-gpu");
+        var process = pb.start();
+        try {
+            var http = HttpClient.newHttpClient();
+            var deadline = System.currentTimeMillis() + 10_000;
+            String wsUrl = null;
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + cdpPort + "/json/new?http://127.0.0.1:" + port + "/"))
+                            .PUT(HttpRequest.BodyPublishers.noBody())
+                            .build();
+                    var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+                    if (resp.statusCode() == 200) {
+                        var json = new JsonObject(resp.body());
+                        wsUrl = json.getString("webSocketDebuggerUrl");
+                        break;
+                    }
+                } catch (IOException _) {
+                    Thread.sleep(100);
+                }
+            }
+            if (wsUrl == null) {
+                throw new IllegalStateException("Failed to connect to Chrome DevTools port " + cdpPort + " within 10s");
+            }
+
+            var cspViolations = new CopyOnWriteArrayList<String>();
+            var messageQueue = new ConcurrentHashMap<Integer, CompletableFuture<JsonObject>>();
+            var nextId = new AtomicInteger(1);
+
+            var ws = http.newWebSocketBuilder().buildAsync(URI.create(wsUrl), new WebSocket.Listener() {
+                private final StringBuilder buffer = new StringBuilder();
+
+                @Override
+                public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+                    buffer.append(data);
+                    if (last) {
+                        var text = buffer.toString();
+                        buffer.setLength(0);
+                        try {
+                            var msg = new JsonObject(text);
+                            var id = msg.getInteger("id");
+                            if (id != null) {
+                                var fut = messageQueue.remove(id);
+                                if (fut != null) {
+                                    fut.complete(msg);
+                                }
+                            }
+                            var method = msg.getString("method");
+                            if ("Runtime.consoleAPICalled".equals(method)) {
+                                var params = msg.getJsonObject("params");
+                                var type = params.getString("type");
+                                var args = params.getJsonArray("args");
+                                var line = type + ": " + (args != null ? args.encode() : "");
+                                if (isCspViolation(line)) {
+                                    cspViolations.add(line);
+                                }
+                            } else if ("Log.entryAdded".equals(method)) {
+                                var entry = msg.getJsonObject("params").getJsonObject("entry");
+                                var textEntry = entry.getString("text", "");
+                                if (isCspViolation(textEntry)) {
+                                    cspViolations.add(textEntry);
+                                }
+                            } else if ("Runtime.exceptionThrown".equals(method)) {
+                                var details = msg.getJsonObject("params").getJsonObject("exceptionDetails");
+                                var exception = details != null ? details.getJsonObject("exception") : null;
+                                var exceptionText = details != null ? details.getString("text", "") : "";
+                                if (exception != null) {
+                                    exceptionText += " " + exception.getString("description", "");
+                                }
+                                if (isCspViolation(exceptionText)) {
+                                    cspViolations.add(exceptionText);
+                                }
+                            }
+                        }
+                        /*TODO: Catch specific not Exception. Suppress: // cui-rewrite:disable InvalidExceptionUsageRecipe*/
+                        catch (Exception _) {
+                        }
+                    }
+                    webSocket.request(1);
+                    return null;
+                }
+            }).get(5, TimeUnit.SECONDS);
+
+            BiFunction<String, JsonObject, CompletableFuture<JsonObject>> send = (method, params) -> {
+                int id = nextId.getAndIncrement();
+                var fut = new CompletableFuture<JsonObject>();
+                messageQueue.put(id, fut);
+                var req = new JsonObject().put("id", id).put("method", method);
+                if (params != null) {
+                    req.put("params", params);
+                }
+                ws.sendText(req.encode(), true);
+                return fut;
+            };
+
+            send.apply("Runtime.enable", null).get(5, TimeUnit.SECONDS);
+            send.apply("Log.enable", null).get(5, TimeUnit.SECONDS);
+
+            Thread.sleep(2000);
+
+            var titleRes = send.apply("Runtime.evaluate", new JsonObject().put("expression", "document.title"))
+                    .get(5, TimeUnit.SECONDS);
+            var title = titleRes.getJsonObject("result", new JsonObject())
+                    .getJsonObject("result", new JsonObject())
+                    .getString("value", "");
+
+            var elemRes = send.apply("Runtime.evaluate", new JsonObject().put("expression",
+                    "document.querySelector('.app-loading, .app-header, [data-testid=\"brand-inert\"], .app-body') != null"))
+                    .get(5, TimeUnit.SECONDS);
+            var hasElement = Boolean.TRUE.equals(elemRes.getJsonObject("result", new JsonObject())
+                    .getJsonObject("result", new JsonObject())
+                    .getBoolean("value"));
+
+            var apiRes = send.apply("Runtime.evaluate", new JsonObject().put("expression",
+                    "fetch('/api/v1/status').then(r => r.status)").put("awaitPromise", true))
+                    .get(5, TimeUnit.SECONDS);
+            var apiStatus = apiRes.getJsonObject("result", new JsonObject())
+                    .getJsonObject("result", new JsonObject())
+                    .getInteger("value", 0);
+
+            try {
+                ws.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(3, TimeUnit.SECONDS);
+            }
+            /*TODO: Catch specific not Exception. Suppress: // cui-rewrite:disable InvalidExceptionUsageRecipe*/
+            catch (Exception _) {
+            }
+
+            return new BrowserResult(title, hasElement, apiStatus, List.copyOf(cspViolations));
+        } finally {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+            try (var s = Files.walk(tempProfile)) {
+                s.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try {
+                        Files.deleteIfExists(p);
+                    }
+                    /*TODO: Catch specific not Exception. Suppress: // cui-rewrite:disable InvalidExceptionUsageRecipe*/
+                    catch (Exception _) {
+                    }
+                });
+            }
+            /*TODO: Catch specific not Exception. Suppress: // cui-rewrite:disable InvalidExceptionUsageRecipe*/
+            catch (Exception _) {
+            }
+        }
+    }
+
+    private static boolean isCspViolation(String text) {
+        if (text == null) {
+            return false;
+        }
+        var lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("content security policy")
+                || lower.contains("refused to execute")
+                || lower.contains("refused to apply")
+                || lower.contains("trustedscript")
+                || lower.contains("trustedhtml")
+                || lower.contains("trusted type");
     }
 }
