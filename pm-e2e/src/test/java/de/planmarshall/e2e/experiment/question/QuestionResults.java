@@ -52,7 +52,10 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * continuation generation ({@value #CONTINUATION_EARLY_EXIT}), had a voter that ended early
  * ({@value #VOTER_EARLY_EXIT}), met a quota error of the harness, failed its fixture setup before any worker launched
  * ({@value #SETUP_FAILED}), asked, continued and submitted, and a Q4 group its
- * runs that continued on another host ({@value #CROSS_HOST_RUNS}), figures no verdict reads; where a group has quota
+ * runs that continued on another host ({@value #CROSS_HOST_RUNS}), figures no verdict reads; it names the runs that
+ * timed out ({@value #TIMED_OUT_RUNS}), counts the runs whose continuation got no worker
+ * ({@value #CONTINUATION_NOT_STARTED}), and a group of Q4, Q6 or R4 names the runs that did not follow the reference
+ * ({@value #NOT_FOLLOWING_REFERENCE_RUNS}), likewise figures no verdict reads; where a group has quota
  * errors, it also reports its verdict without them
  * ({@code verdict_without_quota_error}), and where its verdict without its continuation early exits reads differently,
  * that verdict ({@value #VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT}): additional figures that do not replace the
@@ -548,6 +551,8 @@ final class QuestionResults {
         limitOfSetupFailures(result, runs, contributing.values());
         limitOfReidentifiedGenerations(result, runs);
         limitOfAnswerFallbacks(result, runs);
+        limitOfContinuationGaps(result, runs);
+        limitOfReferenceFormat(result, item, runs);
         switch (item) {
             case "Q3" -> limitOfQ3Times(result);
             case "Q4" -> limitOfQ4CrossHost(result, runs);
@@ -1319,6 +1324,7 @@ final class QuestionResults {
             return group;
         }
         var launched = withSetup.isEmpty() ? views : withSetup;
+        notFollowingReference(item, launched, group);
         var pass = judge(item, launched, group);
         group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
         var withoutQuota = new ArrayList<RunView>();
@@ -1374,7 +1380,9 @@ final class QuestionResults {
      * ({@link #voterEarlyExit(RunView)}), {@value #QUOTA_ERROR}
      * ({@link #quotaError(RunView)}), {@value #SETUP_FAILED} ({@link #setupFailed(JsonNode)}), {@code asked},
      * {@code continued} and {@code submitted} (runs with at least one such event), and {@value #ANSWER_FALLBACK_OWN}
-     * (runs whose record says an operator answer fell back to the operator's own option). A quota-error run counts in
+     * (runs whose record says an operator answer fell back to the operator's own option), {@value #TIMED_OUT_RUNS}
+     * (the ids of the runs counted in {@code timed_out}) and {@value #CONTINUATION_NOT_STARTED}
+     * ({@link #continuationNotStarted(RunView)}). A quota-error run counts in
      * {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask}, {@code early_exit} or
      * {@value #CONTINUATION_EARLY_EXIT}; a continuation early exit not in {@code timed_out}, even where its record,
      * written before the driver ended the wait on it, says timed out; a run whose setup failed in
@@ -1396,6 +1404,8 @@ final class QuestionResults {
         var continued = 0;
         var submitted = 0;
         var fallbacks = 0;
+        var notStarted = 0;
+        var timedOutRuns = QuestionStub.JSON.createArrayNode();
         for (var view : views) {
             if (setupFailed(view.run())) {
                 setupFailures++;
@@ -1409,7 +1419,12 @@ final class QuestionResults {
             } else {
                 var continuationExited = continuationExit(view) == ContinuationExit.EXITED;
                 continuationEarlyExits += continuationExited ? 1 : 0;
-                timedOut += view.run().path(TIMED_OUT).asBoolean() && !continuationExited ? 1 : 0;
+                var timedOutHere = view.run().path(TIMED_OUT).asBoolean() && !continuationExited;
+                timedOut += timedOutHere ? 1 : 0;
+                if (timedOutHere) {
+                    timedOutRuns.add(runId(view.run()));
+                }
+                notStarted += continuationNotStarted(view) ? 1 : 0;
                 noAsk += askedHere ? 0 : 1;
                 earlyExits += earlyExit(view) ? 1 : 0;
                 voterEarlyExits += voterEarlyExit(view) ? 1 : 0;
@@ -1429,6 +1444,170 @@ final class QuestionResults {
         group.put("continued", continued);
         group.put(SUBMITTED, submitted);
         group.put(ANSWER_FALLBACK_OWN, fallbacks);
+        group.put(CONTINUATION_NOT_STARTED, notStarted);
+        group.set(TIMED_OUT_RUNS, timedOutRuns);
+    }
+
+    /**
+     * The group figure of the ids of its runs counted in {@code timed_out} ({@link #counts}): which run timed out, a
+     * reported figure, no verdict reads it.
+     */
+    static final String TIMED_OUT_RUNS = "timed_out_runs";
+    /**
+     * The group figure of the ids of its runs whose last submission does not follow the reference, as the verdict of
+     * Q4 and Q6 reads it ({@link #followsReference(RunView)}; in R4 among its runs that asked): which run missed, a
+     * reported figure, no verdict reads it.
+     */
+    static final String NOT_FOLLOWING_REFERENCE_RUNS = "not_following_reference_runs";
+    /**
+     * The group figure of its runs whose continuation got no worker ({@link #continuationNotStarted(RunView)}): a
+     * reported figure, no verdict reads it.
+     */
+    static final String CONTINUATION_NOT_STARTED = "continuation_not_started";
+
+    /**
+     * Whether a run's continuation got no worker: its record names the reason
+     * ({@value QuestionDriver#CONTINUATION_GAP}), or the run timed out and its stub log shows a {@code continued} event
+     * after which no generation was started ({@code worker_started}) and the continuing task was never offered. The
+     * second reading finds the runs of the driver before 2026-10-25, which started no generation for a warm asker that
+     * had exited instead of calling {@code pm_wait} (run {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04}),
+     * among records whose stub log still exists.
+     *
+     * @param view a run
+     * @return whether its continuation got no worker
+     */
+    static boolean continuationNotStarted(RunView view) {
+        if (view.run().path(QuestionDriver.CONTINUATION_GAP).isTextual()) {
+            return true;
+        }
+        if (!view.run().path(TIMED_OUT).asBoolean()) {
+            return false;
+        }
+        for (var continued : view.named("continued")) {
+            var task = continued.path(TASK).asText();
+            var at = continued.path("at").asLong();
+            var served = view.events().stream().filter(event -> event.path("at").asLong() >= at)
+                    .anyMatch(event -> "worker_started".equals(event.path(EVENT).asText())
+                            || OFFERED.equals(event.path(EVENT).asText()) && task.equals(event.path(TASK).asText()));
+            if (!served) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Adds a limit naming the runs whose continuation got no worker ({@link #continuationNotStarted(RunView)}), and the
+     * runs whose warm asker exited after its ask instead of calling {@code pm_wait}
+     * ({@value QuestionDriver#WARM_ASKER_EXITED}), whose continuation the driver started in a new generation. A run
+     * without a worker for its continuation waited out its run limit and counts as timed_out as before; the verdict
+     * logic is unchanged.
+     *
+     * @param result the result
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    static void limitOfContinuationGaps(ObjectNode result, List<JsonNode> runs) throws IOException {
+        var gaps = new TreeMap<String, List<String>>();
+        var exited = new TreeMap<String, List<String>>();
+        for (var run : runs) {
+            if (continuationNotStarted(view(run))) {
+                gaps.computeIfAbsent(run.path(HOST).asText(), _ -> new ArrayList<>()).add(runId(run) + " ("
+                        + run.path(QuestionDriver.CONTINUATION_GAP).asText("no generation after continued") + ")");
+            }
+            if (run.path(QuestionDriver.WARM_ASKER_EXITED).asBoolean()) {
+                exited.computeIfAbsent(run.path(HOST).asText(), _ -> new ArrayList<>()).add(runId(run));
+            }
+        }
+        if (gaps.isEmpty() && exited.isEmpty()) {
+            return;
+        }
+        var text = new StringBuilder("A warm asker is expected to take its continuation over pm_wait. Before "
+                + "2026-10-25 the driver started no generation for the continuation of a warm asker that had exited "
+                + "after its ask instead of calling pm_wait, and waited for that call up to the host's silence limit "
+                + "before it answered; the stub continued the task, nobody took it, and the run waited out its run "
+                + "limit as timed_out. The driver now ends that wait at the exit and starts a generation leased on the "
+                + "queued continuation (" + QuestionDriver.WARM_ASKER_EXITED + "), and records a continuation that "
+                + "gets no worker with its reason (" + QuestionDriver.CONTINUATION_GAP + "). The verdict logic is "
+                + "unchanged and reads these runs as before.");
+        if (!gaps.isEmpty()) {
+            text.append(" Continuation without a worker: ").append(namedRuns(gaps)).append('.');
+        }
+        if (!exited.isEmpty()) {
+            text.append(" Warm asker exited, continuation started in a new generation: ").append(namedRuns(exited))
+                    .append('.');
+        }
+        limit(result, text.toString());
+    }
+
+    /**
+     * Adds the ids of a group's runs whose last submission does not follow the reference
+     * ({@value #NOT_FOLLOWING_REFERENCE_RUNS}) for the items whose verdict or figures read it: Q4 and Q6 over all
+     * runs, R4 over its runs that asked. A reported figure; the verdict logic is unchanged.
+     *
+     * @param item  the item
+     * @param views the group's runs
+     * @param group the group
+     */
+    static void notFollowingReference(String item, List<RunView> views, ObjectNode group) {
+        if (!Set.of("Q4", "Q6", "R4").contains(item)) {
+            return;
+        }
+        var ids = group.putArray(NOT_FOLLOWING_REFERENCE_RUNS);
+        for (var view : views) {
+            if ("R4".equals(item) && view.named(ASKED).isEmpty()) {
+                continue;
+            }
+            if (!followsReference(view)) {
+                ids.add(runId(view.run()));
+            }
+        }
+    }
+
+    /**
+     * Whether a run's last submission states the reference within a longer text: the submitted answer, read as
+     * {@link #followsReference(RunView)} reads it, is not the reference but contains it (OpenCode's run
+     * {@code Q4-opencode-fresh-question_apply-answer_he-106-002-a79333b6} submitted
+     * {@code f(7) == [1, 2, 6, 24, 15, 720, 28]} for the reference {@code [1, 2, 6, 24, 15, 720, 28]}).
+     *
+     * @param view a run
+     * @return whether its submission wraps the reference
+     */
+    static boolean referenceWrapped(RunView view) {
+        var reference = normalize(view.run().path("reference").asText());
+        var answer = normalize(lastSubmitArgs(view).path("answer").asText());
+        return !reference.isEmpty() && !reference.equals(answer) && answer.contains(reference);
+    }
+
+    /**
+     * Adds a limit naming the runs of Q4, Q6 and R4 that count as not following the reference only by the form of
+     * their submission ({@link #referenceWrapped(RunView)}): the check compares the whole submitted answer with the
+     * reference after trimming, lower case, outer quotes and runs of white space, so a submission that states the
+     * reference within an expression counts as a miss. The check is not changed.
+     *
+     * @param result the result
+     * @param item   the item
+     * @param runs   its run records
+     * @throws IOException if a run's files cannot be read
+     */
+    static void limitOfReferenceFormat(ObjectNode result, String item, List<JsonNode> runs) throws IOException {
+        if (!Set.of("Q4", "Q6", "R4").contains(item)) {
+            return;
+        }
+        var wrapped = new TreeMap<String, List<String>>();
+        for (var run : runs) {
+            if (referenceWrapped(view(run))) {
+                wrapped.computeIfAbsent(run.path(HOST).asText(), _ -> new ArrayList<>()).add(runId(run));
+            }
+        }
+        if (wrapped.isEmpty()) {
+            return;
+        }
+        limit(result, "Whether a run follows the reference is read from its last submission: its answer must equal "
+                + "the reference after trimming, lower case, outer quotes and runs of white space, so an answer that "
+                + "states the reference within a longer text (an expression such as f(7) == [...]) counts as not "
+                + "following, by its form alone. The check is unchanged; these runs count as not following although "
+                + "their answer contains the reference: " + namedRuns(wrapped) + ".");
     }
 
     /**

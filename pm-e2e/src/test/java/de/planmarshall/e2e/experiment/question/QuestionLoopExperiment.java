@@ -124,7 +124,11 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * ({@link QuestionDriver#continuedByHold(String)}): the run records the continuation as made by hold
  * ({@value QuestionDriver#CONTINUED_BY_HOLD}), counts it as continued and submitted as any continuation by hold, and
  * ends when its entry is done, a hold still kept being ended with {@code wait: end}. A decision that comes after the
- * asker exited leaves the continuation queued, and a new generation takes it as before.
+ * asker exited leaves the continuation queued, and a new generation takes it as before. A warm asker is expected to
+ * take its continuation over {@code pm_wait}; one whose process exited after its ask, instead of calling
+ * {@code pm_wait}, ends the driver's wait for its stop at once, and its queued continuation gets a new generation
+ * ({@value QuestionDriver#WARM_ASKER_EXITED}); a continuation that gets no worker is recorded with its reason
+ * ({@value QuestionDriver#CONTINUATION_GAP}), never as a silent timeout.
  * Each vote task gets one voter, never restarted, and is never offered again: a voter that exits without a vote closes
  * its vote task {@code lost} at once, and the set escalates with {@code role_unavailable}, the decision rule of the
  * specification (a missing vote never counts as agreement). A voter that connected and exited without a single call is
@@ -1341,9 +1345,34 @@ class QuestionLoopExperiment {
             return recovery;
         }
 
+        /**
+         * Continues a decision in the fallback form. A warm asker on its own host is expected to take the stub's
+         * continuation over its {@code pm_wait} ({@link QuestionDriver#awaitWarmContinuation}): once it took it, the
+         * run goes on with it as before; when its process has exited and the continuation is still queued, a new
+         * generation leased on it is started ({@value QuestionDriver#WARM_ASKER_EXITED}); a continuation it does not
+         * take while it runs, or a decision not continued, leaves the run without a continuation worker, recorded as
+         * {@value QuestionDriver#CONTINUATION_GAP} with the reason. Before 2026-10-25 the warm asker's continuation was
+         * never started by the driver, and a run whose asker had exited waited out its run limit, recorded as timed
+         * out only.
+         */
         private Worker fallback(Worker current, String decision) throws IOException, InterruptedException {
             if (plan.warm() && plan.continueHost() == null) {
-                return current;
+                var warm = driver.awaitWarmContinuation(current, decision, plan.host().silenceLimit());
+                return switch (warm.step()) {
+                    case TAKEN, PENDING -> current;
+                    case ASKER_EXITED -> {
+                        var next = continuation(decision, current);
+                        record.put(QuestionDriver.WARM_ASKER_EXITED, true);
+                        record.put(QuestionDriver.WARM_CONTINUATION, warm.step().name().toLowerCase(Locale.ROOT));
+                        record.put(QuestionDriver.WARM_CONTINUATION + "_generation", next.generation());
+                        yield next;
+                    }
+                    case NOT_TAKEN, NOT_CONTINUED -> {
+                        record.put(QuestionDriver.WARM_CONTINUATION, warm.step().name().toLowerCase(Locale.ROOT));
+                        record.put(QuestionDriver.CONTINUATION_GAP, warm.step().name().toLowerCase(Locale.ROOT));
+                        yield current;
+                    }
+                };
             }
             if (plan.warm()) {
                 driver.stub().end(current.id(), current.generation());
@@ -1365,6 +1394,7 @@ class QuestionLoopExperiment {
                     && decision.equals(event.path(DECISION).asText()), System.currentTimeMillis()
                     + ANSWER_WAIT.toMillis());
             if (continued.isEmpty()) {
+                record.put(QuestionDriver.CONTINUATION_GAP, "not_continued");
                 return current;
             }
             var held = driver.continuedByHold(decision);
@@ -1503,7 +1533,10 @@ class QuestionLoopExperiment {
 
         /**
          * Waits until the asker stopped after its ask: a fresh worker exits, a warm worker calls {@code pm_wait}
-         * (Q3), before the answer can start a continuation that changes the worktree. In Q7 the fresh asker is ended
+         * (Q3) or exits ({@link QuestionDriver#awaitWarmStop}: the exit ends the wait at once and is recorded as
+         * {@value QuestionDriver#WARM_ASKER_EXITED}; before 2026-10-25 the driver waited for the call up to the
+         * silence limit), before the answer can start a continuation that changes the worktree. In Q7 the fresh
+         * asker is ended
          * by the driver at its silence limit after the ask if it still runs ({@link QuestionDriver#endAsker}), before
          * the open time starts, so that the record is open with no worker of the task connected; the run records
          * whether that was needed ({@value QuestionDriver#ASKER_ENDED_BY_DRIVER}), when, and whether the asker still
@@ -1512,10 +1545,10 @@ class QuestionLoopExperiment {
         private void awaitStop(Worker asker, JsonNode asked) throws IOException, InterruptedException {
             var at = asked.path("at").asLong();
             if (plan.warm()) {
-                driver.awaitEvent(event -> "wait_started".equals(event.path(EVENT).asText())
-                                && event.path("at").asLong() >= at && asker.id().equals(event.path("worker").asText())
-                                && asker.generation() == event.path("generation").asInt(),
-                        System.currentTimeMillis() + plan.host().silenceLimit().toMillis());
+                if (driver.awaitWarmStop(asker, at, plan.host().silenceLimit()) == QuestionDriver.WarmStop.EXITED) {
+                    record.put(QuestionDriver.WARM_ASKER_EXITED, true);
+                    record.put(QuestionDriver.WARM_ASKER_EXITED + "_after_ask_ms", System.currentTimeMillis() - at);
+                }
             } else if (endsAskerBeforeOpenTime(plan)) {
                 var end = driver.endAsker(asker, at, plan.host().silenceLimit());
                 var field = QuestionDriver.ASKER_ENDED_BY_DRIVER;

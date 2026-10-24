@@ -3122,6 +3122,106 @@ class QuestionStubTest {
                             + "reported as cut_survived")), limits.toString()));
         }
 
+        @Test
+        @DisplayName("names per group the runs that timed out and those that did not follow the reference, beside the "
+                + "unchanged verdict of Q4")
+        void shouldNameMissedAndTimedOutRuns() throws Exception {
+            var follows = q4Run("follows", false, "[1, 2, 6]", event(1_000, "asked"), event(2_000, "continued")
+                    .put("task", "T-1-Q-001"), event(2_100, "worker_started").put("generation", 2));
+            var wrapped = q4Run("wrapped", false, "f(3) == [1, 2, 6]", event(1_000, "asked"),
+                    event(2_000, "continued").put("task", "T-1-Q-001"),
+                    event(2_100, "worker_started").put("generation", 2));
+            var gap = q4Run("gap", true, null, event(1_000, "asked"), event(5_000, "worker_exited").put("exit", 0),
+                    event(270_000, "continued").put("task", "T-1-Q-001"), event(270_001, "answer_sent"),
+                    event(1_200_000, "stub_stopped"));
+
+            var result = QuestionResults.result("Q4", List.of(follows, wrapped, gap),
+                    List.of(invocation("i1", "Q4", 3, 3, 2)), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the result",
+                    () -> assertEquals("[\"wrapped\",\"gap\"]",
+                            group.path(QuestionResults.NOT_FOLLOWING_REFERENCE_RUNS).toString()),
+                    () -> assertEquals("[\"gap\"]", group.path(QuestionResults.TIMED_OUT_RUNS).toString()),
+                    () -> assertEquals(1, group.path("timed_out").asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.CONTINUATION_NOT_STARTED).asInt()),
+                    () -> assertEquals(1.0 / 3, group.path("follows_answer_share").asDouble(), 1e-9),
+                    () -> assertEquals("fail", group.path("verdict").asText()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.endsWith("Continuation without a "
+                            + "worker: claude 1 (gap (no generation after continued)).")), limits.toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains("by its form alone")
+                            && limit.endsWith("contains the reference: claude 1 (wrapped).")), limits.toString()),
+                    () -> assertEquals("The decision follows the answer in at least 95 % of the runs; no answered "
+                            + "question asked again; no submitted plan task done again.",
+                            QuestionResults.CRITERIA.get("Q4")));
+        }
+
+        @Test
+        @DisplayName("a run whose record names a continuation gap counts with its reason, one whose warm asker exited "
+                + "is named with its new generation, and a timeout with a started continuation is no gap")
+        void shouldClassifyContinuationGapFromRecord() throws Exception {
+            var notTaken = (ObjectNode) q4Run("not-taken", true, null, event(1_000, "asked"),
+                    event(2_000, "continued").put("task", "T-1-Q-001"));
+            notTaken.put(QuestionDriver.CONTINUATION_GAP, "not_taken");
+            var exited = (ObjectNode) q4Run("exited", false, "[1, 2, 6]", event(1_000, "asked"),
+                    event(2_000, "continued").put("task", "T-1-Q-001"),
+                    event(2_100, "worker_started").put("generation", 2));
+            exited.put(QuestionDriver.WARM_ASKER_EXITED, true);
+            var started = q4Run("started", true, null, event(1_000, "asked"),
+                    event(2_000, "continued").put("task", "T-1-Q-001"),
+                    event(2_100, "offered").put("task", "T-1-Q-001").put("generation", 2));
+
+            var result = QuestionResults.result("Q4", List.of(notTaken, exited, started),
+                    List.of(invocation("i1", "Q4", 3, 3, 2)), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = new ArrayList<String>();
+            result.path("limits").forEach(limit -> limits.add(limit.asText()));
+            assertAll("the classification",
+                    () -> assertEquals(1, group.path(QuestionResults.CONTINUATION_NOT_STARTED).asInt()),
+                    () -> assertEquals("[\"not-taken\",\"started\"]",
+                            group.path(QuestionResults.TIMED_OUT_RUNS).toString()),
+                    () -> assertTrue(limits.stream().anyMatch(limit -> limit.contains("Continuation without a worker: "
+                            + "claude 1 (not-taken (not_taken)).") && limit.endsWith("Warm asker exited, continuation "
+                            + "started in a new generation: claude 1 (exited).")), limits.toString()));
+        }
+
+        @Test
+        @DisplayName("a result without a continuation gap or a wrapped reference adds neither limit, and an item that "
+                + "reads no reference names no missed run")
+        void shouldAddNoGapOrFormatLimitWhenNone() throws Exception {
+            var follows = q4Run("follows", false, "[1, 2, 6]", event(1_000, "asked"));
+            var q3 = q3Run("q3", "warm", false, "", event(1_000, "asked"));
+
+            var q4 = QuestionResults.result("Q4", List.of(follows), List.of(invocation("i1", "Q4", 3, 3, 2)), () -> 0);
+            var other = QuestionResults.evaluate("Q3", List.of(q3));
+
+            assertAll("no limit",
+                    () -> assertFalse(q4.path("limits").toString().contains("Continuation without"), q4.toString()),
+                    () -> assertFalse(q4.path("limits").toString().contains("by its form alone"), q4.toString()),
+                    () -> assertEquals("[]", q4.path("groups").get(0)
+                            .path(QuestionResults.NOT_FOLLOWING_REFERENCE_RUNS).toString()),
+                    () -> assertTrue(other.path("groups").get(0).path(QuestionResults.NOT_FOLLOWING_REFERENCE_RUNS)
+                            .isMissingNode(), other.toString()));
+        }
+
+        /** A run record of Q4 with the reference {@code [1, 2, 6]}; a submission is added at 3 s when one is given. */
+        private JsonNode q4Run(String id, boolean timedOut, String answer, ObjectNode... events) throws IOException {
+            var all = new ArrayList<>(List.of(events));
+            if (answer != null) {
+                var submitted = event(3_000, "submitted").put("task", "T-1-Q-001");
+                submitted.putObject("args").put("answer", answer);
+                all.add(submitted);
+            }
+            var run = (ObjectNode) q3Run(id, "warm", timedOut, "", all.toArray(ObjectNode[]::new));
+            run.put("item", "Q4");
+            run.put("reply", "option");
+            run.put("reference", "[1, 2, 6]");
+            return run;
+        }
+
         /**
          * A CALL_CUT run of R3 on Claude Code: the asker holds pm_wait from 3 s, the host cuts it at 63.033 s; when it
          * survives, the same generation calls pm_wait again at 65 s, gets the answer at 90 s and acknowledges it;
@@ -4435,6 +4535,215 @@ class QuestionStubTest {
             var node = QuestionStub.JSON.createObjectNode();
             fields.forEach((key, value) -> node.set(key, QuestionStub.JSON.valueToTree(value)));
             return node;
+        }
+    }
+
+    /**
+     * The continuation of a warm asker against the live stub, with a scripted worker over the socket as the host and a
+     * fake {@code pm-exec} as its process, which runs until the test writes its marker file and then exits 0, as Claude
+     * Code did when it ended its turn after the ask (run {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04});
+     * no model.
+     */
+    @Nested
+    @DisplayName("warm continuation")
+    class WarmContinuations {
+
+        private static final String CLAUDE_PROPERTY = QuestionDriver.EXECUTABLE_PROPERTY + "claude";
+        private static final String CONTINUATION = "T-1-Q-001";
+        private static final String EVENT = "event";
+        private static final Duration WITHIN = Duration.ofSeconds(20);
+
+        private String previous;
+        private Path marker;
+
+        @BeforeEach
+        void claudeExecutable() throws IOException {
+            var claude = script(directory.resolve("bin").resolve("claude"), "exit 0");
+            previous = System.getProperty(CLAUDE_PROPERTY);
+            System.setProperty(CLAUDE_PROPERTY, claude.toString());
+            marker = directory.resolve("exit-now");
+        }
+
+        @AfterEach
+        void restoreProperty() {
+            if (previous == null) {
+                System.clearProperty(CLAUDE_PROPERTY);
+            } else {
+                System.setProperty(CLAUDE_PROPERTY, previous);
+            }
+        }
+
+        @Test
+        @DisplayName("a warm asker that exits after its ask ends the wait for its stop at once, and its continuation, "
+                + "answered late, is started in a new generation")
+        void shouldStartContinuationOfExitedWarmAsker() throws Exception {
+            try (var driver = driver()) {
+                var asker = startWarmAsker(driver);
+                var client = askingClient(asker);
+                var askedAt = askedAt(driver);
+                client.close();
+                Files.writeString(marker, "");
+
+                var stop = driver.awaitWarmStop(asker, askedAt, WITHIN);
+                var stoppedAfter = System.currentTimeMillis() - askedAt;
+                Thread.sleep(300);
+                answerAsOperator(driver);
+                var warm = driver.awaitWarmContinuation(asker, "Q-001", WITHIN);
+                var started = driver.startLeased(warm.task(), warm.entity(),
+                        new Launch(WORKER, 2, ROLE, "Do it.", false, null, List.of(), null));
+                var continuation = continuationText();
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var exited = first(events, QuestionDriver.WARM_ASKER_EXITED);
+                var logged = first(events, QuestionDriver.WARM_CONTINUATION);
+                var offered = events.stream().filter(event -> "offered".equals(event.path(EVENT).asText())
+                        && CONTINUATION.equals(event.path("task").asText())).toList();
+                assertAll("the continuation of the exited warm asker",
+                        () -> assertEquals(QuestionDriver.WarmStop.EXITED, stop),
+                        () -> assertTrue(stoppedAfter < WITHIN.toMillis(), "waited " + stoppedAfter + " ms"),
+                        () -> assertEquals(0, exited.path("exit").asInt(-1), exited.toString()),
+                        () -> assertEquals(QuestionDriver.WarmStep.ASKER_EXITED, warm.step()),
+                        () -> assertEquals(CONTINUATION, warm.task()),
+                        () -> assertEquals(TASK, warm.entity()),
+                        () -> assertEquals("asker_exited", logged.path("step").asText()),
+                        () -> assertFalse(logged.path("asker_alive").asBoolean(true)),
+                        () -> assertEquals(2, started.generation()),
+                        () -> assertEquals(1, events.stream().filter(event -> "worker_started".equals(event.path(EVENT)
+                                .asText()) && event.path("generation").asInt() == 2).count(), events.toString()),
+                        () -> assertEquals(1, offered.size(), events.toString()),
+                        () -> assertEquals(2, offered.getFirst().path("generation").asInt()),
+                        () -> assertTrue(continuation.contains("Q-001"), continuation),
+                        () -> assertTrue(events.indexOf(exited) < events.indexOf(first(events, "decision_seen")),
+                                events.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("a warm asker that calls pm_wait after its ask takes its continuation over the held call, and "
+                + "the driver logs nothing of its own, as before")
+        void shouldLeaveTakenContinuationAsBefore() throws Exception {
+            try (var driver = driver()) {
+                var asker = startWarmAsker(driver);
+                var client = askingClient(asker);
+                var askedAt = askedAt(driver);
+                var held = client.request("pm_wait", QuestionStub.JSON.createObjectNode());
+
+                var stop = driver.awaitWarmStop(asker, askedAt, WITHIN);
+                answerAsOperator(driver);
+                var offered = client.text(held);
+                var warm = driver.awaitWarmContinuation(asker, "Q-001", WITHIN);
+
+                var names = QuestionResults.readJsonLines(driver.stub().events()).stream()
+                        .map(event -> event.path(EVENT).asText()).toList();
+                assertAll("the continuation taken over pm_wait",
+                        () -> assertEquals(QuestionDriver.WarmStop.WAITED, stop),
+                        () -> assertTrue(offered.contains("state: task.offered"), offered),
+                        () -> assertTrue(driver.stub().state(CONTINUATION).filter("task.queued"::equals).isEmpty()),
+                        () -> assertEquals(QuestionDriver.WarmStep.TAKEN, warm.step()),
+                        () -> assertTrue(asker.process().isAlive()),
+                        () -> assertFalse(names.contains(QuestionDriver.WARM_ASKER_EXITED), names.toString()),
+                        () -> assertFalse(names.contains(QuestionDriver.WARM_CONTINUATION), names.toString()),
+                        () -> assertEquals(1, names.stream().filter("worker_started"::equals).count(),
+                                names.toString()));
+            }
+        }
+
+        @Test
+        @DisplayName("a continuation the running warm asker does not take, and a decision not continued, are named "
+                + "with their reason at the end of the wait")
+        void shouldNameContinuationNotTaken() throws Exception {
+            try (var driver = driver()) {
+                var asker = startWarmAsker(driver);
+                askingClient(asker);
+                answerAsOperator(driver);
+
+                var notTaken = driver.awaitWarmContinuation(asker, "Q-001", Duration.ofMillis(500));
+                var notContinued = driver.awaitWarmContinuation(asker, "Q-999", Duration.ofMillis(300));
+
+                var logged = QuestionResults.readJsonLines(driver.stub().events()).stream()
+                        .filter(event -> QuestionDriver.WARM_CONTINUATION.equals(event.path(EVENT).asText()))
+                        .map(event -> event.path("step").asText()).toList();
+                assertAll("the continuation without a worker",
+                        () -> assertEquals(QuestionDriver.WarmStep.NOT_TAKEN, notTaken.step()),
+                        () -> assertEquals(Optional.of("task.queued"), driver.stub().state(CONTINUATION)),
+                        () -> assertEquals(QuestionDriver.WarmStep.NOT_CONTINUED, notContinued.step()),
+                        () -> assertEquals(List.of("not_taken", "not_continued"), logged));
+            }
+        }
+
+        @ParameterizedTest(name = "continued {0}, state {1}, asker alive {2} -> {3}")
+        @CsvSource({
+                "false, task.queued, false, PENDING",
+                "true, task.queued, true, PENDING",
+                "true, task.queued, false, ASKER_EXITED",
+                "true, task.offered, true, TAKEN",
+                "true, entity.completed, false, TAKEN"})
+        @DisplayName("the rule: a queued continuation of an exited asker needs a generation, one no longer queued was "
+                + "taken")
+        void shouldDecideWarmContinuation(boolean continued, String state, boolean alive, String expected) {
+            var events = new ArrayList<JsonNode>();
+            if (continued) {
+                var event = QuestionStub.JSON.createObjectNode();
+                event.put("at", 1_000L);
+                event.put(EVENT, "continued");
+                event.put("decision", "Q-001");
+                event.put("task", CONTINUATION);
+                event.put("entity", TASK);
+                events.add(event);
+            }
+
+            var warm = QuestionDriver.warmContinuation(events, "Q-001",
+                    task -> CONTINUATION.equals(task) ? Optional.of(state) : Optional.empty(), alive);
+
+            assertEquals(QuestionDriver.WarmStep.valueOf(expected), warm.step(), warm.toString());
+        }
+
+        private QuestionDriver driver() throws IOException {
+            var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(Duration.ofSeconds(30));
+            var exec = script(directory.resolve("pm-exec"), "while [ ! -f '" + marker + "' ]; do sleep 0.05; done\n"
+                    + "rm -f '" + marker + "'\nexit 0");
+            return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
+                    directory.resolve("workers"), directory.resolve("run"), List.of(exec.toString())));
+        }
+
+        /** Queues the task and starts a warm generation 1 that takes it over pm_wait. */
+        private Worker startWarmAsker(QuestionDriver driver) throws IOException {
+            driver.stub().queue(task(Form.FALLBACK));
+            return driver.startWarm(new Launch(WORKER, 1, ROLE, "Do it.", false, null, List.of(), null));
+        }
+
+        /** The warm asker's relay connects, takes the task over pm_wait, acknowledges it and asks. */
+        private Client askingClient(Worker worker) throws IOException {
+            var client = Client.connect(socket, worker.id(), worker.generation());
+            clients.add(client);
+            var offered = client.call("pm_wait", QuestionStub.JSON.createObjectNode());
+            assertTrue(offered.contains("state: task.offered"), offered);
+            client.link("ack", QuestionStub.JSON.createObjectNode());
+            client.ask("ask", validEnvelope());
+            return client;
+        }
+
+        private static long askedAt(QuestionDriver driver) throws IOException, InterruptedException {
+            return driver.awaitEvent(event -> "asked".equals(event.path(EVENT).asText()),
+                    System.currentTimeMillis() + WITHIN.toMillis()).orElseThrow().path("at").asLong();
+        }
+
+        private static void answerAsOperator(QuestionDriver driver) throws IOException, InterruptedException {
+            assertEquals(Optional.of("Q-001"), driver.awaitAnswer("Q-001", WITHIN, Duration.ZERO,
+                    decision -> List.of(answer("Q-001"))));
+        }
+
+        /** Generation 2's relay connects to its leased continuation and acknowledges it. */
+        private String continuationText() throws IOException {
+            var client = Client.connect(socket, WORKER, 2);
+            clients.add(client);
+            client.state();
+            return client.link("ack", QuestionStub.JSON.createObjectNode());
+        }
+
+        private static JsonNode first(List<JsonNode> events, String name) {
+            return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).findFirst()
+                    .orElseThrow(() -> new AssertionError("no " + name + " in " + events));
         }
     }
 

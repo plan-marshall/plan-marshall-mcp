@@ -1309,6 +1309,174 @@ final class QuestionDriver implements AutoCloseable {
                 closed.get().path("outcome").asText(), closed.get().path("at").asLong(), submittedAt, channel));
     }
 
+    /**
+     * The event the driver logs, and the field of a run record, when a warm asker stopped after its ask by the exit of
+     * its process instead of a call of {@code pm_wait} ({@link #awaitWarmStop}). Before 2026-10-25 the driver waited
+     * for that call up to the host's silence limit and answered only then (run
+     * {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04}: the asker ended its turn 4 s after the ask, and
+     * the decision was seen 270 s after it, at Claude Code's silence limit of 240 s plus 30 s).
+     */
+    static final String WARM_ASKER_EXITED = "warm_asker_exited";
+
+    /**
+     * The event the driver logs, and the field of a run record, when the continuation of a warm asker's decision was not
+     * taken over its {@code pm_wait} ({@link #awaitWarmContinuation}): its value is the step, in lower case.
+     */
+    static final String WARM_CONTINUATION = "warm_continuation";
+
+    /**
+     * The field of a run record whose continuation got no worker: its value names the reason, {@code not_taken} (the
+     * warm asker still ran and did not take the queued continuation within its silence limit) or
+     * {@code not_continued} (the stub did not continue the answered decision in a new task). Without it, such a run
+     * waited out its run limit and was recorded as timed out only.
+     */
+    static final String CONTINUATION_GAP = "continuation_gap";
+
+    /** How a warm asker stopped after its ask ({@link #awaitWarmStop}). */
+    enum WarmStop {
+        /** It called {@code pm_wait} at or after the ask. */
+        WAITED,
+        /** Its process exited without a call of {@code pm_wait} after the ask. */
+        EXITED,
+        /** It still ran without a call of {@code pm_wait} at the end of the wait. */
+        NONE
+    }
+
+    /**
+     * Waits until a warm asker stopped after its ask, as the driver waits before it answers: its generation's
+     * {@code wait_started} at or after the ask, or the exit of its process. The exit ends the wait at once and is
+     * logged as {@value #WARM_ASKER_EXITED} with the milliseconds after the ask and the exit code; before 2026-10-25
+     * only the call ended the wait, so an asker that exited was waited for up to the given time. A {@code pm_wait}
+     * ends the wait as before and logs nothing.
+     *
+     * @param asker   the warm asker
+     * @param askedAt when it asked (epoch milliseconds, the {@code asked} event)
+     * @param within  how long to wait
+     * @return how it stopped
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    WarmStop awaitWarmStop(Worker asker, long askedAt, Duration within) throws IOException, InterruptedException {
+        var until = System.currentTimeMillis() + within.toMillis();
+        while (true) {
+            var alive = asker.process().isAlive();
+            var waited = QuestionResults.jsonLinesSoFar(stub.events()).stream()
+                    .anyMatch(event -> "wait_started".equals(event.path(EVENT).asText())
+                            && event.path("at").asLong() >= askedAt && matches(event, asker));
+            if (waited) {
+                return WarmStop.WAITED;
+            }
+            if (!alive) {
+                var fields = identity(asker);
+                fields.put("after_ask_ms", System.currentTimeMillis() - askedAt);
+                fields.put("exit", asker.process().exitValue());
+                stub.event(WARM_ASKER_EXITED, fields);
+                return WarmStop.EXITED;
+            }
+            if (System.currentTimeMillis() >= until) {
+                return WarmStop.NONE;
+            }
+            Thread.sleep(POLL);
+        }
+    }
+
+    /** What became of the continuation of a warm asker's decision ({@link #awaitWarmContinuation}). */
+    enum WarmStep {
+        /** Not decided yet: the stub has not continued the decision, or its continuation is queued and the asker runs. */
+        PENDING,
+        /** The continuation is no longer queued: a generation took it (over the asker's {@code pm_wait}, as before). */
+        TAKEN,
+        /** The continuation is queued and the asker's process has exited: nobody will take it unless one is started. */
+        ASKER_EXITED,
+        /** The continuation stayed queued while the asker ran, up to the end of the wait. */
+        NOT_TAKEN,
+        /** The stub did not continue the decision in a new task up to the end of the wait. */
+        NOT_CONTINUED
+    }
+
+    /**
+     * The continuation of a warm asker's decision.
+     *
+     * @param step   what became of it
+     * @param task   the continuing task, empty when the stub did not continue the decision
+     * @param entity the entity of that task, empty when none
+     * @param state  that task's state in the stub, empty when none
+     */
+    record WarmContinuation(WarmStep step, String task, String entity, String state) {
+    }
+
+    /**
+     * Waits, after a warm asker's decision was answered, until its continuation is taken or nobody can take it: the
+     * warm form expects the asker to take the stub's new task over its {@code pm_wait}. A continuation that is no longer
+     * queued gives {@link WarmStep#TAKEN} and logs nothing, the path of every warm run before 2026-10-25 that kept its
+     * asker; a queued one whose asker's process has exited gives {@link WarmStep#ASKER_EXITED} at once, and the caller
+     * starts a generation leased on it (before 2026-10-25 the driver started none, and the run waited out its run
+     * limit: run {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04}). At the end of the wait a continuation
+     * still queued gives {@link WarmStep#NOT_TAKEN}, a decision not continued {@link WarmStep#NOT_CONTINUED}. Every
+     * step but {@link WarmStep#TAKEN} is logged as {@value #WARM_CONTINUATION}.
+     *
+     * @param asker      the warm asker
+     * @param decisionId the answered decision
+     * @param within     how long to wait
+     * @return the continuation
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    WarmContinuation awaitWarmContinuation(Worker asker, String decisionId, Duration within)
+            throws IOException, InterruptedException {
+        var until = System.currentTimeMillis() + within.toMillis();
+        while (true) {
+            var alive = asker.process().isAlive();
+            var continuation = warmContinuation(QuestionResults.jsonLinesSoFar(stub.events()), decisionId, stub::state,
+                    alive);
+            if (continuation.step() == WarmStep.PENDING && System.currentTimeMillis() < until) {
+                Thread.sleep(POLL);
+                continue;
+            }
+            if (continuation.step() == WarmStep.PENDING) {
+                continuation = new WarmContinuation(continuation.task().isEmpty() ? WarmStep.NOT_CONTINUED
+                        : WarmStep.NOT_TAKEN, continuation.task(), continuation.entity(), continuation.state());
+            }
+            if (continuation.step() != WarmStep.TAKEN) {
+                var fields = identity(asker);
+                fields.put(DECISION, decisionId);
+                fields.put("step", continuation.step().name().toLowerCase(Locale.ROOT));
+                fields.put(TASK, continuation.task());
+                fields.put("state", continuation.state());
+                fields.put("asker_alive", alive);
+                stub.event(WARM_CONTINUATION, fields);
+            }
+            return continuation;
+        }
+    }
+
+    /**
+     * The rule of {@link #awaitWarmContinuation} over a stub log and the stub's task states: without a
+     * {@code continued} event of the decision {@link WarmStep#PENDING}; with one, {@link WarmStep#TAKEN} once its task
+     * is not queued, {@link WarmStep#ASKER_EXITED} while it is queued and the asker's process has exited, else
+     * {@link WarmStep#PENDING}.
+     *
+     * @param events     the stub log
+     * @param decisionId the answered decision
+     * @param state      the stub's state of a task
+     * @param askerAlive whether the asker's process still runs
+     * @return the continuation
+     */
+    static WarmContinuation warmContinuation(List<JsonNode> events, String decisionId,
+            Function<String, Optional<String>> state, boolean askerAlive) {
+        var continued = first(events, "continued", event -> decisionId.equals(event.path(DECISION).asText()));
+        if (continued.isEmpty()) {
+            return new WarmContinuation(WarmStep.PENDING, "", "", "");
+        }
+        var task = continued.get().path(TASK).asText();
+        var entity = continued.get().path("entity").asText();
+        var current = state.apply(task).orElse("");
+        if (!"task.queued".equals(current)) {
+            return new WarmContinuation(WarmStep.TAKEN, task, entity, current);
+        }
+        return new WarmContinuation(askerAlive ? WarmStep.PENDING : WarmStep.ASKER_EXITED, task, entity, current);
+    }
+
     private static Optional<JsonNode> first(List<JsonNode> events, String name, Predicate<JsonNode> match) {
         return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).filter(match).findFirst();
     }
