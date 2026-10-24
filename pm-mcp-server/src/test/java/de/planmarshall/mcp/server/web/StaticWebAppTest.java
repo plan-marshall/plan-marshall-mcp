@@ -16,9 +16,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
 import java.util.stream.Stream;
 
 
@@ -159,6 +162,43 @@ class StaticWebAppTest {
         assertEquals(INDEX_BODY, app.resolve("/_app/", false).orElseThrow().body().toString());
         assertEquals(INDEX_BODY, app.resolve("/_app/immutable", true).orElseThrow().body().toString());
         assertEquals(INDEX_BODY, app.resolve("/_app/immutable/", true).orElseThrow().body().toString());
+    }
+
+    @Test
+    @DisplayName("never serves a directory entry of the resource JAR, only the shell of a navigation")
+    void shouldNeverServeDirectoryEntryOfAJar() throws Exception {
+        var jar = root.resolve("app.jar");
+        try (var out = new JarOutputStream(Files.newOutputStream(jar))) {
+            entry(out, "META-INF/");
+            entry(out, "META-INF/resources/");
+            entry(out, "META-INF/resources/index.html", INDEX_BODY);
+            entry(out, "META-INF/resources/_app/");
+            entry(out, "META-INF/resources/_app/immutable/");
+            entry(out, "META-INF/resources/_app/immutable/app.js", "console.log('jar');");
+        }
+        try (var jars = new URLClassLoader(new URL[]{jar.toUri().toURL()}, null)) {
+            var fromJar = new StaticWebApp(jars);
+
+            assertTrue(fromJar.present());
+            assertEquals(INDEX_BODY, fromJar.resolve("/", false).orElseThrow().body().toString());
+            assertEquals("console.log('jar');",
+                    fromJar.resolve("/_app/immutable/app.js", false).orElseThrow().body().toString());
+            assertEquals(INDEX_BODY, fromJar.resolve("/_app", false).orElseThrow().body().toString());
+            assertEquals(INDEX_BODY, fromJar.resolve("/_app/", false).orElseThrow().body().toString());
+            assertEquals(INDEX_BODY, fromJar.resolve("/_app/immutable", true).orElseThrow().body().toString());
+            assertEquals(INDEX_BODY, fromJar.resolve("/_app/immutable/", true).orElseThrow().body().toString());
+        }
+    }
+
+    private static void entry(JarOutputStream out, String name) throws IOException {
+        out.putNextEntry(new JarEntry(name));
+        out.closeEntry();
+    }
+
+    private static void entry(JarOutputStream out, String name, String body) throws IOException {
+        out.putNextEntry(new JarEntry(name));
+        out.write(body.getBytes(StandardCharsets.UTF_8));
+        out.closeEntry();
     }
 
     @Test

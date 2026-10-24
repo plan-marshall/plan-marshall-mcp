@@ -10,6 +10,7 @@
 package de.planmarshall.mcp.server.web;
 
 import java.io.IOException;
+import java.net.JarURLConnection;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.file.Files;
@@ -219,20 +220,29 @@ final class StaticWebApp {
     /**
      * A directory is not a file, and a classpath directory must not be listed. A JAR entry that names a
      * directory ends with {@code /} and is rejected before this check; an exploded classpath directory has no
-     * such name, so its file system type decides.
+     * such name, so its file system type decides; a JAR URL that resolves to a directory entry is rejected by
+     * the entry itself, since its URL does not necessarily keep the trailing separator.
      *
      * @param url the URL a class loader returned
      * @return {@code true} if the URL names a regular file
      */
     private static boolean isFile(URL url) {
-        if (!"file".equals(url.getProtocol())) {
-            return true;
+        if ("file".equals(url.getProtocol())) {
+            try {
+                return Files.isRegularFile(Path.of(url.toURI()));
+            } catch (URISyntaxException | IllegalArgumentException _) {
+                return false;
+            }
         }
-        try {
-            return Files.isRegularFile(Path.of(url.toURI()));
-        } catch (URISyntaxException | IllegalArgumentException _) {
-            return false;
+        if ("jar".equals(url.getProtocol())) {
+            try {
+                return !(url.openConnection() instanceof JarURLConnection jar)
+                        || jar.getJarEntry() == null || !jar.getJarEntry().isDirectory();
+            } catch (IOException _) {
+                return false;
+            }
         }
+        return true;
     }
 
     /**
