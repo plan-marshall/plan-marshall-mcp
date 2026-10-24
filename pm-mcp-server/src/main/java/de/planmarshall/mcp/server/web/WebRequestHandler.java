@@ -28,6 +28,11 @@ import io.vertx.core.http.HttpServerRequest;
  * static web app (plan-marshall-documentation: doc/specification/cli-and-security/03-web-server.adoc, Request Validation & Security
  * Headers, API Access). {@code /api/v1/} is handed to the runtime's own HTTP root handler, so both listeners
  * share one router and one security chain; {@code /mcp} and every other path never reach it.
+ * <p>
+ * A {@code GET} or {@code HEAD} outside {@code /api/} is answered by the packaged {@code pm-web-app} through
+ * {@link StaticWebApp}: an existing file is streamed, a navigation without a matching file receives the app
+ * shell, and a missing asset stays {@code 404}. A build without the resource JAR keeps the placeholder, so the
+ * listener still opens and names the missing app.
  *
  * @since 0.1
  */
@@ -61,17 +66,20 @@ final class WebRequestHandler implements Handler<HttpServerRequest> {
     private final Set<String> hosts;
     private final Set<String> origins;
     private final Handler<HttpServerRequest> api;
+    private final StaticWebApp app;
 
     /**
      * @param hosts   the accepted {@code Host} values ({@code host:port}), as {@link #authority(String)} gives them
      * @param origins the listener's own origins ({@code scheme://host:port}), as {@link #origin(String)} gives
      *                them
      * @param api     the runtime's HTTP root handler serving {@code /api/v1/}
+     * @param app     the static web app served outside {@code /api/}
      */
-    WebRequestHandler(Set<String> hosts, Set<String> origins, Handler<HttpServerRequest> api) {
+    WebRequestHandler(Set<String> hosts, Set<String> origins, Handler<HttpServerRequest> api, StaticWebApp app) {
         this.hosts = Set.copyOf(hosts);
         this.origins = Set.copyOf(origins);
         this.api = api;
+        this.app = app;
     }
 
     @Override
@@ -101,11 +109,50 @@ final class WebRequestHandler implements Handler<HttpServerRequest> {
         }
         if (path.startsWith(API_PREFIX)) {
             api.handle(request);
-        } else if (HttpMethod.GET.equals(method) && !path.startsWith("/api/") && !isMcp(path)) {
-            response.putHeader(HttpHeaders.CONTENT_TYPE, "text/html; charset=utf-8").end(APP_PLACEHOLDER);
+        } else if ((HttpMethod.GET.equals(method) || HttpMethod.HEAD.equals(method))
+                && !path.startsWith("/api/") && !isMcp(path)) {
+            serveApp(request, path);
         } else {
             response.setStatusCode(404).end();
         }
+    }
+
+    /**
+     * Serves the packaged app, its shell for a navigation, or {@code 404} for a missing asset. Without the
+     * resource JAR the placeholder answers every path, so the listener stays usable and says what is missing.
+     *
+     * @param request the request
+     * @param path    its validated URL path
+     */
+    private void serveApp(HttpServerRequest request, String path) {
+        var response = request.response();
+        if (!app.present()) {
+            response.putHeader(HttpHeaders.CONTENT_TYPE, "text/html; charset=utf-8").end(APP_PLACEHOLDER);
+            return;
+        }
+        var found = app.resolve(path, acceptsHtml(request));
+        if (found.isEmpty()) {
+            response.setStatusCode(404).end();
+            return;
+        }
+        var file = found.get();
+        response.putHeader(HttpHeaders.CONTENT_TYPE, file.contentType())
+                .putHeader(HttpHeaders.CACHE_CONTROL, file.cacheControl())
+                .putHeader(HttpHeaders.CONTENT_LENGTH, Integer.toString(file.body().length()));
+        if (HttpMethod.HEAD.equals(request.method())) {
+            response.end();
+        } else {
+            response.end(file.body());
+        }
+    }
+
+    /**
+     * @param request a request
+     * @return {@code true} if its {@code Accept} header names {@code text/html}, the browser's navigation
+     */
+    private static boolean acceptsHtml(HttpServerRequest request) {
+        var accept = request.getHeader(HttpHeaders.ACCEPT);
+        return accept != null && accept.toLowerCase(Locale.ROOT).contains("text/html");
     }
 
     /**

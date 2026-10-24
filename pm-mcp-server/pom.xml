@@ -74,6 +74,13 @@
             <groupId>de.planmarshall</groupId>
             <artifactId>pm-provider-gitlab</artifactId>
         </dependency>
+        <!-- The built operator web app: a resource JAR whose META-INF/resources tree the web listener serves
+             (plan-marshall-documentation: doc/specification/cli-and-security/03-web-server.adoc, Web App). The
+             clients repository publishes it; this repository never builds or copies the SPA sources. -->
+        <dependency>
+            <groupId>de.planmarshall</groupId>
+            <artifactId>pm-web-app</artifactId>
+        </dependency>
         <!-- Local API: REST with SSE on the Unix socket -->
         <dependency>
             <groupId>io.quarkus</groupId>
