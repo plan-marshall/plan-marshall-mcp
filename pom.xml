@@ -113,6 +113,13 @@
                 <artifactId>pm-operator</artifactId>
                 <version>${version.pm-mcp-clients}</version>
             </dependency>
+            <!-- The built operator web app: a resource JAR carrying the SvelteKit SPA below META-INF/resources.
+                 pm-mcp-server serves that tree, so the clients' SNAPSHOT must be published before this build. -->
+            <dependency>
+                <groupId>de.planmarshall</groupId>
+                <artifactId>pm-web-app</artifactId>
+                <version>${version.pm-mcp-clients}</version>
+            </dependency>
             <dependency>
                 <groupId>de.planmarshall</groupId>
                 <artifactId>pm-mcp-server</artifactId>

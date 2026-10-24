@@ -87,6 +87,7 @@ public class WebListener {
     private final RuntimeContext context;
     private final PortCandidates candidates;
     private final Duration wait;
+    private final StaticWebApp app;
     private final Set<HttpConnection> connections = ConcurrentHashMap.newKeySet();
     private HttpServer server;
     private WebState state = WebState.disabled();
@@ -97,14 +98,19 @@ public class WebListener {
      */
     @Inject
     public WebListener(Vertx vertx, RuntimeContext context) {
-        this(vertx, context, WebListener::kernelCandidate, WAIT);
+        this(vertx, context, WebListener::kernelCandidate, WAIT, StaticWebApp.fromContextClassLoader());
     }
 
     WebListener(Vertx vertx, RuntimeContext context, PortCandidates candidates, Duration wait) {
+        this(vertx, context, candidates, wait, StaticWebApp.fromContextClassLoader());
+    }
+
+    WebListener(Vertx vertx, RuntimeContext context, PortCandidates candidates, Duration wait, StaticWebApp app) {
         this.vertx = vertx;
         this.context = context;
         this.candidates = candidates;
         this.wait = wait;
+        this.app = app;
     }
 
     /**
@@ -237,7 +243,7 @@ public class WebListener {
                 })
                 .exceptionHandler(failure -> LOGGER.warn(RuntimeLogMessages.WARN.WEB_LISTENER_CONNECTION_FAILED, port,
                         describe(failure)))
-                .requestHandler(new WebRequestHandler(hosts, origins, VertxHttpRecorder.getRootHandler()));
+                .requestHandler(new WebRequestHandler(hosts, origins, VertxHttpRecorder.getRootHandler(), app));
         try {
             await(created.listen());
         } catch (TimeoutException e) {

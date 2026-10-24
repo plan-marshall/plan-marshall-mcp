@@ -74,6 +74,34 @@ pm-operator runtime start
 pm-operator status
 ```
 
+## Web app
+
+The operator web app is built in the [`pm-mcp-clients`](https://github.com/plan-marshall/pm-mcp-clients)
+repository (`pm-web-app`) and packaged as a resource JAR: the SvelteKit static build lands below
+`META-INF/resources`. `pm-mcp-server` depends on that artifact and serves the tree on the web listener
+(`PUT /api/v1/web`), same-origin beside `/api/v1/`:
+
+| Request | Answer |
+|---|---|
+| `GET /`, an extensionless client route, or an `Accept: text/html` navigation | `index.html`, `Cache-Control: no-cache` |
+| `GET /_app/immutable/...` | the content-hashed asset, immutable caching |
+| another existing file | the file with the content type of its extension |
+| a missing asset (`*.js`, `*.css`, ...) | `404`, never the app shell |
+| `/api/v1/**`, `/mcp`, other `/api/**` | unchanged: the runtime API, `404`, `404` |
+| a build without the resource JAR | the placeholder page, so the daemon still starts |
+
+The dependency runs from the clients to the server: publish/install `pm-web-app` in `pm-mcp-clients` before
+building this repository, because the server resolves its SNAPSHOT from the organisation registry. The native
+binary carries the tree through `quarkus.native.resources.includes=META-INF/resources/**`; `WebAppIT`
+(`-Pintegration-tests`) proves the packaged daemon serves the real app, its assets and a client route.
+
+> [!NOTE]
+> The web listener sends its strict CSP (`default-src 'self'; script-src 'self'; ...`) on every response. The
+> current SvelteKit `index.html` boots through an inline `<script>` and carries an inline `style` attribute,
+> which that policy blocks in a browser. Serving the shell is proven by `WebAppIT`; browser rendering is not.
+> A follow-up addresses the CSP for the app shell (hash/nonce or a shell without inline script/style); this
+> change does not weaken the security headers.
+
 ## Credentials
 
 All secrets (GPG, Sonatype, Sonar, Pages, Release App) are managed at the
