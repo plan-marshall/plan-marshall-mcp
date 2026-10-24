@@ -332,18 +332,24 @@ class WebAppIT {
                                 var type = params.getString("type");
                                 var args = params.getJsonArray("args");
                                 var line = type + ": " + (args != null ? args.encode() : "");
-                                if (line.toLowerCase(Locale.ROOT).contains("content security policy")
-                                        || line.toLowerCase(Locale.ROOT).contains("refused to execute")
-                                        || line.toLowerCase(Locale.ROOT).contains("refused to apply")) {
+                                if (isCspViolation(line)) {
                                     cspViolations.add(line);
                                 }
                             } else if ("Log.entryAdded".equals(method)) {
                                 var entry = msg.getJsonObject("params").getJsonObject("entry");
                                 var textEntry = entry.getString("text", "");
-                                if (textEntry.toLowerCase(Locale.ROOT).contains("content security policy")
-                                        || textEntry.toLowerCase(Locale.ROOT).contains("refused to execute")
-                                        || textEntry.toLowerCase(Locale.ROOT).contains("refused to apply")) {
+                                if (isCspViolation(textEntry)) {
                                     cspViolations.add(textEntry);
+                                }
+                            } else if ("Runtime.exceptionThrown".equals(method)) {
+                                var details = msg.getJsonObject("params").getJsonObject("exceptionDetails");
+                                var exception = details != null ? details.getJsonObject("exception") : null;
+                                var exceptionText = details != null ? details.getString("text", "") : "";
+                                if (exception != null) {
+                                    exceptionText += " " + exception.getString("description", "");
+                                }
+                                if (isCspViolation(exceptionText)) {
+                                    cspViolations.add(exceptionText);
                                 }
                             }
                         }
@@ -418,5 +424,18 @@ class WebAppIT {
             catch (Exception _) {
             }
         }
+    }
+
+    private static boolean isCspViolation(String text) {
+        if (text == null) {
+            return false;
+        }
+        var lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("content security policy")
+                || lower.contains("refused to execute")
+                || lower.contains("refused to apply")
+                || lower.contains("trustedscript")
+                || lower.contains("trustedhtml")
+                || lower.contains("trusted type");
     }
 }
