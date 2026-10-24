@@ -40,14 +40,46 @@ final class WebRequestHandler implements Handler<HttpServerRequest> {
 
     static final String API_PREFIX = "/api/v1/";
 
-    /** The security headers sent on every response of the web listener. */
-    static final Map<String, String> SECURITY_HEADERS = Map.of(
-            "Content-Security-Policy", "default-src 'self'; script-src 'self'; connect-src 'self'; "
+    /** The default Content-Security-Policy directive when no inline script is present. */
+    static final String CSP_DEFAULT = "default-src 'self'; script-src 'self'; connect-src 'self'; "
             + "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
-            + "require-trusted-types-for 'script'",
-            "X-Frame-Options", "DENY",
-            "X-Content-Type-Options", "nosniff",
-            "Referrer-Policy", "no-referrer");
+            + "require-trusted-types-for 'script'";
+
+    /** The security headers sent on responses of the web listener when no inline script is present. */
+    static final Map<String, String> SECURITY_HEADERS = securityHeaders((String) null);
+
+    /**
+     * Builds the security headers including a Content-Security-Policy that admits the given inline script
+     * hash (if non-null/non-blank) under {@code script-src}.
+     *
+     * @param inlineScriptHash the CSP hash expression, e.g. {@code 'sha256-...'}, or {@code null}
+     * @return the immutable security headers map
+     */
+    static Map<String, String> securityHeaders(String inlineScriptHash) {
+        var csp = inlineScriptHash == null || inlineScriptHash.isBlank()
+                ? CSP_DEFAULT
+                : "default-src 'self'; script-src 'self' " + inlineScriptHash + "; connect-src 'self'; "
+                + "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+                + "require-trusted-types-for 'script'";
+        return Map.of(
+                "Content-Security-Policy", csp,
+                "X-Frame-Options", "DENY",
+                "X-Content-Type-Options", "nosniff",
+                "Referrer-Policy", "no-referrer");
+    }
+
+    /**
+     * @param app the static web app
+     * @return the security headers configured for the given app's inline script (if present)
+     */
+    static Map<String, String> securityHeaders(StaticWebApp app) {
+        if (app == null) {
+            return SECURITY_HEADERS;
+        }
+        return app.inlineScriptHash()
+                .map(WebRequestHandler::securityHeaders)
+                .orElse(SECURITY_HEADERS);
+    }
 
     /** Placeholder of the static web app {@code pm-web-app}, served for every {@code GET} outside {@code /api/}. */
     static final String APP_PLACEHOLDER = """
@@ -67,6 +99,7 @@ final class WebRequestHandler implements Handler<HttpServerRequest> {
     private final Set<String> origins;
     private final Handler<HttpServerRequest> api;
     private final StaticWebApp app;
+    private final Map<String, String> securityHeaders;
 
     /**
      * @param hosts   the accepted {@code Host} values ({@code host:port}), as {@link #authority(String)} gives them
@@ -80,12 +113,17 @@ final class WebRequestHandler implements Handler<HttpServerRequest> {
         this.origins = Set.copyOf(origins);
         this.api = api;
         this.app = app;
+        this.securityHeaders = securityHeaders(app);
+    }
+
+    Map<String, String> securityHeaders() {
+        return securityHeaders;
     }
 
     @Override
     public void handle(HttpServerRequest request) {
         var response = request.response();
-        SECURITY_HEADERS.forEach(response::putHeader);
+        securityHeaders.forEach(response::putHeader);
         var host = request.getHeader(HttpHeaders.HOST);
         if (host == null || !hosts.contains(authority(host))) {
             response.setStatusCode(403).end();

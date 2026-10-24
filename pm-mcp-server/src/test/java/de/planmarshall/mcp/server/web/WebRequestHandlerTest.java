@@ -11,6 +11,7 @@ package de.planmarshall.mcp.server.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -221,6 +222,29 @@ class WebRequestHandlerTest {
     void shouldKeepHostAndMethodGuard() throws Exception {
         assertEquals(403, request("GET", "/", Map.of("Host", "rebound.example:" + server.port())).status());
         assertEquals(403, request("OPTIONS", "/", Map.of()).status());
+    }
+
+    @Test
+    @DisplayName("includes inline script hash in Content-Security-Policy script-src when present")
+    void shouldIncludeInlineScriptHashInCsp() throws Exception {
+        var inlineScript = "console.log('bootstrap');";
+        var customHtml = "<!doctype html><title>hashed app</title><script>" + inlineScript + "</script>";
+        var appDir = root.resolve("hashed-app");
+        write(appDir.resolve(RESOURCES), "index.html", customHtml);
+        try (var customLoader = new URLClassLoader(new URL[]{appDir.toUri().toURL()}, null)) {
+            var customApp = new StaticWebApp(customLoader);
+            try (var customServer = serve(customApp)) {
+                var response = UdsHttp.request(new InetSocketAddress("127.0.0.1", customServer.port()), "GET", "/",
+                        Map.of("Host", "127.0.0.1:" + customServer.port()), null);
+
+                assertEquals(200, response.status());
+                var csp = response.headers().get("content-security-policy");
+                assertNotNull(csp);
+                var expectedHash = StaticWebApp.sha256Hash(inlineScript);
+                assertTrue(csp.contains("script-src 'self' " + expectedHash + ";"), "CSP must include hash: " + csp);
+                assertFalse(csp.contains("'unsafe-inline'"));
+            }
+        }
     }
 
     /** A listener of the fixture; closing it closes the listener. */
