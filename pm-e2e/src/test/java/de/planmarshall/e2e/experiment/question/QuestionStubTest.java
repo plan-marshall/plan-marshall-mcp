@@ -108,8 +108,9 @@ import org.junit.jupiter.params.provider.EnumSource;
  * so the run waited out its limit. Beside them Q7's open time: a fresh asker that holds {@code pm_wait} through the
  * open time, unseen by {@code leases_while_open}, or not ended by the driver before the open time; and a held wait the
  * stopping stub refuses named as {@code generation_fenced}. Beside them R3's faults: a stop injected before the asker
- * holds {@code pm_wait}, so the answer is never delivered and nothing is detected; a call cut no host can make (a hold
- * shorter than the tool timeout, progress frames that reset it), or one counted without the cut in the logs; a second
+ * holds {@code pm_wait}, so the answer is never delivered and nothing is detected; a stop that reaches the launched
+ * process but not the descendant that does the work, or a stopped process left behind; a call cut no host can make
+ * (a hold shorter than the tool timeout, progress frames that reset it), or one counted without the cut in the logs; a second
  * resume of a task the stub already closed and continued at the resumed process's exit; a continuation logged before
  * the detection that caused it; and a stub of R3 that releases or continues a task at the worker's process exit, so the
  * detection is not made by the acknowledgement, or a stub of another item that no longer does. Beside them the reading
@@ -4592,11 +4593,265 @@ class QuestionStubTest {
         }
 
         private QuestionDriver driver(boolean loseOnExit) throws IOException {
+            return driver(loseOnExit, script(directory.resolve("pm-exec"), "exec sleep 60"));
+        }
+
+        private QuestionDriver driver(boolean loseOnExit, Path exec) throws IOException {
             var stubSettings = Settings.of(directory.resolve("stub"), socket).withWindow(WINDOW)
                     .withLoseOnExit(loseOnExit);
             return QuestionDriver.start(stubSettings, new QuestionDriver.Settings(Host.CLAUDE, null,
-                    directory.resolve("workers"), directory.resolve("run"),
-                    List.of(script(directory.resolve("pm-exec"), "exec sleep 60").toString())));
+                    directory.resolve("workers"), directory.resolve("run"), List.of(exec.toString())));
+        }
+
+        /**
+         * The stop of {@link Fault#STOP_BEFORE_ANSWER} and {@link Fault#MODEL_HANG} on a worker whose work runs in a
+         * descendant of the launched process, as OpenCode's {@code run --standalone} runs its model loop and MCP
+         * client in a child: a scripted tree of three shells (the launched one, its child, and a grandchild that
+         * appends a line to a file every 100 ms), no harness and no model. Every process the tests start is killed
+         * after each test, also after a failing assertion.
+         */
+        @Nested
+        @DisplayName("stop of a process tree")
+        class StopTree {
+
+            private static final Duration HOLD = Duration.ofSeconds(1);
+            private static final Duration GROWTH = Duration.ofSeconds(10);
+            private static final List<String> LEVELS = List.of("root", "child", "grandchild");
+
+            private Path tree;
+            private final List<Process> started = new ArrayList<>();
+
+            @BeforeEach
+            void scriptTree() throws IOException {
+                tree = Files.createDirectories(directory.resolve("tree"));
+                var quoted = "'" + tree + "'";
+                script(tree.resolve("level3"), "echo $$ > " + quoted + "/grandchild.pid\n"
+                        + "while :; do echo tick >> " + quoted + "/ticks; sleep 0.1; done");
+                script(tree.resolve("level2"), "echo $$ > " + quoted + "/child.pid\n" + quoted + "/level3 &\nwait");
+                script(tree.resolve("level1"), "echo $$ > " + quoted + "/root.pid\n" + quoted + "/level2 &\nwait");
+            }
+
+            @AfterEach
+            void killTree() throws IOException {
+                QuestionDriver.continueAllStopped();
+                for (var level : LEVELS) {
+                    var file = tree.resolve(level + ".pid");
+                    if (Files.isRegularFile(file)) {
+                        ProcessHandle.of(Long.parseLong(Files.readString(file).strip()))
+                                .ifPresent(ProcessHandle::destroyForcibly);
+                    }
+                }
+                for (var process : started) {
+                    process.descendants().forEach(ProcessHandle::destroyForcibly);
+                    process.destroyForcibly();
+                }
+            }
+
+            @Test
+            @DisplayName("the stop reaches all three levels of the tree, the launched process first; the file stops "
+                    + "growing for the hold and grows again once the tree is continued")
+            void shouldStopAndContinueWholeTree() throws Exception {
+                var root = startTree();
+                var pids = awaitTreePids();
+
+                var signalled = QuestionDriver.stopTree(root);
+                var stoppedSize = settledSize();
+                Thread.sleep(HOLD);
+                var heldSize = Files.size(tree.resolve("ticks"));
+                var states = pids.stream().map(StopTree::state).toList();
+                var continued = QuestionDriver.continueStopped(root);
+                var grows = growsWithin(heldSize, GROWTH);
+
+                var signalledPids = signalled.stream().map(ProcessHandle::pid).toList();
+                assertAll("the stop of the tree",
+                        () -> assertEquals(root.pid(), signalledPids.getFirst(), "the launched process first"),
+                        () -> assertTrue(signalledPids.containsAll(pids), signalledPids + " lacks one of " + pids),
+                        () -> assertTrue(states.stream().allMatch(state -> state.startsWith("T")),
+                                "not all stopped: " + states),
+                        () -> assertEquals(stoppedSize, heldSize, "the grandchild wrote while stopped"),
+                        () -> assertEquals(signalled, continued),
+                        () -> assertTrue(grows, "the grandchild did not write again after the continue"),
+                        () -> assertTrue(pids.stream().map(StopTree::state).noneMatch(state -> state.startsWith("T")),
+                                "a process stayed stopped"));
+            }
+
+            @Test
+            @DisplayName("control: a stop of the launched process alone (the stop before 2026-10-26) leaves the "
+                    + "grandchild writing")
+            void shouldShowRootOnlyStopMissesDescendants() throws Exception {
+                var root = startTree();
+                awaitTreePids();
+
+                signal("STOP", root.pid());
+                Thread.sleep(200);
+                var size = Files.size(tree.resolve("ticks"));
+                var grows = growsWithin(size, GROWTH);
+                signal("CONT", root.pid());
+
+                assertTrue(grows, "the grandchild stopped with the launched process alone");
+            }
+
+            @Test
+            @DisplayName("STOP_BEFORE_ANSWER and MODEL_HANG log the number of signalled processes in fault_injected, "
+                    + "after the stop; the driver's end of the worker continues and ends the whole tree, and its "
+                    + "worker_exited is logged")
+            void shouldLogSignalledPidsAndEndStoppedTree() throws Exception {
+                try (var driver = driver(true, tree.resolve("level1"))) {
+                    var worker = startAsker(driver, Form.HOLD);
+                    var pids = awaitTreePids();
+
+                    driver.inject(worker, Fault.MODEL_HANG);
+                    var stoppedSize = settledSize();
+                    Thread.sleep(HOLD);
+                    var heldSize = Files.size(tree.resolve("ticks"));
+                    driver.terminate(worker);
+                    var exited = driver.awaitEvent(event -> "worker_exited".equals(event.path(EVENT).asText()),
+                            System.currentTimeMillis() + DELIVERY.toMillis());
+
+                    var injected = first(QuestionResults.readJsonLines(driver.stub().events()),
+                            QuestionDriver.FAULT_INJECTED);
+                    assertAll("the logged stop and the end of the tree",
+                            () -> assertEquals(List.of("at", "nanos", EVENT, "worker", "generation", "fault",
+                                    QuestionDriver.SIGNALLED_PIDS), fieldNames(injected)),
+                            () -> assertTrue(injected.path(QuestionDriver.SIGNALLED_PIDS).asInt() >= LEVELS.size(),
+                                    injected.toString()),
+                            () -> assertEquals(Optional.of(injected.path(QuestionDriver.SIGNALLED_PIDS).asInt()),
+                                    driver.signalledPids(worker)),
+                            () -> assertEquals(stoppedSize, heldSize, "the grandchild wrote while stopped"),
+                            () -> assertTrue(exited.isPresent(), "no worker_exited"),
+                            () -> assertTrue(awaitAllEnded(pids), "a process of the tree still runs: " + pids));
+                }
+            }
+
+            @Test
+            @DisplayName("a tree whose launched process ended while stopped is still continued and ended by the "
+                    + "driver; the shutdown hook continues a tree nobody ended")
+            void shouldNeverLeaveStoppedProcessBehind() throws Exception {
+                try (var driver = driver(true, tree.resolve("level1"))) {
+                    var worker = startAsker(driver, Form.HOLD);
+                    var pids = awaitTreePids();
+                    driver.inject(worker, Fault.STOP_BEFORE_ANSWER, Map.of());
+                    worker.process().destroyForcibly().waitFor();
+
+                    driver.terminate(worker);
+
+                    assertTrue(awaitAllEnded(pids), "a process of the tree still runs: " + pids);
+                }
+                var root = startTree();
+                var pids = awaitTreePids();
+                QuestionDriver.stopTree(root);
+
+                QuestionDriver.continueAllStopped();
+
+                assertAll("continued by the hook",
+                        () -> assertTrue(pids.stream().map(StopTree::state).noneMatch(state -> state.startsWith("T")),
+                                "a process stayed stopped"),
+                        () -> assertEquals(List.of(), QuestionDriver.continueStopped(root), "still registered"));
+            }
+
+            @ParameterizedTest(name = "{0}")
+            @EnumSource(value = Fault.class, names = {"KILL", "RESUMED_EXIT"})
+            @DisplayName("KILL and RESUMED_EXIT log fault_injected as before, without signalled_pids, and still kill "
+                    + "every descendant")
+            void shouldKeepKillFaults(Fault fault) throws Exception {
+                try (var driver = driver(true, tree.resolve("level1"))) {
+                    var worker = startAsker(driver, Form.HOLD);
+                    var pids = awaitTreePids();
+
+                    driver.inject(worker, fault);
+
+                    var injected = first(QuestionResults.readJsonLines(driver.stub().events()),
+                            QuestionDriver.FAULT_INJECTED);
+                    assertAll("the unchanged " + fault,
+                            () -> assertEquals(List.of("at", "nanos", EVENT, "worker", "generation", "fault"),
+                                    fieldNames(injected)),
+                            () -> assertEquals(Optional.empty(), driver.signalledPids(worker)),
+                            () -> assertEquals(List.of(), QuestionDriver.continueStopped(worker.process())),
+                            () -> assertTrue(awaitAllEnded(pids), "a process of the tree still runs: " + pids));
+                }
+            }
+
+            private Process startTree() throws IOException {
+                var process = new ProcessBuilder(tree.resolve("level1").toString())
+                        .redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")))
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                        .redirectError(ProcessBuilder.Redirect.DISCARD).start();
+                started.add(process);
+                return process;
+            }
+
+            /** @return the pids of the three levels, once each wrote its pid and the grandchild its first line */
+            private List<Long> awaitTreePids() throws IOException, InterruptedException {
+                var deadline = System.currentTimeMillis() + GROWTH.toMillis();
+                while (System.currentTimeMillis() < deadline) {
+                    if (LEVELS.stream().allMatch(level -> Files.isRegularFile(tree.resolve(level + ".pid")))
+                            && Files.isRegularFile(tree.resolve("ticks"))) {
+                        var pids = new ArrayList<Long>();
+                        for (var level : LEVELS) {
+                            var text = Files.readString(tree.resolve(level + ".pid")).strip();
+                            if (text.isEmpty()) {
+                                pids.clear();
+                                break;
+                            }
+                            pids.add(Long.parseLong(text));
+                        }
+                        if (pids.size() == LEVELS.size()) {
+                            return pids;
+                        }
+                    }
+                    Thread.sleep(50);
+                }
+                throw new AssertionError("the tree did not start: " + tree);
+            }
+
+            /** @return the size of the file once a write that was under way at the stop has reached it */
+            private long settledSize() throws IOException, InterruptedException {
+                Thread.sleep(200);
+                return Files.size(tree.resolve("ticks"));
+            }
+
+            private boolean growsWithin(long size, Duration within) throws IOException, InterruptedException {
+                var deadline = System.currentTimeMillis() + within.toMillis();
+                while (System.currentTimeMillis() < deadline) {
+                    if (Files.size(tree.resolve("ticks")) > size) {
+                        return true;
+                    }
+                    Thread.sleep(50);
+                }
+                return false;
+            }
+
+            private static boolean awaitAllEnded(List<Long> pids) throws InterruptedException {
+                var deadline = System.currentTimeMillis() + GROWTH.toMillis();
+                while (System.currentTimeMillis() < deadline) {
+                    if (pids.stream().map(ProcessHandle::of).noneMatch(handle -> handle.filter(ProcessHandle::isAlive)
+                            .isPresent())) {
+                        return true;
+                    }
+                    Thread.sleep(50);
+                }
+                return false;
+            }
+
+            /** @return the process state {@code ps} reports ({@code T} for stopped), empty once it has ended */
+            private static String state(long pid) {
+                try {
+                    var ps = new ProcessBuilder("ps", "-o", "stat=", "-p", Long.toString(pid))
+                            .redirectErrorStream(true).start();
+                    var out = new String(ps.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
+                    ps.waitFor(5, TimeUnit.SECONDS);
+                    return out;
+                } catch (IOException e) {
+                    throw new IllegalStateException("ps failed", e);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return "";
+                }
+            }
+
+            private static void signal(String signal, long pid) throws IOException, InterruptedException {
+                new ProcessBuilder("kill", "-" + signal, Long.toString(pid)).start().waitFor(5, TimeUnit.SECONDS);
+            }
         }
 
         private static List<String> fieldNames(JsonNode node) {

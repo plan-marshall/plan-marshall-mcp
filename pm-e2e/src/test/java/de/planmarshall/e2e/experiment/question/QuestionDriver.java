@@ -506,6 +506,7 @@ final class QuestionDriver implements AutoCloseable {
     private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
     private final Map<String, EarlyExit> earlyExits = new ConcurrentHashMap<>();
     private final Map<String, QuotaError> quotaErrors = new ConcurrentHashMap<>();
+    private final Map<String, Integer> signalledPids = new ConcurrentHashMap<>();
     private volatile QuestionStub stub;
 
     private QuestionDriver(QuestionStub.Settings stubSettings, Settings settings, QuestionStub stub,
@@ -785,14 +786,103 @@ final class QuestionDriver implements AutoCloseable {
      * @throws InterruptedException if interrupted
      */
     void terminate(Worker worker) throws InterruptedException {
+        var stopped = continueStopped(worker.process());
         if (!worker.process().isAlive()) {
+            stopped.forEach(ProcessHandle::destroyForcibly);
             return;
         }
-        signal(worker, "CONT");
+        if (stopped.isEmpty()) {
+            signal(worker, "CONT");
+        }
         worker.process().destroy();
         if (!worker.process().waitFor(TERMINATION_GRACE.toMillis(), TimeUnit.MILLISECONDS)) {
             worker.process().descendants().forEach(ProcessHandle::destroyForcibly);
             worker.process().destroyForcibly();
+        }
+        stopped.forEach(ProcessHandle::destroyForcibly);
+    }
+
+    /**
+     * The processes of each worker whose tree the driver stopped ({@link #stopTree}), keyed by the launched process,
+     * until they are continued ({@link #continueStopped}); static, so that a sibling driver that ends the worker and
+     * the shutdown hook ({@link #continueAllStopped()}) continue it too.
+     */
+    private static final Map<Process, List<ProcessHandle>> STOPPED_TREES = new ConcurrentHashMap<>();
+
+    static {
+        Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(QuestionDriver::continueAllStopped));
+    }
+
+    /** How often {@link #stopTree} looks for descendants the stop has not reached yet. */
+    static final int STOP_PASSES = 5;
+
+    /**
+     * Stops ({@code SIGSTOP}) a launched process and all its descendants, as {@link Fault#KILL} reaches all of them
+     * ({@link ProcessHandle#descendants()}): the process first, so that it starts no further child, then its
+     * descendants, again until a pass finds none the stop has not reached ({@value #STOP_PASSES} passes at most). The
+     * tree is kept until it is continued ({@link #continueStopped}), which every end of the worker does
+     * ({@link #terminate}). The launched process alone was stopped before 2026-10-26: OpenCode's
+     * {@code run --standalone} runs its model loop and MCP client in a child process, which went on calling the stub
+     * after the stop in all 24 OpenCode runs of {@link Fault#STOP_BEFORE_ANSWER} and {@link Fault#MODEL_HANG} (R3
+     * invocation {@code R3-2026-10-25T201227591735Z-a84865dd}).
+     *
+     * @param process the launched process
+     * @return the processes signalled, the launched process first
+     */
+    static List<ProcessHandle> stopTree(Process process) {
+        var signalled = new LinkedHashMap<Long, ProcessHandle>();
+        var next = List.of(process.toHandle());
+        for (var pass = 0; pass <= STOP_PASSES && !next.isEmpty(); pass++) {
+            next.forEach(handle -> signalled.put(handle.pid(), handle));
+            STOPPED_TREES.put(process, List.copyOf(signalled.values()));
+            kill("STOP", next);
+            next = process.descendants().filter(handle -> !signalled.containsKey(handle.pid())).toList();
+        }
+        return List.copyOf(signalled.values());
+    }
+
+    /**
+     * Continues ({@code SIGCONT}) the tree of a launched process the driver stopped: every process of it that still
+     * runs, also one the launched process no longer has as descendant, and the launched process's current descendants.
+     * A process whose tree was not stopped is left alone.
+     *
+     * @param process the launched process
+     * @return the processes of the stopped tree, empty when it was not stopped
+     */
+    static List<ProcessHandle> continueStopped(Process process) {
+        var stopped = STOPPED_TREES.remove(process);
+        if (stopped == null) {
+            return List.of();
+        }
+        var tree = new LinkedHashMap<Long, ProcessHandle>();
+        stopped.forEach(handle -> tree.put(handle.pid(), handle));
+        process.descendants().forEach(handle -> tree.putIfAbsent(handle.pid(), handle));
+        kill("CONT", List.copyOf(tree.values()));
+        return stopped;
+    }
+
+    /** Continues every tree still stopped (the shutdown hook): a JVM that ends never leaves a process stopped. */
+    static void continueAllStopped() {
+        for (var process : List.copyOf(STOPPED_TREES.keySet())) {
+            continueStopped(process);
+        }
+    }
+
+    /** Sends a signal to the processes that still run, in one {@code kill} call. */
+    private static void kill(String signal, List<ProcessHandle> processes) {
+        var command = new ArrayList<String>(List.of("kill", "-" + signal));
+        processes.stream().filter(ProcessHandle::isAlive).forEach(handle -> command.add(Long.toString(handle.pid())));
+        if (command.size() == 2) {
+            return;
+        }
+        try {
+            var kill = new ProcessBuilder(command).redirectErrorStream(true).start();
+            kill.getInputStream().readAllBytes();
+            kill.waitFor(5, TimeUnit.SECONDS);
+        } catch (IOException e) {
+            throw new IllegalStateException("kill -" + signal + " failed", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -808,7 +898,11 @@ final class QuestionDriver implements AutoCloseable {
     }
 
     /**
-     * Injects a fault into a worker and logs it as {@value #FAULT_INJECTED} with further fields.
+     * Injects a fault into a worker and logs it as {@value #FAULT_INJECTED} with further fields. The stop of
+     * {@link Fault#STOP_BEFORE_ANSWER} and {@link Fault#MODEL_HANG} reaches the worker's whole process tree
+     * ({@link #stopTree}) and is logged once it is made, with the number of processes it reached
+     * ({@value #SIGNALLED_PIDS}, also kept for the run record: {@link #signalledPids(Worker)}); every other fault is
+     * logged before it is made, as before.
      *
      * @param worker  the worker
      * @param fault   the fault
@@ -818,9 +912,18 @@ final class QuestionDriver implements AutoCloseable {
         var fields = identity(worker);
         fields.put("fault", fault.name());
         fields.putAll(details);
+        if (fault == Fault.STOP_BEFORE_ANSWER || fault == Fault.MODEL_HANG) {
+            var signalled = stopTree(worker.process()).size();
+            signalledPids.put(worker.id() + "#" + worker.generation(), signalled);
+            fields.put(SIGNALLED_PIDS, signalled);
+            stub.event(FAULT_INJECTED, fields);
+            return;
+        }
         stub.event(FAULT_INJECTED, fields);
         switch (fault) {
-            case STOP_BEFORE_ANSWER, MODEL_HANG -> signal(worker, "STOP");
+            case STOP_BEFORE_ANSWER, MODEL_HANG -> {
+                // stopped above
+            }
             case KILL, RESUMED_EXIT -> {
                 worker.process().descendants().forEach(ProcessHandle::destroyForcibly);
                 worker.process().destroyForcibly();
@@ -829,6 +932,18 @@ final class QuestionDriver implements AutoCloseable {
                 // made by the host, logged by awaitCallCut
             }
         }
+    }
+
+    /** The field of {@value #FAULT_INJECTED} with the number of processes a stop reached ({@link #stopTree}). */
+    static final String SIGNALLED_PIDS = "signalled_pids";
+
+    /**
+     * @param worker a worker
+     * @return the number of processes the stop injected into it reached ({@link #stopTree}), empty when it was not
+     *         stopped
+     */
+    Optional<Integer> signalledPids(Worker worker) {
+        return Optional.ofNullable(signalledPids.get(worker.id() + "#" + worker.generation()));
     }
 
     /**
@@ -2100,12 +2215,21 @@ final class QuestionDriver implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
+        IllegalStateException failure = null;
         for (var worker : workers) {
             try {
                 terminate(worker);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            } catch (IllegalStateException e) {
+                failure = failure == null ? e : failure;
             }
+        }
+        if (failure != null) {
+            if (ownsStub) {
+                stub.close();
+            }
+            throw failure;
         }
         if (ownsStub) {
             stub.close();

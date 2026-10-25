@@ -290,6 +290,9 @@ class QuestionLoopExperiment {
     private static final String DECISION = "decision";
     /** The field of a run record that says whether its R3 fault was injected (or, for the call cut, happened). */
     private static final String FAULT_INJECTED_FIELD = "fault_injected";
+
+    /** The run record's number of processes a stop reached ({@link QuestionDriver#SIGNALLED_PIDS}). */
+    static final String FAULT_SIGNALLED_PIDS_FIELD = "fault_signalled_pids";
     private static final Duration POLL = Duration.ofSeconds(1);
     private static final Duration ANSWER_WAIT = Duration.ofMinutes(15);
     private static final String R2_AGES = "pm.experiment.r2.ages";
@@ -1201,6 +1204,7 @@ class QuestionLoopExperiment {
                 record.put("fault_held", true);
                 record.put("fault_hold_started_at", held.get().start());
                 record.put("fault_after_ask_ms", System.currentTimeMillis() - askedAt);
+                recordSignalled(asker);
             } else {
                 record.put("fault_held", false);
                 record.put("fault_not_injected_reason", "no_hold");
@@ -1330,6 +1334,15 @@ class QuestionLoopExperiment {
             driver.inject(worker, fault);
             record.put(FAULT_INJECTED_FIELD, true);
             record.put(FAULT_INJECTED_FIELD + "_at", System.currentTimeMillis());
+            recordSignalled(worker);
+        }
+
+        /**
+         * Records the number of processes a stop reached ({@code fault_signalled_pids},
+         * {@link QuestionDriver#signalledPids}); a fault that is no stop records nothing.
+         */
+        private void recordSignalled(Worker worker) {
+            driver.signalledPids(worker).ifPresent(count -> record.put(FAULT_SIGNALLED_PIDS_FIELD, count));
         }
 
         /**
