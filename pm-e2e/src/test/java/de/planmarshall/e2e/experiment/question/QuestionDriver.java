@@ -1070,10 +1070,23 @@ final class QuestionDriver implements AutoCloseable {
     enum RecoveryStep {
         /** The lost task waits resumable with its stored session: resume it again. */
         RESUME,
-        /** The stub continued the decision in a new task that is still queued: start a generation leased on it. */
+        /**
+         * The stub continued the decision in a new task that is still queued, or that is offered to or worked by a
+         * generation that has ended (the lost one, or one whose process is gone): start a generation leased on it,
+         * whose lease fences the ended holder and takes the task over.
+         */
         CONTINUE,
-        /** The stub's continuation, or the lost task offered again, is held or closed by a generation: start none. */
+        /**
+         * The stub's continuation, or the lost task offered again, is held or closed by a generation that still runs,
+         * or closed by any: start none.
+         */
         TAKEN,
+        /**
+         * The stub's continuation is held by a generation that has ended, in a state no new generation can take over
+         * (an answer delivered to it, a question it asked, a suspended session): start none, and log the run's
+         * {@value QuestionDriver#CONTINUATION_GAP}, so it never ends as a silent timeout.
+         */
+        GAP,
         /** The stub has neither continued the decision nor made the task resumable yet: as before the fix. */
         WAIT
     }
@@ -1081,15 +1094,27 @@ final class QuestionDriver implements AutoCloseable {
     /**
      * What the stub made of a lost generation's task, read before the driver starts a generation for it.
      *
-     * @param step   the step
-     * @param task   the task it concerns: the stub's continuation, else the lost task
-     * @param entity the entity of that task, empty when the log does not name it
-     * @param state  that task's state in the stub
-     * @param holder the generation ({@code <worker>#<generation>}) the stub last offered or delivered that task to,
-     *               empty when none
+     * @param step        the step
+     * @param task        the task it concerns: the stub's continuation, else the lost task
+     * @param entity      the entity of that task, empty when the log does not name it
+     * @param state       that task's state in the stub
+     * @param holder      the generation ({@code <worker>#<generation>}) the stub last offered or delivered that task
+     *                    to, empty when none
+     * @param holderEnded whether that holder has ended: the lost generation itself, or one whose process is gone
      */
-    record Recovery(RecoveryStep step, String task, String entity, String state, String holder) {
+    record Recovery(RecoveryStep step, String task, String entity, String state, String holder,
+    boolean holderEnded) {
     }
+
+    /**
+     * The reason of a {@value #CONTINUATION_GAP} when the stub's continuation is held by an ended generation in a state
+     * no new generation can take over ({@link RecoveryStep#GAP}).
+     */
+    static final String HELD_BY_ENDED_GENERATION = "held_by_ended_generation";
+
+    /** The states of a continuation that a new generation's lease takes over from an ended holder. */
+    private static final Set<String> HANDOVER_STATES = Set.of("task.offered", "entity.active", "envelope.task.active",
+            "consulting");
 
     /**
      * Reads what the stub made of a lost task before the driver starts a generation for it ({@link #recovery(List,
@@ -1099,6 +1124,15 @@ final class QuestionDriver implements AutoCloseable {
      * closed {@code lost} and continued at the resumed process's exit; that generation was refused
      * {@code job_scope_mismatch} on the closed task, took the continuation over {@code pm_wait}, and left the closed
      * task offered, so the run timed out.
+     * <p>
+     * A continuation held by a generation that has ended is not taken ({@link #recovery(List, String, String, String,
+     * Predicate, Function)}): before 2026-10-25 it was, and in four {@link Fault#CALL_CUT} runs of R3 on Antigravity
+     * (invocation {@code R3-2026-10-25T120818373435Z-ddbd64e3}, runs {@code 44b3bfbc}, {@code d9f539db},
+     * {@code 9397f2df}, {@code 4e0461ad}) the stub offered the continuation at the loss to the lost generation itself,
+     * which still held a {@code pm_wait} it had called again without acknowledging the answer; the driver ended that
+     * generation in the same millisecond, started none, and the continuation stayed leased to it until the run limit.
+     * Such a holder is logged with {@code holder_ended: true}; a {@link RecoveryStep#GAP} is logged as
+     * {@value #CONTINUATION_GAP} with its reason {@value #HELD_BY_ENDED_GENERATION}.
      *
      * @param worker     the lost generation
      * @param decisionId the decision whose answer the task waited for
@@ -1107,24 +1141,44 @@ final class QuestionDriver implements AutoCloseable {
      * @throws IOException if the event log cannot be read
      */
     Recovery recovery(Worker worker, String decisionId, String taskId) throws IOException {
-        var recovery = recovery(QuestionResults.jsonLinesSoFar(stub.events()), decisionId, taskId,
-                worker.id() + "#" + worker.generation(), stub::state);
+        var lost = worker.id() + "#" + worker.generation();
+        var recovery = recovery(QuestionResults.jsonLinesSoFar(stub.events()), decisionId, taskId, lost,
+                holder -> holder.equals(lost) || ended(holder), stub::state);
         var fields = identity(worker);
         fields.put(DECISION, decisionId);
         fields.put("step", recovery.step().name().toLowerCase(Locale.ROOT));
         fields.put(TASK, recovery.task());
         fields.put("state", recovery.state());
         fields.put("holder", recovery.holder());
+        if (recovery.holderEnded()) {
+            fields.put("holder_ended", true);
+        }
         stub.event(RECOVERY, fields);
+        if (recovery.step() == RecoveryStep.GAP) {
+            var gap = identity(worker);
+            gap.put(DECISION, decisionId);
+            gap.put("reason", HELD_BY_ENDED_GENERATION);
+            gap.put(TASK, recovery.task());
+            gap.put("state", recovery.state());
+            gap.put("holder", recovery.holder());
+            stub.event(CONTINUATION_GAP, gap);
+        }
         return recovery;
     }
 
     /**
-     * The rule of {@link #recovery(Worker, String, String)} over a stub log and the stub's task states: a decision the
-     * stub continued in a new task ({@code continued}) gives {@link RecoveryStep#CONTINUE} while that task is queued and
-     * {@link RecoveryStep#TAKEN} once it is not; without a continuation a lost task that is resumable gives
-     * {@link RecoveryStep#RESUME}, one the stub offered or delivered again to another generation than the lost one,
-     * and that is not queued, gives {@link RecoveryStep#TAKEN}, any other {@link RecoveryStep#WAIT}.
+     * @param holder a generation, {@code <worker>#<generation>}
+     * @return whether it is a generation of this driver or of a driver of the same stub whose process has exited, or
+     *         that the launch of a newer generation ended
+     */
+    private boolean ended(String holder) {
+        return endedOnLaunch.contains(holder) || family.stream().anyMatch(worker -> holder.equals(worker.id() + "#"
+                + worker.generation()) && !worker.process().isAlive());
+    }
+
+    /**
+     * The rule of {@link #recovery(Worker, String, String)} with only the lost generation counted as ended
+     * ({@link #recovery(List, String, String, String, Predicate, Function)}).
      *
      * @param events     the stub log
      * @param decisionId the decision whose answer the task waited for
@@ -1135,12 +1189,45 @@ final class QuestionDriver implements AutoCloseable {
      */
     static Recovery recovery(List<JsonNode> events, String decisionId, String taskId, String lost,
             Function<String, Optional<String>> state) {
+        return recovery(events, decisionId, taskId, lost, lost::equals, state);
+    }
+
+    /**
+     * The rule of {@link #recovery(Worker, String, String)} over a stub log and the stub's task states. A decision the
+     * stub continued in a new task ({@code continued}) gives {@link RecoveryStep#CONTINUE} while that task is queued;
+     * once it is not, the generation the stub last offered or delivered it to decides: a holder that still runs, or a
+     * closed task, gives {@link RecoveryStep#TAKEN} as before; a holder that has ended (the lost generation, or one whose
+     * process is gone) gives {@link RecoveryStep#CONTINUE} while the task is offered, active or consulting, which a new
+     * generation's lease takes over by fencing the ended one, and {@link RecoveryStep#GAP} in any other open state.
+     * Without a continuation a lost task that is resumable gives {@link RecoveryStep#RESUME}, one the stub offered or
+     * delivered again to another generation than the lost one, and that is not queued, gives {@link RecoveryStep#TAKEN},
+     * any other {@link RecoveryStep#WAIT}, as before. {@link Recovery#holderEnded()} is set only where an ended holder
+     * decided the step.
+     *
+     * @param events     the stub log
+     * @param decisionId the decision whose answer the task waited for
+     * @param taskId     the lost task
+     * @param lost       the lost generation, {@code <worker>#<generation>}
+     * @param ended      whether a generation ({@code <worker>#<generation>}) has ended; true at least for the lost one
+     * @param state      the stub's state of a task
+     * @return the step
+     */
+    static Recovery recovery(List<JsonNode> events, String decisionId, String taskId, String lost,
+            Predicate<String> ended, Function<String, Optional<String>> state) {
         var continued = first(events, "continued", event -> decisionId.equals(event.path(DECISION).asText()));
         if (continued.isPresent()) {
             var task = continued.get().path(TASK).asText();
             var current = state.apply(task).orElse("");
-            var step = "task.queued".equals(current) ? RecoveryStep.CONTINUE : RecoveryStep.TAKEN;
-            return new Recovery(step, task, continued.get().path("entity").asText(), current, holder(events, task));
+            var holder = holder(events, task);
+            var entity = continued.get().path("entity").asText();
+            if ("task.queued".equals(current)) {
+                return new Recovery(RecoveryStep.CONTINUE, task, entity, current, holder, false);
+            }
+            if (holder.isEmpty() || closed(current) || !ended.test(holder)) {
+                return new Recovery(RecoveryStep.TAKEN, task, entity, current, holder, false);
+            }
+            var step = HANDOVER_STATES.contains(current) ? RecoveryStep.CONTINUE : RecoveryStep.GAP;
+            return new Recovery(step, task, entity, current, holder, true);
         }
         var current = state.apply(taskId).orElse("");
         var holder = holder(events, taskId);
@@ -1153,7 +1240,16 @@ final class QuestionDriver implements AutoCloseable {
         } else {
             step = RecoveryStep.WAIT;
         }
-        return new Recovery(step, taskId, "", current, holder);
+        return new Recovery(step, taskId, "", current, holder, false);
+    }
+
+    /**
+     * @param state a task's state in the stub
+     * @return whether it is the state of a closed task: completed, or ended {@code asked}, {@code infeasible} or
+     *         {@code lost}
+     */
+    private static boolean closed(String state) {
+        return state.endsWith(".completed") || Set.of("task.asked", "task.infeasible", "task.lost").contains(state);
     }
 
     private static String holder(List<JsonNode> events, String taskId) {
@@ -1327,8 +1423,10 @@ final class QuestionDriver implements AutoCloseable {
     /**
      * The field of a run record whose continuation got no worker: its value names the reason, {@code not_taken} (the
      * warm asker still ran and did not take the queued continuation within its silence limit) or
-     * {@code not_continued} (the stub did not continue the answered decision in a new task). Without it, such a run
-     * waited out its run limit and was recorded as timed out only.
+     * {@code not_continued} (the stub did not continue the answered decision in a new task), or
+     * {@value #HELD_BY_ENDED_GENERATION} (after a loss, the stub's continuation is held by a generation that has ended,
+     * in a state no new generation can take over: {@link RecoveryStep#GAP}, which the driver also logs as an event of
+     * this name). Without it, such a run waited out its run limit and was recorded as timed out only.
      */
     static final String CONTINUATION_GAP = "continuation_gap";
 

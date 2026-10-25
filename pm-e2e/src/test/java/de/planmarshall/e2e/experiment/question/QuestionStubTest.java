@@ -44,6 +44,7 @@ import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -4080,7 +4081,12 @@ class QuestionStubTest {
                         () -> assertEquals(fault == Fault.KILL ? "stub" : "driver", lost.path("first_by").asText()),
                         () -> assertEquals(1, count(events, "continued")),
                         () -> assertEquals(QuestionDriver.RecoveryStep.CONTINUE, recovery.step()),
-                        () -> assertEquals(CONTINUATION, recovery.task()));
+                        () -> assertEquals(CONTINUATION, recovery.task()),
+                        () -> assertFalse(recovery.holderEnded()),
+                        () -> assertEquals(List.of("at", "nanos", EVENT, "worker", "generation", "decision", "step",
+                                "task", "state", "holder"), fieldNames(first(events, QuestionDriver.RECOVERY)),
+                                "the recovery event of a queued continuation changed"),
+                        () -> assertEquals(0, count(events, QuestionDriver.CONTINUATION_GAP)));
             }
         }
 
@@ -4142,7 +4148,151 @@ class QuestionStubTest {
             var recovery = QuestionDriver.recovery(events, "Q-001", TASK, WORKER + "#2",
                     task -> TASK.equals(task) ? Optional.of(state) : Optional.empty());
 
-            assertEquals(QuestionDriver.RecoveryStep.valueOf(expected), recovery.step(), recovery.toString());
+            assertAll("the recovery without a continuation",
+                    () -> assertEquals(QuestionDriver.RecoveryStep.valueOf(expected), recovery.step(),
+                            recovery.toString()),
+                    () -> assertFalse(recovery.holderEnded(), recovery.toString()));
+        }
+
+        @ParameterizedTest(name = "continuation {0}, held by {1}, ended {2} -> {3}")
+        @CsvSource({
+                "task.queued, '', false, CONTINUE",
+                "task.queued, w1#1, true, CONTINUE",
+                "task.offered, w1#2, false, TAKEN",
+                "entity.active, w1#2, false, TAKEN",
+                "entity.completed, w1#2, false, TAKEN",
+                "task.offered, '', false, TAKEN",
+                "task.offered, w1#1, true, CONTINUE",
+                "entity.active, w1#1, true, CONTINUE",
+                "consulting, w1#1, true, CONTINUE",
+                "task.offered, w1#2, true, CONTINUE",
+                "entity.completed, w1#1, true, TAKEN",
+                "task.lost, w1#1, true, TAKEN",
+                "task.answer, w1#1, true, GAP",
+                "entity.awaiting_answer, w1#1, true, GAP",
+                "task.suspended, w1#1, true, GAP"})
+        @DisplayName("with a continuation of the stub, a holder that has ended never takes it: offered, active or "
+                + "consulting it is taken over by a new generation, in any other open state it is a gap; a holder "
+                + "that still runs, or a closed continuation, is left alone as before")
+        void shouldDecideRecoveryWithContinuation(String state, String holder, boolean ended, String expected) {
+            var events = new ArrayList<JsonNode>();
+            events.add(logEvent(1_000L, "lost", Map.of("task", TASK, "reason", "answer_ack_missing")));
+            events.add(QuestionStub.JSON.createObjectNode().put("at", 1_001L).put(EVENT, "continued")
+                    .put("decision", "Q-001").put("task", CONTINUATION).put("entity", TASK));
+            if (!holder.isEmpty()) {
+                var generation = Integer.parseInt(holder.substring(holder.indexOf('#') + 1));
+                events.add(eventOf(1_002L, "offered", generation, Map.of("task", CONTINUATION, "at_spawn", false)));
+            }
+            Predicate<String> endedGenerations = generation -> (WORKER + "#1").equals(generation)
+                    || ended && generation.equals(holder);
+
+            var recovery = QuestionDriver.recovery(events, "Q-001", TASK, WORKER + "#1", endedGenerations,
+                    task -> CONTINUATION.equals(task) ? Optional.of(state) : Optional.empty());
+
+            assertAll("the recovery of " + state + " held by " + holder,
+                    () -> assertEquals(QuestionDriver.RecoveryStep.valueOf(expected), recovery.step(),
+                            recovery.toString()),
+                    () -> assertEquals(CONTINUATION, recovery.task()),
+                    () -> assertEquals(TASK, recovery.entity()),
+                    () -> assertEquals(holder, recovery.holder()),
+                    () -> assertEquals(ended && !"task.queued".equals(state) && !"TAKEN".equals(expected),
+                            recovery.holderEnded(), recovery.toString()));
+        }
+
+        @Test
+        @DisplayName("CALL_CUT as on Antigravity: the cut worker gets the answer late, calls pm_wait again without "
+                + "acknowledging, and is offered the continuation at its loss; the recovery reads the lost holder as "
+                + "ended, and a new generation takes the continuation over")
+        void shouldTakeOverContinuationOfferedToLostGeneration() throws Exception {
+            try (var driver = driver(false)) {
+                var worker = startAsker(driver, Form.HOLD);
+                var host = askingClient(worker).relayingTo(worker.relayLog());
+                var held = host.request("pm_wait", QuestionStub.JSON.createObjectNode());
+                Thread.sleep(300);
+                host.cancel(held);
+                answerAsOperator(driver);
+                driver.awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText()),
+                        System.currentTimeMillis() + DELIVERY.toMillis()).orElseThrow();
+                var again = host.request("pm_wait", QuestionStub.JSON.createObjectNode());
+
+                var acknowledged = driver.superviseAnswer(worker, DELIVERY);
+                var offeredToLost = host.text(again);
+                var recovery = driver.recovery(worker, "Q-001", TASK);
+                var started = driver.startLeased(recovery.task(), recovery.entity(),
+                        new Launch(WORKER, 2, ROLE, "Do it.", false, null, List.of(), null));
+                var taker = Client.connect(socket, WORKER, 2);
+                clients.add(taker);
+                taker.state();
+                var continuation = taker.link("ack", QuestionStub.JSON.createObjectNode());
+                var refusedToLost = host.state();
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var logged = first(events, QuestionDriver.RECOVERY);
+                var offers = events.stream().filter(event -> "offered".equals(event.path(EVENT).asText())
+                        && CONTINUATION.equals(event.path("task").asText())).toList();
+                var released = first(events, "released");
+                assertAll("the take-over of the continuation offered to the lost generation",
+                        () -> assertFalse(acknowledged),
+                        () -> assertTrue(offeredToLost.contains("state: task.offered"), offeredToLost),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.CONTINUE, recovery.step()),
+                        () -> assertEquals(CONTINUATION, recovery.task()),
+                        () -> assertEquals("task.offered", recovery.state()),
+                        () -> assertEquals(WORKER + "#1", recovery.holder()),
+                        () -> assertTrue(recovery.holderEnded()),
+                        () -> assertEquals("continue", logged.path("step").asText()),
+                        () -> assertTrue(logged.path("holder_ended").asBoolean(), logged.toString()),
+                        () -> assertEquals(2, started.generation()),
+                        () -> assertEquals(List.of(1, 2), offers.stream().map(event -> event.path("generation")
+                                .asInt()).toList(), events.toString()),
+                        () -> assertTrue(offers.get(1).path("at_spawn").asBoolean(), offers.toString()),
+                        () -> assertEquals(CONTINUATION, released.path("task").asText()),
+                        () -> assertEquals("fenced", released.path("reason").asText()),
+                        () -> assertEquals(1, released.path("generation").asInt()),
+                        () -> assertTrue(continuation.contains("Q-001"), continuation),
+                        () -> assertEquals(Optional.of("entity.active"), driver.stub().state(CONTINUATION)),
+                        () -> assertTrue(refusedToLost.contains("generation_fenced"), refusedToLost),
+                        () -> assertEquals(1, count(events, "continued")),
+                        () -> assertEquals(0, count(events, QuestionDriver.CONTINUATION_GAP)));
+            }
+        }
+
+        @Test
+        @DisplayName("a continuation the lost generation took and asked on before it ended cannot be taken over: the "
+                + "recovery is a gap, logged as continuation_gap with its reason, and no generation is started")
+        void shouldLogGapForContinuationHeldByEndedGeneration() throws Exception {
+            try (var driver = driver(false)) {
+                var worker = startAsker(driver, Form.HOLD);
+                var host = askingClient(worker);
+                host.request("pm_wait", QuestionStub.JSON.createObjectNode());
+                answerAsOperator(driver);
+                driver.awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText()),
+                        System.currentTimeMillis() + DELIVERY.toMillis()).orElseThrow();
+                var again = host.request("pm_wait", QuestionStub.JSON.createObjectNode());
+
+                var acknowledged = driver.superviseAnswer(worker, DELIVERY);
+                var offered = host.text(again);
+                host.state();
+                host.link("ack", QuestionStub.JSON.createObjectNode());
+                var askedAgain = host.ask("ask", validEnvelope());
+                var recovery = driver.recovery(worker, "Q-001", TASK);
+
+                var events = QuestionResults.readJsonLines(driver.stub().events());
+                var gap = first(events, QuestionDriver.CONTINUATION_GAP);
+                var started = events.stream().filter(event -> "worker_started".equals(event.path(EVENT).asText()))
+                        .count();
+                assertAll("the gap",
+                        () -> assertFalse(acknowledged),
+                        () -> assertTrue(offered.contains("state: task.offered"), offered),
+                        () -> assertTrue(askedAgain.contains("state: entity.awaiting_answer"), askedAgain),
+                        () -> assertEquals(QuestionDriver.RecoveryStep.GAP, recovery.step()),
+                        () -> assertTrue(recovery.holderEnded()),
+                        () -> assertEquals("gap", first(events, QuestionDriver.RECOVERY).path("step").asText()),
+                        () -> assertEquals(QuestionDriver.HELD_BY_ENDED_GENERATION, gap.path("reason").asText()),
+                        () -> assertEquals(CONTINUATION, gap.path("task").asText()),
+                        () -> assertEquals("entity.awaiting_answer", gap.path("state").asText()),
+                        () -> assertEquals(WORKER + "#1", gap.path("holder").asText()),
+                        () -> assertEquals(1, started, events.toString()));
+            }
         }
 
         @Test

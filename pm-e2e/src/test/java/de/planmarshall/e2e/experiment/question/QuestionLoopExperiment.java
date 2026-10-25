@@ -163,8 +163,12 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * Antigravity's fixed 180 s call limit, with the stub's window raised above it ({@link QuestionDriver#cutSetting});
  * the run records whether the logs show the cut ({@link QuestionDriver#awaitCallCut}). After a loss the driver reads
  * what the stub made of the task before it starts a generation ({@link QuestionDriver#recovery}): none for a task the
- * stub continued or offered again and a generation holds or closed, one leased on the stub's queued continuation, and
- * otherwise the step it took before (a resume again of a resumable task, the continuation of a held one).
+ * stub continued or offered again and a generation that still runs holds or closed, one leased on the stub's queued
+ * continuation, one that takes over a continuation offered to or worked by a generation that has ended (the lost one
+ * itself, which may still hold a {@code pm_wait} when the stub continues the task), and otherwise the step it took
+ * before (a resume again of a resumable task, the continuation of a held one). A continuation an ended generation
+ * holds in a state no new generation can take over is recorded as {@value QuestionDriver#CONTINUATION_GAP}
+ * ({@value QuestionDriver#HELD_BY_ENDED_GENERATION}), never as a silent timeout.
  * <p>
  * Antigravity runs without further parameters on the launch verified on 2026-10-21 with agy against the stub
  * ({@link QuestionDriver#AGY_ARGV}, {@link QuestionDriver#AGY_CONFIG}); {@code -Dpm.experiment.agy.argv} (a JSON array
@@ -1275,8 +1279,11 @@ class QuestionLoopExperiment {
             if (driver.superviseAnswer(current, plan.host().silenceLimit().plus(Duration.ofMinutes(1)))) {
                 return current;
             }
-            if (recordLoss(current) && recover(current, decision, task).step() == RecoveryStep.TAKEN) {
-                return current;
+            if (recordLoss(current)) {
+                var step = recover(current, decision, task).step();
+                if (step == RecoveryStep.TAKEN || step == RecoveryStep.GAP) {
+                    return current;
+                }
             }
             return continuation(decision, current);
         }
@@ -1285,7 +1292,8 @@ class QuestionLoopExperiment {
          * Resumes the asker's session after the answer; a resumed generation whose answer acknowledgement is missing
          * is followed by the step the stub's state gives ({@link QuestionDriver#recovery}): the session resumed again
          * while the task waits resumable (or the stub has not acted yet, as before), a generation leased on the stub's
-         * continuation while it is queued, and none once a generation holds or closed it. Before 2026-10-23 the
+         * continuation while it is queued or held by a generation that has ended, and none once a generation that
+         * still runs holds it or a generation closed it. Before 2026-10-23 the
          * session was always resumed again, also on the task the stub had already closed {@code lost} and continued at
          * the resumed process's exit (run {@code cc787dd3} of the R3 smoke attempt, which then timed out).
          */
@@ -1306,7 +1314,7 @@ class QuestionLoopExperiment {
             recordLoss(resumed);
             var recovery = recover(resumed, decision, task);
             return switch (recovery.step()) {
-                case TAKEN -> resumed;
+                case TAKEN, GAP -> resumed;
                 case CONTINUE -> driver.startLeased(recovery.task(), recovery.entity(),
                         launch(current.id(), ++generation, ROLE, plan.host(), null));
                 case RESUME, WAIT -> {
@@ -1364,13 +1372,24 @@ class QuestionLoopExperiment {
             return true;
         }
 
-        /** Reads what the stub made of the lost task ({@link QuestionDriver#recovery}) and records the step. */
+        /**
+         * Reads what the stub made of the lost task ({@link QuestionDriver#recovery}) and records the step; a holder
+         * that has ended is recorded as {@code recovery_holder_ended}, and a {@link RecoveryStep#GAP} as
+         * {@value QuestionDriver#CONTINUATION_GAP} with its reason
+         * ({@value QuestionDriver#HELD_BY_ENDED_GENERATION}), so the run never ends as a silent timeout.
+         */
         private QuestionDriver.Recovery recover(Worker lost, String decision, String task) throws IOException {
             var recovery = driver.recovery(lost, decision, task);
             if (!record.has("recovery_step")) {
                 record.put("recovery_step", recovery.step().name().toLowerCase(Locale.ROOT));
                 record.put("recovery_task", recovery.task());
                 record.put("recovery_holder", recovery.holder());
+                if (recovery.holderEnded()) {
+                    record.put("recovery_holder_ended", true);
+                }
+            }
+            if (recovery.step() == RecoveryStep.GAP && !record.has(QuestionDriver.CONTINUATION_GAP)) {
+                record.put(QuestionDriver.CONTINUATION_GAP, QuestionDriver.HELD_BY_ENDED_GENERATION);
             }
             return recovery;
         }
