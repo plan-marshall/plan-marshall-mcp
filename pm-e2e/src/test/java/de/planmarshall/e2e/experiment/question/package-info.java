@@ -42,6 +42,9 @@
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionResults}: the pass criteria of the package, fixed before the
  * first measured run, the figures per item, host, model and form, and the invocations a result aggregates with
  * whether they ran at the specified scale.</li>
+ * <li>{@link de.planmarshall.e2e.experiment.question.QuestionEvidence}: the persistent root of the stub logs below
+ * {@code target/question-loop/work}, the archive every invocation writes at its end, and the relocation of stub logs
+ * recorded under the OS temp directory.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionLoopExperiment}: the entry that runs one item, disabled
  * unless {@code -Dpm.experiment.question=<item>} is set.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionReaggregation}: writes one item's result again from its

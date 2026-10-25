@@ -60,6 +60,12 @@ import de.planmarshall.e2e.experiment.question.QuestionDriver.Host;
  * ({@code verdict_without_quota_error}), and where its verdict without its continuation early exits reads differently,
  * that verdict ({@value #VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT}): additional figures that do not replace the
  * verdict. The limits come from every invocation it aggregates ({@link #result}).
+ * <p>
+ * A run whose stub log is gone ({@link #evidenceMissing(JsonNode)}) is counted as {@value #EVIDENCE_MISSING}, never as
+ * a run that did not ask; its verdict is marked {@value #VERDICT_EVIDENCE}, and a result with such runs never replaces
+ * an existing result file without {@value ResultTarget#ALLOW_MISSING_EVIDENCE}
+ * ({@link #write(ResultTarget, String, ObjectNode)}). {@link ResultTarget} writes a result under a suffix of its own,
+ * from the records of named invocations only.
  */
 final class QuestionResults {
 
@@ -191,6 +197,17 @@ final class QuestionResults {
      * failed its setup ({@value #SETUP_FAILED}); they are no run record and not counted as missing.
      */
     static final String SETUP_STOPPED_RUNS = "setup_stopped_runs";
+    /**
+     * The group column, and the result's total, of the runs whose stub log is missing ({@link #evidenceMissing}): such
+     * a run counts here only, never as {@code no_ask}, {@code timed_out} or in any other column; both appear only
+     * where a run is so.
+     */
+    static final String EVIDENCE_MISSING = "evidence_missing";
+    /**
+     * The mark of a group's and of a result's verdict judged with runs whose stub log is missing: the verdict logic is
+     * unchanged and reads them as runs without a single stub event; the mark says how many runs it read so.
+     */
+    static final String VERDICT_EVIDENCE = "verdict_evidence";
     /** An old run record's error of a failed git step of the setup: {@code <git command> failed: <git's output>}. */
     private static final Pattern GIT_SETUP_ERROR = Pattern.compile("^git .* failed: (.*)$", Pattern.DOTALL);
     /** An old run record's error of a missing local clone ({@link QuestionFixtures#checkout}). */
@@ -254,8 +271,23 @@ final class QuestionResults {
      * @param records the stub's question records of the run
      * @param outputs the worker outputs of the run: each line with its arrival time ({@code at}) and its text
      *                ({@code line})
+     * @param evidenceMissing whether the run's stub log is gone ({@link #evidenceMissing(JsonNode)}): its events are
+     *                then empty because nothing could be read, not because nothing happened
      */
-    record RunView(JsonNode run, List<JsonNode> events, List<JsonNode> records, List<JsonNode> outputs) {
+    record RunView(JsonNode run, List<JsonNode> events, List<JsonNode> records, List<JsonNode> outputs,
+            boolean evidenceMissing) {
+
+        /**
+         * A run whose stub log was read.
+         *
+         * @param run     the run record
+         * @param events  the stub's events of the run
+         * @param records the stub's question records of the run
+         * @param outputs the worker outputs of the run
+         */
+        RunView(JsonNode run, List<JsonNode> events, List<JsonNode> records, List<JsonNode> outputs) {
+            this(run, events, records, outputs, false);
+        }
 
         List<JsonNode> named(String name) {
             return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).toList();
@@ -549,6 +581,7 @@ final class QuestionResults {
         limitOfContinuationsByHold(result, runs);
         limitOfQuotaErrors(result, runs);
         limitOfSetupFailures(result, runs, contributing.values());
+        limitOfMissingEvidence(result, runs);
         limitOfReidentifiedGenerations(result, runs);
         limitOfAnswerFallbacks(result, runs);
         limitOfContinuationGaps(result, runs);
@@ -1220,10 +1253,14 @@ final class QuestionResults {
         var passWithoutQuota = true;
         var judgedWithoutQuota = false;
         var passWithoutContinuationExits = !groups.isEmpty();
+        var missing = 0;
+        var judged = 0;
         for (var entry : groups.entrySet()) {
             var group = evaluateGroup(item, entry.getValue());
             group.put("group", entry.getKey());
             array.add(group);
+            missing += group.path(EVIDENCE_MISSING).asInt(0);
+            judged += group.path(RUNS).asInt() - group.path(SETUP_FAILED).asInt();
             pass &= !"fail".equals(group.path(VERDICT).asText());
             quotaErrors |= group.path(QUOTA_ERROR).asInt() > 0;
             var without = group.path(VERDICT_WITHOUT_QUOTA_ERROR).asText(group.path(VERDICT).asText());
@@ -1240,6 +1277,10 @@ final class QuestionResults {
         if (!"R4".equals(item) && passWithoutContinuationExits != pass) {
             result.put(VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT, passWithoutContinuationExits ? "pass" : "fail");
         }
+        if (missing > 0) {
+            result.put(EVIDENCE_MISSING, missing);
+            result.put(VERDICT_EVIDENCE, missingEvidenceMark(missing, judged));
+        }
         if ("R1".equals(item) || "R2".equals(item)) {
             var name = "R1".equals(item) ? "max_hold_seconds" : "max_age_seconds";
             var parameter = "R1".equals(item) ? "duration_s" : "age_s";
@@ -1250,18 +1291,181 @@ final class QuestionResults {
     }
 
     /**
-     * Writes an item's result to {@code target/verification-results/question-loop/<item>.json}.
+     * @param missing the runs whose stub log is missing
+     * @param judged  the runs the verdict read
+     * @return the mark of a verdict judged with them ({@value #VERDICT_EVIDENCE})
+     */
+    static String missingEvidenceMark(int missing, int judged) {
+        return "evidence missing for " + missing + " of " + judged + " runs: the verdict reads them as runs without a "
+                + "single stub event";
+    }
+
+    /**
+     * Adds a limit naming the runs whose stub log is missing ({@link #evidenceMissing(JsonNode)}), per host, and how
+     * they are counted and read: {@value #EVIDENCE_MISSING} only, never {@code no_ask}; the verdict logic unchanged.
+     *
+     * @param result the result
+     * @param runs   its run records
+     */
+    static void limitOfMissingEvidence(ObjectNode result, List<JsonNode> runs) {
+        var missing = new TreeMap<String, List<String>>();
+        for (var run : runs) {
+            if (evidenceMissing(run)) {
+                missing.computeIfAbsent(run.path(HOST).asText(), _ -> new ArrayList<>()).add(runId(run));
+            }
+        }
+        if (missing.isEmpty()) {
+            return;
+        }
+        limit(result, "The stub log of these runs is missing: the stub directory their record names, or its "
+                + "events.jsonl, no longer exists (the OS temp directory that held the stub logs before 2026-10-25 was "
+                + "wiped by a reboot on 2026-10-24). They count as " + EVIDENCE_MISSING + " only, not as no_ask, "
+                + "timed_out, early_exit, quota_error or in any other column, and their figures are not measured. The "
+                + "verdict logic is unchanged and reads them as runs without a single stub event: a criterion every "
+                + "run must meet, or a share over the runs, counts them against the group; Q1 takes its share over "
+                + "the asks of the stub log and reads only the runs with evidence. " + VERDICT_EVIDENCE + " marks each "
+                + "verdict judged so: " + namedRuns(missing) + ".");
+    }
+
+    /**
+     * Where a result is written and which run records it aggregates, from the system properties:
+     * {@value #SUFFIX} writes {@code <item>-<suffix>.json} instead of {@code <item>.json}, so a new measurement can be
+     * written beside an intact result; {@value #INVOCATIONS} ({@code <id>,<id>,...}, only with a suffix) aggregates
+     * only the run and invocation records of the named invocations, all of them by default; and
+     * {@value #ALLOW_MISSING_EVIDENCE} lets a result with missing evidence replace an existing file
+     * ({@link QuestionResults#write(ResultTarget, String, ObjectNode)}).
+     *
+     * @param directory            the results directory ({@code target/verification-results/question-loop})
+     * @param suffix               the suffix of the file name, {@code null} for none
+     * @param invocations          the invocations to aggregate, empty for all
+     * @param allowMissingEvidence whether a result with missing evidence may replace an existing file
+     */
+    record ResultTarget(Path directory, String suffix, Set<String> invocations, boolean allowMissingEvidence) {
+
+        /** The property of the suffix of the result file. */
+        static final String SUFFIX = "pm.experiment.result.suffix";
+        /** The property of the invocations a suffixed result aggregates. */
+        static final String INVOCATIONS = "pm.experiment.result.invocations";
+        /** The property that lets a result with missing evidence replace an existing file. */
+        static final String ALLOW_MISSING_EVIDENCE = "pm.experiment.result.allow-missing-evidence";
+        /** The results directory of the items. */
+        static final Path DIRECTORY = Path.of("target", "verification-results", "question-loop");
+
+        private static final Pattern SUFFIX_FORM = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]*");
+
+        ResultTarget {
+            if (suffix != null && !SUFFIX_FORM.matcher(suffix).matches()) {
+                throw new IllegalArgumentException("-D" + SUFFIX + "=" + suffix + ": letters, digits, '.', '_' and '-' "
+                        + "only, starting with a letter or digit");
+            }
+            if (suffix == null && !invocations.isEmpty()) {
+                throw new IllegalArgumentException("-D" + INVOCATIONS + " needs -D" + SUFFIX + ": a result of some "
+                        + "invocations never replaces the item's result file");
+            }
+            invocations = Set.copyOf(invocations);
+        }
+
+        /** @return the target of the system properties, in {@link #DIRECTORY} */
+        static ResultTarget fromProperties() {
+            var suffix = System.getProperty(SUFFIX, "").strip();
+            var invocations = new TreeSet<String>();
+            for (var id : System.getProperty(INVOCATIONS, "").split(",")) {
+                if (!id.isBlank()) {
+                    invocations.add(id.strip());
+                }
+            }
+            return new ResultTarget(DIRECTORY, suffix.isEmpty() ? null : suffix, invocations,
+                    Boolean.getBoolean(ALLOW_MISSING_EVIDENCE));
+        }
+
+        /**
+         * @param item the item
+         * @return the result file of the item: {@code <item>.json}, or {@code <item>-<suffix>.json}
+         */
+        Path file(String item) {
+            return directory.resolve(suffix == null ? item + ".json" : item + "-" + suffix + ".json");
+        }
+
+        /**
+         * @param records run or invocation records of an item
+         * @return those of the named invocations, all without a name
+         * @throws IllegalArgumentException if a named invocation has no record among them
+         */
+        List<JsonNode> select(List<JsonNode> records) {
+            if (invocations.isEmpty()) {
+                return records;
+            }
+            var selected = records.stream().filter(node -> invocations.contains(node.path(INVOCATION).asText()))
+                    .toList();
+            var found = selected.stream().map(node -> node.path(INVOCATION).asText()).collect(Collectors.toSet());
+            var absent = new TreeSet<>(invocations);
+            absent.removeAll(found);
+            if (!absent.isEmpty()) {
+                throw new IllegalArgumentException("-D" + INVOCATIONS + " names invocations without a record: "
+                        + absent);
+            }
+            return selected;
+        }
+    }
+
+    /**
+     * The refusal to replace an existing result file with a result whose evidence is missing
+     * ({@value #EVIDENCE_MISSING}) without {@value ResultTarget#ALLOW_MISSING_EVIDENCE}.
+     */
+    static final class MissingEvidenceRefusal extends IOException {
+
+        private static final long serialVersionUID = 1L;
+
+        MissingEvidenceRefusal(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * @param result a result
+     * @return its JSON as every result file carries it: pretty printed, with a final line break
+     * @throws IOException if it cannot be rendered
+     */
+    static String render(ObjectNode result) throws IOException {
+        return QuestionStub.JSON.writerWithDefaultPrettyPrinter().writeValueAsString(result) + "\n";
+    }
+
+    /**
+     * Writes an item's result to {@code target/verification-results/question-loop/<item>.json}, with the suffix and
+     * the guard of the system properties ({@link ResultTarget#fromProperties()}).
      *
      * @param item   the item
      * @param result its result
      * @return the file written
-     * @throws IOException if it cannot be written
+     * @throws IOException if it cannot be written, or the guard refuses it ({@link MissingEvidenceRefusal})
      */
     static Path write(String item, ObjectNode result) throws IOException {
-        var directory = Files.createDirectories(Path.of("target", "verification-results", "question-loop"));
-        var file = directory.resolve(item + ".json");
-        Files.writeString(file, QuestionStub.JSON.writerWithDefaultPrettyPrinter().writeValueAsString(result) + "\n",
-                StandardCharsets.UTF_8);
+        return write(ResultTarget.fromProperties(), item, result);
+    }
+
+    /**
+     * Writes an item's result to its target's file. A result with runs whose stub log is missing
+     * ({@value #EVIDENCE_MISSING} above 0) never replaces an existing file unless the target allows it: the existing
+     * file was written from that evidence, and its loss must not rewrite it. A new file, or one allowed, is written
+     * with the {@value #EVIDENCE_MISSING} counts and the limit that names the runs ({@link #limitOfMissingEvidence}).
+     *
+     * @param target where the result goes
+     * @param item   the item
+     * @param result its result
+     * @return the file written
+     * @throws IOException if it cannot be written, or the guard refuses it ({@link MissingEvidenceRefusal})
+     */
+    static Path write(ResultTarget target, String item, ObjectNode result) throws IOException {
+        var file = target.file(item);
+        var missing = result.path(EVIDENCE_MISSING).asInt(0);
+        if (missing > 0 && Files.exists(file) && !target.allowMissingEvidence()) {
+            throw new MissingEvidenceRefusal("not rewritten: " + file + " exists, and " + missing + " run records of "
+                    + item + " have no stub log (" + EVIDENCE_MISSING + "); -D" + ResultTarget.ALLOW_MISSING_EVIDENCE
+                    + "=true writes it with them counted apart, -D" + ResultTarget.SUFFIX + "=<text> writes a file of "
+                    + "its own");
+        }
+        Files.createDirectories(target.directory());
+        Files.writeString(file, render(result), StandardCharsets.UTF_8);
         return file;
     }
 
@@ -1327,6 +1531,10 @@ final class QuestionResults {
         notFollowingReference(item, launched, group);
         var pass = judge(item, launched, group);
         group.put(VERDICT, "R4".equals(item) ? "none" : pass ? "pass" : "fail");
+        var missing = group.path(EVIDENCE_MISSING).asInt(0);
+        if (missing > 0) {
+            group.put(VERDICT_EVIDENCE, missingEvidenceMark(missing, launched.size()));
+        }
         var withoutQuota = new ArrayList<RunView>();
         for (var view : launched) {
             if (!quotaError(view)) {
@@ -1386,7 +1594,10 @@ final class QuestionResults {
      * {@value #QUOTA_ERROR} only, not in {@code timed_out}, {@code no_ask}, {@code early_exit} or
      * {@value #CONTINUATION_EARLY_EXIT}; a continuation early exit not in {@code timed_out}, even where its record,
      * written before the driver ended the wait on it, says timed out; a run whose setup failed in
-     * {@value #SETUP_FAILED} only, since no worker of it launched. They are reported figures: no verdict reads them.
+     * {@value #SETUP_FAILED} only, since no worker of it launched; a run whose stub log is missing
+     * ({@link RunView#evidenceMissing()}) in {@value #EVIDENCE_MISSING} only, a column present only where such a run
+     * is, never in {@code no_ask} or {@code timed_out}: its empty events are no evidence that it did not ask (its
+     * record's {@value #ANSWER_FALLBACK_OWN} still counts). They are reported figures: no verdict reads them.
      *
      * @param views  the group's runs
      * @param group  the group
@@ -1405,6 +1616,7 @@ final class QuestionResults {
         var submitted = 0;
         var fallbacks = 0;
         var notStarted = 0;
+        var evidenceMissing = 0;
         var timedOutRuns = QuestionStub.JSON.createArrayNode();
         for (var view : views) {
             if (setupFailed(view.run())) {
@@ -1414,6 +1626,10 @@ final class QuestionResults {
             fallbacks += view.run().path(ANSWER_FALLBACK_OWN).asBoolean() ? 1 : 0;
             var askedHere = !view.named(ASKED).isEmpty();
             asked += askedHere ? 1 : 0;
+            if (view.evidenceMissing()) {
+                evidenceMissing++;
+                continue;
+            }
             if (quotaError(view)) {
                 quotaErrors++;
             } else {
@@ -1446,6 +1662,9 @@ final class QuestionResults {
         group.put(ANSWER_FALLBACK_OWN, fallbacks);
         group.put(CONTINUATION_NOT_STARTED, notStarted);
         group.set(TIMED_OUT_RUNS, timedOutRuns);
+        if (evidenceMissing > 0) {
+            group.put(EVIDENCE_MISSING, evidenceMissing);
+        }
     }
 
     /**
@@ -3252,7 +3471,25 @@ final class QuestionResults {
             outputs.addAll(readJsonLines(Path.of(worker.path("output").asText())));
         }
         return new RunView(run, readJsonLines(stub.resolve("events.jsonl")), readJsonLines(stub.resolve(
-                "questions.jsonl")), outputs);
+                "questions.jsonl")), outputs, evidenceMissing(run));
+    }
+
+    /**
+     * Whether a run's evidence is missing: its record names no stub directory, or the directory or its
+     * {@code events.jsonl} no longer exists, as after the reboot of 2026-10-24 that wiped the OS temp directory the
+     * stub logs were kept in. A run whose setup failed has no stub log to read and is never counted so
+     * ({@link #setupFailed(JsonNode)}). Such a run's events read as empty, which the counts must never take for a run
+     * that did not ask ({@value #EVIDENCE_MISSING}).
+     *
+     * @param run a run record
+     * @return whether its stub log is missing
+     */
+    static boolean evidenceMissing(JsonNode run) {
+        if (setupFailed(run)) {
+            return false;
+        }
+        var stub = run.path("stub_dir").asText("");
+        return stub.isBlank() || !Files.isRegularFile(Path.of(stub).resolve("events.jsonl"));
     }
 
     private static boolean followsReference(RunView view) {

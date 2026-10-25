@@ -1293,8 +1293,9 @@ class QuestionStubTest {
             return new QuestionLoopExperiment.Config(List.of(Host.CLAUDE, Host.OPENCODE),
                     Map.of(Host.CLAUDE, "claude-haiku-4-5", Host.OPENCODE, "opencode/gpt-5.4-nano"), 1,
                     Integer.MAX_VALUE, 4, directory.resolve("cache"), directory.resolve("telemetry"), "ref",
-                    directory.resolve("clones"), 0, directory.resolve("workspace"), directory.resolve("results"),
-                    List.of("pm-exec"), Duration.ofMinutes(20), QuestionLoopExperiment.Warmth.FRESH, dataHome);
+                    directory.resolve("clones"), 0, directory.resolve("workspace"), directory.resolve("evidence"),
+                    directory.resolve("results"), List.of("pm-exec"), Duration.ofMinutes(20),
+                    QuestionLoopExperiment.Warmth.FRESH, dataHome);
         }
 
         @Test
@@ -2464,8 +2465,8 @@ class QuestionStubTest {
             return new QuestionLoopExperiment.Config(List.of(Host.CLAUDE), Map.of(Host.CLAUDE, "claude-haiku-4-5"),
                     runs, Integer.MAX_VALUE, 1, directory.resolve("cache"), directory.resolve("telemetry"), "ref",
                     directory.resolve("clones"), largeRuns, directory.resolve("workspace"),
-                    directory.resolve("results"), List.of("pm-exec"), Duration.ofMinutes(20), warmth,
-                    OpenCodeDataHome.GLOBAL);
+                    directory.resolve("evidence"), directory.resolve("results"), List.of("pm-exec"),
+                    Duration.ofMinutes(20), warmth, OpenCodeDataHome.GLOBAL);
         }
     }
 
@@ -4744,6 +4745,423 @@ class QuestionStubTest {
         private static JsonNode first(List<JsonNode> events, String name) {
             return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).findFirst()
                     .orElseThrow(() -> new AssertionError("no " + name + " in " + events));
+        }
+    }
+
+    /**
+     * The evidence of the measurement that a reboot wiped on 2026-10-24: the stub logs kept below the persistent root,
+     * a run without its stub log counted apart and never as a run that did not ask, a result from such runs never
+     * replacing an existing file unseen, a result under a suffix of its own from named invocations, the archive of an
+     * invocation, and the relocation of stub logs recorded under the OS temp directory. The records and logs are
+     * written by the tests into a temporary directory.
+     */
+    @Nested
+    @DisplayName("evidence")
+    class Evidence {
+
+        private static final String RUN_A = "Q3-claude-fresh-f1-000-aaaa0001";
+        private static final String RUN_B = "Q3-claude-fresh-f1-001-aaaa0002";
+        private static final String RUN_GONE = "Q3-claude-fresh-f1-002-aaaa0003";
+
+        private final Map<String, String> previous = new LinkedHashMap<>();
+
+        @AfterEach
+        void restoreProperties() {
+            previous.forEach((name, value) -> {
+                if (value == null) {
+                    System.clearProperty(name);
+                } else {
+                    System.setProperty(name, value);
+                }
+            });
+        }
+
+        private void property(String name, String value) {
+            previous.putIfAbsent(name, System.getProperty(name));
+            System.setProperty(name, value);
+        }
+
+        @Test
+        @DisplayName("keeps the stub logs below the persistent root and the worker directories where they were")
+        void shouldKeepStubLogsBelowPersistentRoot() {
+            var config = config();
+
+            var stub = QuestionLoopExperiment.stubDirectory(config, RUN_A);
+            var defaultRoot = QuestionEvidence.workRoot(directory.resolve("results"));
+            property(QuestionEvidence.WORK_PROPERTY, directory.resolve("elsewhere").toString());
+            var placed = QuestionEvidence.workRoot(directory.resolve("results"));
+
+            assertAll("the locations",
+                    () -> assertEquals(directory.resolve("evidence").resolve(RUN_A).resolve("stub"), stub),
+                    () -> assertFalse(stub.startsWith(config.workspace()), stub.toString()),
+                    () -> assertEquals(directory.resolve("results").resolve("work"), defaultRoot),
+                    () -> assertEquals(directory.resolve("elsewhere"), placed));
+        }
+
+        @Test
+        @DisplayName("a run without its stub log counts as evidence_missing only, never as no_ask or timed_out, is "
+                + "named in a limit, and marks the verdict, which reads it as a run without an event")
+        void shouldCountMissingEvidenceApart() throws Exception {
+            var runs = List.<JsonNode>of(passingRun(directory.resolve("t"), RUN_A, "i1"),
+                    goneRun(RUN_GONE, "i1", true));
+
+            var result = QuestionResults.result("Q3", runs, List.of(invocation("i1")), () -> 0);
+
+            var group = result.path("groups").get(0);
+            var limits = result.path("limits").toString();
+            assertAll("the result",
+                    () -> assertEquals(2, group.path("runs").asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.EVIDENCE_MISSING).asInt()),
+                    () -> assertEquals(0, group.path("no_ask").asInt()),
+                    () -> assertEquals(0, group.path(QuestionResults.TIMED_OUT).asInt()),
+                    () -> assertEquals("[]", group.path(QuestionResults.TIMED_OUT_RUNS).toString()),
+                    () -> assertEquals(1, group.path("asked").asInt()),
+                    () -> assertEquals(1, group.path("stopped").asInt()),
+                    () -> assertEquals("fail", group.path("verdict").asText()),
+                    () -> assertEquals(QuestionResults.missingEvidenceMark(1, 2),
+                            group.path(QuestionResults.VERDICT_EVIDENCE).asText()),
+                    () -> assertEquals(1, result.path(QuestionResults.EVIDENCE_MISSING).asInt()),
+                    () -> assertEquals("fail", result.path("verdict").asText()),
+                    () -> assertTrue(result.path(QuestionResults.VERDICT_EVIDENCE).isTextual(), result.toString()),
+                    () -> assertTrue(limits.contains("count as evidence_missing only, not as no_ask")
+                            && limits.contains("claude 1 (" + RUN_GONE + ")"), limits),
+                    () -> assertEquals("Every run; time from the ask to the end or the next pm_wait recorded per "
+                            + "host.", QuestionResults.CRITERIA.get("Q3")));
+        }
+
+        @Test
+        @DisplayName("a result whose every run has its stub log carries no evidence field, mark or limit")
+        void shouldLeaveCompleteResultUnchanged() throws Exception {
+            var runs = List.<JsonNode>of(passingRun(directory.resolve("t"), RUN_A, "i1"),
+                    passingRun(directory.resolve("t"), RUN_B, "i1"));
+
+            var result = QuestionResults.result("Q3", runs, List.of(invocation("i1")), () -> 0);
+
+            var group = result.path("groups").get(0);
+            assertAll("the complete result",
+                    () -> assertTrue(group.path(QuestionResults.EVIDENCE_MISSING).isMissingNode(), group.toString()),
+                    () -> assertTrue(group.path(QuestionResults.VERDICT_EVIDENCE).isMissingNode(), group.toString()),
+                    () -> assertTrue(result.path(QuestionResults.EVIDENCE_MISSING).isMissingNode()),
+                    () -> assertFalse(result.path("limits").toString().contains("evidence_missing"),
+                            result.toString()),
+                    () -> assertEquals("pass", group.path("verdict").asText()),
+                    () -> assertFalse(QuestionResults.evidenceMissing(runs.getFirst())));
+        }
+
+        @Test
+        @DisplayName("a run whose setup failed is never evidence_missing, though it has no stub log")
+        void shouldNotCountSetupFailureAsMissingEvidence() {
+            var run = goneRun(RUN_GONE, "i1", false);
+            run.put(QuestionResults.SETUP_FAILED, true);
+
+            assertFalse(QuestionResults.evidenceMissing(run));
+        }
+
+        @Test
+        @DisplayName("refuses to replace an existing result file with a result from runs without their stub log")
+        void shouldRefuseRewriteWithMissingEvidence() throws Exception {
+            var results = Files.createDirectories(directory.resolve("verification-results"));
+            var existing = Files.writeString(results.resolve("Q3.json"), "{\"intact\":true}\n");
+            var result = missingEvidenceResult();
+
+            var refusal = assertThrows(QuestionResults.MissingEvidenceRefusal.class, () -> QuestionResults.write(
+                    new QuestionResults.ResultTarget(results, null, Set.of(), false), "Q3", result));
+
+            assertAll("the refusal",
+                    () -> assertEquals("{\"intact\":true}\n", Files.readString(existing)),
+                    () -> assertTrue(refusal.getMessage().contains(QuestionResults.ResultTarget.ALLOW_MISSING_EVIDENCE),
+                            refusal.getMessage()));
+        }
+
+        @Test
+        @DisplayName("writes a result with missing evidence with the override, or as a new file, counted and named")
+        void shouldWriteMissingEvidenceWithOverrideOrNewFile() throws Exception {
+            var results = Files.createDirectories(directory.resolve("verification-results"));
+            Files.writeString(results.resolve("Q3.json"), "{\"intact\":true}\n");
+            var result = missingEvidenceResult();
+
+            var overridden = QuestionResults.write(new QuestionResults.ResultTarget(results, null, Set.of(), true),
+                    "Q3", result);
+            var fresh = QuestionResults.write(new QuestionResults.ResultTarget(results, "new", Set.of(), false), "Q3",
+                    result);
+
+            var written = Files.readString(overridden);
+            assertAll("the written results",
+                    () -> assertEquals(QuestionResults.render(result), written),
+                    () -> assertTrue(written.contains("\"" + QuestionResults.EVIDENCE_MISSING + "\" : 1"), written),
+                    () -> assertTrue(written.contains(RUN_GONE), written),
+                    () -> assertEquals(results.resolve("Q3-new.json"), fresh),
+                    () -> assertEquals(written, Files.readString(fresh)));
+        }
+
+        @Test
+        @DisplayName("the override and the suffix are read from their properties")
+        void shouldReadTargetFromProperties() {
+            property(QuestionResults.ResultTarget.SUFFIX, "agy-2026-10-25");
+            property(QuestionResults.ResultTarget.INVOCATIONS, "i2, i3,");
+            property(QuestionResults.ResultTarget.ALLOW_MISSING_EVIDENCE, "true");
+
+            var target = QuestionResults.ResultTarget.fromProperties();
+
+            assertAll("the target",
+                    () -> assertEquals(QuestionResults.ResultTarget.DIRECTORY.resolve("Q3-agy-2026-10-25.json"),
+                            target.file("Q3")),
+                    () -> assertEquals(Set.of("i2", "i3"), target.invocations()),
+                    () -> assertTrue(target.allowMissingEvidence()));
+        }
+
+        @Test
+        @DisplayName("without properties the result goes to <item>.json from every record, guarded")
+        void shouldDefaultToItemFileFromAllRecords() {
+            var target = new QuestionResults.ResultTarget(directory, null, Set.of(), false);
+            List<JsonNode> records = List.of(invocation("i1"), invocation("i2"));
+
+            assertAll("the default target",
+                    () -> assertEquals(directory.resolve("Q3.json"), target.file("Q3")),
+                    () -> assertEquals(records, target.select(records)),
+                    () -> assertFalse(QuestionResults.ResultTarget.fromProperties().allowMissingEvidence()));
+        }
+
+        @Test
+        @DisplayName("a suffixed result aggregates only the records of the named invocations")
+        void shouldSelectNamedInvocations() throws Exception {
+            var t = directory.resolve("t");
+            var runs = List.<JsonNode>of(passingRun(t, RUN_A, "i1"), passingRun(t, RUN_B, "i2"),
+                    goneRun(RUN_GONE, "i1", false));
+            List<JsonNode> invocations = List.of(invocation("i1"), invocation("i2"));
+            var target = new QuestionResults.ResultTarget(directory, "new", Set.of("i2"), false);
+
+            var result = QuestionResults.result("Q3", target.select(runs), target.select(invocations), () -> 0);
+
+            assertAll("the selected result",
+                    () -> assertEquals(1, result.path("run_records").asInt()),
+                    () -> assertEquals("i2", result.path("invocations").get(0).path("invocation").asText()),
+                    () -> assertEquals(1, result.path("invocations").size()),
+                    () -> assertTrue(result.path(QuestionResults.EVIDENCE_MISSING).isMissingNode(), result.toString()),
+                    () -> assertEquals("pass", result.path("verdict").asText()));
+        }
+
+        @ParameterizedTest(name = "suffix {0}, invocations {1}")
+        @CsvSource(nullValues = "none", value = {"none, i1", "../Q3, none", "'', none", "a/b, none"})
+        @DisplayName("refuses invocations without a suffix, and a suffix that is no plain name")
+        void shouldRefuseInvalidTarget(String suffix, String invocations) {
+            var named = invocations == null ? Set.<String>of() : Set.of(invocations);
+
+            assertThrows(IllegalArgumentException.class,
+                    () -> new QuestionResults.ResultTarget(directory, suffix, named, false));
+        }
+
+        @Test
+        @DisplayName("refuses a named invocation without a record")
+        void shouldRefuseUnknownInvocation() {
+            var target = new QuestionResults.ResultTarget(directory, "new", Set.of("typo"), false);
+            List<JsonNode> records = List.of(invocation("i1"));
+
+            var refusal = assertThrows(IllegalArgumentException.class, () -> target.select(records));
+
+            assertTrue(refusal.getMessage().contains("typo"), refusal.getMessage());
+        }
+
+        @Test
+        @DisplayName("archives an invocation: its records verbatim, its own result, its stub logs and the analysis, "
+                + "also when the guard refuses the item's result file")
+        void shouldArchiveInvocation() throws Exception {
+            var results = Files.createDirectories(directory.resolve("question-loop"));
+            var t = directory.resolve("t");
+            var own = passingRun(t, RUN_A, "i1");
+            var gone = goneRun(RUN_GONE, "i1", true);
+            var other = passingRun(t, RUN_B, "i2");
+            for (var run : List.of(own, other, gone)) {
+                QuestionResults.recordRun(results, run);
+            }
+            QuestionResults.recordInvocation(results, invocation("i1"));
+            QuestionResults.recordInvocation(results, invocation("i2"));
+            var verification = Files.createDirectories(directory.resolve("verification-results"));
+            Files.writeString(verification.resolve("Q3.json"), "{\"intact\":true}\n");
+            var all = QuestionResults.result("Q3", QuestionResults.runs(results, "Q3"),
+                    QuestionResults.invocations(results, "Q3"), () -> 0);
+            var target = new QuestionResults.ResultTarget(verification, null, Set.of(), false);
+
+            var archive = QuestionEvidence.archive(results, "Q3", "i1", () -> 0);
+            assertThrows(QuestionResults.MissingEvidenceRefusal.class, () -> QuestionResults.write(target, "Q3", all));
+
+            var expected = QuestionResults.result("Q3", List.of(own, gone), List.of(invocation("i1")), () -> 0);
+            var analysis = Files.readString(archive.resolve(QuestionEvidence.ANALYSIS_FILE));
+            assertAll("the archive",
+                    () -> assertEquals(results.resolve("archive").resolve("i1"), archive),
+                    () -> assertEquals(QuestionStub.JSON.writeValueAsString(own) + "\n"
+                            + QuestionStub.JSON.writeValueAsString(gone) + "\n",
+                            Files.readString(archive.resolve("runs.jsonl"))),
+                    () -> assertEquals(QuestionStub.JSON.writeValueAsString(invocation("i1")) + "\n",
+                            Files.readString(archive.resolve("invocations.jsonl"))),
+                    () -> assertEquals(QuestionResults.render(expected),
+                            Files.readString(archive.resolve(QuestionEvidence.RESULT_FILE))),
+                    () -> assertEquals(Files.readString(Path.of(own.path("stub_dir").asText()).resolve("events.jsonl")),
+                            Files.readString(archive.resolve("stub").resolve(RUN_A).resolve("events.jsonl"))),
+                    () -> assertFalse(Files.exists(archive.resolve("stub").resolve(RUN_B))),
+                    () -> assertFalse(Files.exists(archive.resolve("stub").resolve(RUN_GONE))),
+                    () -> assertTrue(analysis.contains("Invocation i1 of Q3"), analysis),
+                    () -> assertTrue(analysis.contains("runs 2, asked 1, continued 0, submitted 0"), analysis),
+                    () -> assertTrue(analysis.contains("timed_out 0"), analysis),
+                    () -> assertTrue(analysis.contains("evidence_missing 1"), analysis),
+                    () -> assertTrue(analysis.contains("verdict figure: stopped 1, worktree_unchanged 1"), analysis),
+                    () -> assertTrue(analysis.contains("verdict: fail (verdict_evidence: evidence missing for 1 of 2"),
+                            analysis),
+                    () -> assertTrue(analysis.contains("Runs not following the reference: none"), analysis),
+                    () -> assertTrue(analysis.contains("Limits:\n1. "), analysis),
+                    () -> assertTrue(analysis.contains(RUN_GONE), analysis),
+                    () -> assertEquals("{\"intact\":true}\n", Files.readString(verification.resolve("Q3.json"))));
+        }
+
+        @ParameterizedTest(name = "{0} -> {1}")
+        @CsvSource(nullValues = "none", value = {"none, true", "true, true", "false, false", "FALSE, false"})
+        @DisplayName("the archive is on by default and switched off by pm.experiment.archive=false")
+        void shouldSwitchArchive(String value, boolean expected) {
+            if (value == null) {
+                property(QuestionEvidence.ARCHIVE_PROPERTY, "true");
+                System.clearProperty(QuestionEvidence.ARCHIVE_PROPERTY);
+            } else {
+                property(QuestionEvidence.ARCHIVE_PROPERTY, value);
+            }
+
+            assertEquals(expected, QuestionEvidence.archiveEnabled());
+        }
+
+        @Test
+        @DisplayName("relocates the stub logs of the named invocation from the temp directory or a fallback copy and "
+                + "changes only their stub_dir; other lines stay byte-identical, and a second run changes nothing")
+        void shouldRelocateOnlyStubDir() throws Exception {
+            var temp = directory.resolve("T").resolve("pm-qlv-1");
+            var inTemp = passingRun(temp, RUN_A, "A");
+            inTemp.put("detail", "ä – 1.5e3 \"quoted\"");
+            var copied = goneRun(RUN_GONE, "A", false);
+            copied.put("stub_dir", temp.resolve(RUN_GONE).resolve("stub").toString());
+            var fallback = Files.createDirectories(directory.resolve("copy").resolve("A").resolve(RUN_GONE)
+                    .resolve("stub"));
+            Files.writeString(fallback.resolve("events.jsonl"), "{\"event\":\"asked\"}\n");
+            var other = passingRun(temp, RUN_B, "B");
+            var results = Files.createDirectories(directory.resolve("results"));
+            for (var run : List.of(inTemp, other, copied)) {
+                QuestionResults.recordRun(results, run);
+            }
+            var runsFile = results.resolve("runs.jsonl");
+            var before = Files.readAllLines(runsFile);
+            var work = directory.resolve("work");
+
+            var moved = QuestionEvidence.relocate(runsFile, List.of("A"), work, List.of(directory.resolve("copy")));
+            var after = Files.readString(runsFile);
+            var again = QuestionEvidence.relocate(runsFile, List.of("A"), work, List.of(directory.resolve("copy")));
+
+            var lines = Files.readAllLines(runsFile);
+            var relocatedA = work.resolve("pm-qlv-1").resolve(RUN_A).resolve("stub");
+            var relocatedGone = work.resolve("pm-qlv-1").resolve(RUN_GONE).resolve("stub");
+            assertAll("the relocation",
+                    () -> assertEquals(new QuestionEvidence.Moved(2, 1, 1, 0), moved.get("A")),
+                    () -> assertEquals(new QuestionEvidence.Moved(0, 0, 0, 2), again.get("A")),
+                    () -> assertEquals(after, Files.readString(runsFile)),
+                    () -> assertTrue(after.endsWith("\n")),
+                    () -> assertEquals(before.get(1), lines.get(1)),
+                    () -> assertEquals(before.getFirst().replace(QuestionStub.JSON.writeValueAsString(
+                            temp.resolve(RUN_A).resolve("stub").toString()), QuestionStub.JSON.writeValueAsString(
+                            relocatedA.toString())), lines.getFirst()),
+                    () -> assertEquals(inTemp.deepCopy().put("stub_dir", relocatedA.toString()),
+                            QuestionStub.JSON.readTree(lines.getFirst())),
+                    () -> assertEquals(copied.deepCopy().put("stub_dir", relocatedGone.toString()),
+                            QuestionStub.JSON.readTree(lines.get(2))),
+                    () -> assertEquals(Files.readString(temp.resolve(RUN_A).resolve("stub").resolve("events.jsonl")),
+                            Files.readString(relocatedA.resolve("events.jsonl"))),
+                    () -> assertEquals("{\"event\":\"asked\"}\n", Files.readString(relocatedGone.resolve(
+                            "events.jsonl"))),
+                    () -> assertFalse(QuestionResults.evidenceMissing(QuestionStub.JSON.readTree(lines.get(2)))));
+        }
+
+        @Test
+        @DisplayName("a record whose stub log exists nowhere stops the relocation and leaves runs.jsonl as it was")
+        void shouldStopRelocationWithoutSource() throws Exception {
+            var gone = goneRun(RUN_GONE, "A", false);
+            var results = Files.createDirectories(directory.resolve("results"));
+            QuestionResults.recordRun(results, gone);
+            var runsFile = results.resolve("runs.jsonl");
+            var before = Files.readString(runsFile);
+            var work = directory.resolve("work");
+            var fallbacks = List.of(directory.resolve("copy"));
+            var named = List.of("A");
+
+            var stop = assertThrows(IOException.class, () -> QuestionEvidence.relocate(runsFile, named, work,
+                    fallbacks));
+
+            assertAll("the stop",
+                    () -> assertTrue(stop.getMessage().contains(RUN_GONE), stop.getMessage()),
+                    () -> assertEquals(before, Files.readString(runsFile)));
+        }
+
+        private QuestionLoopExperiment.Config config() {
+            return new QuestionLoopExperiment.Config(List.of(Host.CLAUDE), Map.of(Host.CLAUDE, "claude-haiku-4-5"),
+                    1, Integer.MAX_VALUE, 1, directory.resolve("cache"), directory.resolve("telemetry"), "ref",
+                    directory.resolve("clones"), 0, directory.resolve("workspace"), directory.resolve("evidence"),
+                    directory.resolve("results"), List.of("pm-exec"), Duration.ofMinutes(20),
+                    QuestionLoopExperiment.Warmth.FRESH, OpenCodeDataHome.GLOBAL);
+        }
+
+        private ObjectNode missingEvidenceResult() throws IOException {
+            return QuestionResults.result("Q3", List.of(passingRun(directory.resolve("t"), RUN_A, "i1"),
+                    goneRun(RUN_GONE, "i1", true)), List.of(invocation("i1")), () -> 0);
+        }
+
+        /**
+         * A fresh Q3 run that asked, stopped by its exit and left the worktree unchanged, its stub log written below
+         * {@code <workspace>/<run id>/stub}.
+         */
+        private static ObjectNode passingRun(Path workspace, String id, String invocation) throws IOException {
+            var stub = Files.createDirectories(workspace.resolve(id).resolve("stub"));
+            var lines = new StringBuilder();
+            for (var event : List.of(event(1_000, "asked"), event(1_100, "worktree_digest").put("digest", "d1"),
+                    event(2_000, "worker_exited"), event(2_100, "worktree_digest").put("digest", "d1"))) {
+                lines.append(QuestionStub.JSON.writeValueAsString(event)).append('\n');
+            }
+            Files.writeString(stub.resolve("events.jsonl"), lines);
+            Files.writeString(stub.resolve("questions.jsonl"), "{\"line\":\"asked\"}\n");
+            return runRecord(invocation, stub, false);
+        }
+
+        /** A Q3 run whose stub directory no longer exists, as after the reboot. */
+        private ObjectNode goneRun(String id, String invocation, boolean timedOut) {
+            return runRecord(invocation, directory.resolve("wiped").resolve(id).resolve("stub"), timedOut);
+        }
+
+        private static ObjectNode runRecord(String invocation, Path stub, boolean timedOut) {
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put(QuestionResults.INVOCATION, invocation);
+            run.put("item", "Q3");
+            run.put("host", "claude");
+            run.put("model", "m");
+            run.put("form", "fresh");
+            run.put("continuation", "fallback");
+            run.put("fixture", "f1");
+            run.put("kind", "entity");
+            run.put(QuestionResults.TIMED_OUT, timedOut);
+            run.put("stub_dir", stub.toString());
+            run.putArray("workers");
+            return run;
+        }
+
+        private static ObjectNode invocation(String id) {
+            var invocation = QuestionStub.JSON.createObjectNode();
+            invocation.put(QuestionResults.INVOCATION, id);
+            invocation.put("item", "Q3");
+            invocation.put("runs", 20);
+            invocation.put("large_runs", 3);
+            invocation.putNull("fixtures_limit");
+            return invocation;
+        }
+
+        private static ObjectNode event(long at, String name) {
+            var node = QuestionStub.JSON.createObjectNode();
+            node.put("at", at);
+            node.put("event", name);
+            node.put("worker", WORKER);
+            node.put("generation", 1);
+            return node;
         }
     }
 

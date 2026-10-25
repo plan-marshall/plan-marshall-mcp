@@ -84,7 +84,14 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * {@link QuestionFixtures#siblingRepositories(Path)}), {@code pm.experiment.r4.large-runs} (3),
  * {@code pm.experiment.warmth} ({@code both}, {@code fresh} or {@code warm}, default {@code both}: which workers each
  * item's run matrix plans; another value fails the run; Q7 runs fresh only, {@link Warmth}),
- * {@code pm.experiment.workspace} (below the temporary directory, outside the repository),
+ * {@code pm.experiment.workspace} (the worker directories, below the temporary directory, outside the repository;
+ * nothing reads them after the run), {@code pm.experiment.work} (the persistent root of the stub logs, by default
+ * {@code target/question-loop/work}: {@link QuestionEvidence}), {@code pm.experiment.archive} ({@code false} switches
+ * off the archive every invocation writes at its end, {@code target/question-loop/archive/<invocation id>/}:
+ * {@link QuestionEvidence#archive}), {@code pm.experiment.result.suffix} and {@code pm.experiment.result.invocations}
+ * (a result file {@code <item>-<suffix>.json} from the records of the named invocations only), and
+ * {@code pm.experiment.result.allow-missing-evidence} (a result with runs whose stub log is missing may replace an
+ * existing result file: {@link QuestionResults.ResultTarget}),
  * {@code pm.experiment.run-timeout} ({@code PT20M}), {@code pm.experiment.q4.other-host},
  * {@code pm.experiment.q6.quorum-a} and {@code pm.experiment.q6.quorum-b} ({@code <host>:<model>}),
  * {@code pm.experiment.q7.open} ({@code PT1H}), {@code pm.experiment.r1.durations},
@@ -303,7 +310,9 @@ class QuestionLoopExperiment {
      * @param telemetryRef the ref of the branch of the scenario recipes in it
      * @param clones       the directory of the local clones of the scenarios' repositories, read only
      * @param largeRuns    runs per large scenario, host, form and continuation (R4)
-     * @param workspace    the root of the run workspaces, outside the repository
+     * @param workspace    the root of the worker directories of the invocation, outside the repository
+     * @param evidence     the root of the stub logs of the invocation, below the persistent root
+     *                     ({@link QuestionEvidence#workRoot(Path)})
      * @param results      the results directory ({@code runs.jsonl} and the per-run logs)
      * @param exec         the {@code pm-exec} command line
      * @param runTimeout   the bound of one run beside its holds
@@ -311,7 +320,7 @@ class QuestionLoopExperiment {
      * @param openCodeDataHome where OpenCode workers keep their data
      */
     record Config(List<Host> hosts, Map<Host, String> models, int runs, int fixtures, int parallel, Path cache,
-    Path telemetry, String telemetryRef, Path clones, int largeRuns, Path workspace, Path results,
+    Path telemetry, String telemetryRef, Path clones, int largeRuns, Path workspace, Path evidence, Path results,
     List<String> exec, Duration runTimeout, Warmth warmth, OpenCodeDataHome openCodeDataHome) {
 
         Config {
@@ -339,6 +348,7 @@ class QuestionLoopExperiment {
                 }
             }
             var stamp = Instant.now().toString().replace(":", "").replace(".", "");
+            var results = Path.of("target", "question-loop").toAbsolutePath();
             return new Config(List.copyOf(hosts), models, Integer.getInteger("pm.experiment.runs", 20),
                     Integer.getInteger("pm.experiment.fixtures", Integer.MAX_VALUE),
                     Integer.getInteger("pm.experiment.parallel", 4),
@@ -350,7 +360,8 @@ class QuestionLoopExperiment {
                     Integer.getInteger("pm.experiment.r4.large-runs", 3),
                     Path.of(System.getProperty("pm.experiment.workspace",
                             Path.of(System.getProperty("java.io.tmpdir"), "pm-qlv-" + stamp).toString())),
-                    Path.of("target", "question-loop").toAbsolutePath(), QuestionDriver.resolveExec(),
+                    QuestionEvidence.workRoot(results).resolve("pm-qlv-" + stamp), results,
+                    QuestionDriver.resolveExec(),
                     Duration.parse(System.getProperty("pm.experiment.run-timeout", "PT20M")),
                     Warmth.of(System.getProperty(Warmth.PROPERTY)), dataHome);
         }
@@ -433,17 +444,25 @@ class QuestionLoopExperiment {
         var plans = plans(item, config);
         assertFalse(plans.isEmpty(), "no run planned for " + item);
 
+        var target = QuestionResults.ResultTarget.fromProperties();
         var invocation = invocation(item, config, plans);
+        var id = invocation.path(QuestionResults.INVOCATION).asText();
+        QuestionResults.UnusedScenarios unused = () -> QuestionFixtures.unusedScenarios(telemetry(config)).size();
         QuestionResults.recordInvocation(config.results(), invocation);
         var stops = new SetupStops();
-        execute(plans, config, invocation.path(QuestionResults.INVOCATION).asText(), stops);
-        if (stops.failures() > 0) {
-            QuestionResults.recordInvocation(config.results(), stops.applyTo(invocation));
+        try {
+            execute(plans, config, id, stops);
+            if (stops.failures() > 0) {
+                QuestionResults.recordInvocation(config.results(), stops.applyTo(invocation));
+            }
+        } finally {
+            if (QuestionEvidence.archiveEnabled()) {
+                QuestionEvidence.archive(config.results(), item, id, unused);
+            }
         }
-        var result = QuestionResults.result(item, QuestionResults.runs(config.results(), item),
-                QuestionResults.invocations(config.results(), item),
-                () -> QuestionFixtures.unusedScenarios(telemetry(config)).size());
-        var file = QuestionResults.write(item, result);
+        var result = QuestionResults.result(item, target.select(QuestionResults.runs(config.results(), item)),
+                target.select(QuestionResults.invocations(config.results(), item)), unused);
+        var file = QuestionResults.write(target, item, result);
 
         assertTrue(Files.isRegularFile(file), "no result written for " + item);
     }
@@ -984,7 +1003,7 @@ class QuestionLoopExperiment {
         var id = "%s-%s-%s-%s-%03d-%s".formatted(plan.item(), plan.host().executable(), plan.warm() ? "warm" : "fresh",
                 plan.fixture().id().replace('/', '_'), plan.index(), suffix);
         var base = config.workspace().resolve(id);
-        var stubDir = base.resolve("stub");
+        var stubDir = stubDirectory(config, id);
         var stubSettings = stubSettings(plan, stubDir, Path.of("/tmp", "pmq-" + suffix + ".sock"));
         var record = runRecord(plan, stubDir);
         record.put(QuestionResults.INVOCATION, invocation);
@@ -1005,6 +1024,17 @@ class QuestionLoopExperiment {
             record.put("error", String.valueOf(e.getMessage()));
         }
         QuestionResults.recordRun(config.results(), record);
+    }
+
+    /**
+     * @param config the configuration
+     * @param run    a run id
+     * @return the run's stub directory, {@code <run id>/stub} below the invocation's evidence root
+     *         ({@link Config#evidence()}), where a reboot does not remove it; the worker directories of the run stay
+     *         below {@link Config#workspace()}
+     */
+    static Path stubDirectory(Config config, String run) {
+        return config.evidence().resolve(run).resolve("stub");
     }
 
     /**
