@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -242,6 +243,13 @@ final class QuestionResults {
     /** The limit of R2 when its invocations did not run the age of 24 hours. */
     static final String R2_NO_DAY_AGE = "the age 24 hours was not run, operator decision; the criterion text is "
             + "unchanged";
+
+    /**
+     * The field of an R3 invocation record that names the faults its runs inject, in the order of {@link Fault}
+     * ({@link QuestionLoopExperiment#r3Faults(String)}); a record without it was written before the selection and
+     * measured every fault ({@link #limitOfR3FaultSelection}).
+     */
+    static final String R3_FAULTS = "r3_faults";
 
     private static final String LIMITS = "limits";
     private static final String NOT_RECORDED = "not recorded";
@@ -593,13 +601,60 @@ final class QuestionResults {
             case "Q6" -> limitOfQ6Votes(result, runs);
             case "Q7" -> limitOfQ7(result, runs);
             case "R2" -> limitOfR2Ages(result, runs, contributing.values());
-            case "R3" -> limitsOfR3(result, runs);
+            case "R3" -> {
+                limitsOfR3(result, runs);
+                limitOfR3FaultSelection(result, runs, contributing.values());
+            }
             default -> {
                 // no limit of its own
             }
         }
         scale(item, result, runs, invocations);
         return result;
+    }
+
+    /**
+     * Adds the limit of an R3 result whose invocations measured only some faults: each contributing invocation whose
+     * record names fewer faults than {@link Fault} has ({@value #R3_FAULTS}, set by
+     * {@code pm.experiment.r3.faults}) with the faults it measured. The groups of the faults it did not select do not
+     * appear from its records. The verdict logic is unchanged: the item verdict is computed from the groups present,
+     * a pass where none of them fails; where a fault has no group in the result at all, the limit says that the item
+     * verdict is a verdict over the faults measured, not a verdict of the whole item. An invocation without the field
+     * (recorded before the selection) measured every fault; with no selecting invocation nothing is added.
+     *
+     * @param result       the result of R3, its groups evaluated
+     * @param runs         its run records
+     * @param contributing the invocations that contributed run records
+     */
+    static void limitOfR3FaultSelection(ObjectNode result, List<JsonNode> runs, Collection<JsonNode> contributing) {
+        var selections = new ArrayList<String>();
+        for (var invocation : contributing) {
+            var faults = invocation.path(R3_FAULTS);
+            if (faults.isArray() && faults.size() < Fault.values().length) {
+                var names = new ArrayList<String>();
+                faults.forEach(fault -> names.add(fault.asText()));
+                selections.add("only the faults " + String.join(", ", names) + " were measured by invocation "
+                        + invocation.path(INVOCATION).asText());
+            }
+        }
+        if (selections.isEmpty()) {
+            return;
+        }
+        var measured = runs.stream().map(run -> run.path("fault").asText()).collect(Collectors.toSet());
+        var absent = Arrays.stream(Fault.values()).map(Fault::name).filter(name -> !measured.contains(name)).toList();
+        var present = Arrays.stream(Fault.values()).map(Fault::name).filter(measured::contains).toList();
+        var text = new StringBuilder("The faults of an R3 invocation are selected by pm.experiment.r3.faults: ")
+                .append(String.join("; ", selections)).append(". The groups of the faults an invocation did not "
+                        + "select do not appear from its records. The verdict logic is unchanged: the item verdict is "
+                        + "computed from the groups present, a pass where none of them fails");
+        if (absent.isEmpty()) {
+            text.append(", and every fault has a group from the aggregated invocations.");
+        } else {
+            text.append("; no group of ").append(String.join(", ", absent)).append(" is in this result, so the item "
+                    + "verdict is a verdict over the faults ").append(String.join(", ", present))
+                    .append(" only, not a verdict of the whole item.");
+        }
+        limit(result, text.toString());
     }
 
     /**

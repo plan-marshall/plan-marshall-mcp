@@ -34,6 +34,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -6038,6 +6039,229 @@ class QuestionStubTest {
                 });
             }
             return answers;
+        }
+    }
+
+    @Nested
+    @DisplayName("R3 fault selection: pm.experiment.r3.faults")
+    class R3FaultSelection {
+
+        private static final String SUBSET = "R3-subset";
+        private static final String FULL = "R3-full";
+
+        @Test
+        @DisplayName("selects every fault in the order of Fault without the property")
+        void shouldSelectEveryFaultByDefault() {
+            assertEquals(List.of(Fault.values()), QuestionLoopExperiment.r3Faults(null));
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @CsvSource(delimiter = '|', value = {
+            "STOP_BEFORE_ANSWER,MODEL_HANG",
+            "stop_before_answer,model_hang",
+            "' Model_Hang , STOP_BEFORE_ANSWER '",
+            "MODEL_HANG,,stop_before_answer,MODEL_HANG"})
+        @DisplayName("parses a subset in any case, order and spacing into the order of Fault, each fault once")
+        void shouldParseSubset(String value) {
+            assertEquals(List.of(Fault.STOP_BEFORE_ANSWER, Fault.MODEL_HANG), QuestionLoopExperiment.r3Faults(value));
+        }
+
+        @Test
+        @DisplayName("refuses an unknown name with the valid names")
+        void shouldRefuseUnknownName() {
+            var refusal = assertThrows(IllegalArgumentException.class,
+                    () -> QuestionLoopExperiment.r3Faults("STOP_BEFORE_ANSWER,HANG"));
+
+            assertAll("the refusal",
+                    () -> assertTrue(refusal.getMessage().contains("unknown fault 'HANG'"), refusal.getMessage()),
+                    () -> assertTrue(refusal.getMessage().contains(
+                            "STOP_BEFORE_ANSWER, CALL_CUT, MODEL_HANG, KILL, RESUMED_EXIT"), refusal.getMessage()));
+        }
+
+        @Test
+        @DisplayName("refuses a value that names no fault")
+        void shouldRefuseEmptySelection() {
+            var refusal = assertThrows(IllegalArgumentException.class, () -> QuestionLoopExperiment.r3Faults(" , "));
+
+            assertTrue(refusal.getMessage().contains("names no fault"), refusal.getMessage());
+        }
+
+        @Test
+        @DisplayName("plans with every fault exactly the runs, in the order, R3 planned before the selection")
+        void shouldPlanDefaultAsBefore() {
+            var config = config();
+            var fixtures = List.of(QuestionFixtures.probe());
+
+            var plans = QuestionLoopExperiment.r3(config, fixtures, QuestionLoopExperiment.r3Faults(null));
+
+            assertEquals(legacyPlans(config, fixtures), plans);
+        }
+
+        @Test
+        @DisplayName("plans a subset as the default plan without the runs of the other faults, order kept")
+        void shouldPlanSubsetOnly() {
+            var config = config();
+            var fixtures = List.of(QuestionFixtures.probe());
+            var subset = QuestionLoopExperiment.r3Faults("model_hang,stop_before_answer");
+
+            var plans = QuestionLoopExperiment.r3(config, fixtures, subset);
+
+            var expected = legacyPlans(config, fixtures).stream().filter(plan -> subset.contains(plan.fault()))
+                    .toList();
+            assertAll("the plan",
+                    () -> assertEquals(expected, plans),
+                    () -> assertEquals(2 * 2 * 2 * 2, plans.size()),
+                    () -> assertEquals(Fault.STOP_BEFORE_ANSWER, plans.get(0).fault()),
+                    () -> assertEquals(Fault.MODEL_HANG, plans.get(1).fault()));
+        }
+
+        @Test
+        @DisplayName("names the planned faults in the invocation record of R3, and in no other item's")
+        void shouldNameFaultsInInvocation() {
+            var config = config();
+            var fixtures = List.of(QuestionFixtures.probe());
+
+            var subset = QuestionLoopExperiment.invocation("R3", config, QuestionLoopExperiment.r3(config, fixtures,
+                    QuestionLoopExperiment.r3Faults("MODEL_HANG,STOP_BEFORE_ANSWER")));
+            var all = QuestionLoopExperiment.invocation("R3", config, QuestionLoopExperiment.r3(config, fixtures,
+                    QuestionLoopExperiment.r3Faults(null)));
+            var other = QuestionLoopExperiment.invocation("R4", config, QuestionLoopExperiment.r3(config, fixtures,
+                    QuestionLoopExperiment.r3Faults(null)));
+
+            assertAll("the invocation records",
+                    () -> assertEquals("[\"STOP_BEFORE_ANSWER\",\"MODEL_HANG\"]",
+                            subset.path(QuestionResults.R3_FAULTS).toString()),
+                    () -> assertEquals(16, subset.path("planned_runs").asInt()),
+                    () -> assertEquals("[\"STOP_BEFORE_ANSWER\",\"CALL_CUT\",\"MODEL_HANG\",\"KILL\",\"RESUMED_EXIT\"]",
+                            all.path(QuestionResults.R3_FAULTS).toString()),
+                    () -> assertFalse(other.has(QuestionResults.R3_FAULTS)));
+        }
+
+        @Test
+        @DisplayName("aggregates a subset invocation: only its faults' groups, a limit naming them, verdict logic kept")
+        void shouldAggregateSubsetInvocation() throws IOException {
+            var runs = List.of(r3Run("s1", SUBSET, Fault.STOP_BEFORE_ANSWER), r3Run("s2", SUBSET, Fault.MODEL_HANG));
+            var invocations = List.<JsonNode>of(r3Invocation(SUBSET, Fault.STOP_BEFORE_ANSWER, Fault.MODEL_HANG));
+
+            var result = QuestionResults.result("R3", runs, invocations, () -> 0);
+
+            var faults = new ArrayList<String>();
+            result.path("groups").forEach(group -> faults.add(group.path("fault").asText()));
+            var limits = result.path("limits").toString();
+            var unchanged = QuestionResults.evaluate("R3", runs);
+            assertAll("the result",
+                    () -> assertEquals(List.of("MODEL_HANG", "STOP_BEFORE_ANSWER"), faults),
+                    () -> assertTrue(limits.contains("only the faults STOP_BEFORE_ANSWER, MODEL_HANG were measured by "
+                            + "invocation " + SUBSET), limits),
+                    () -> assertTrue(limits.contains("no group of CALL_CUT, KILL, RESUMED_EXIT is in this result, so "
+                            + "the item verdict is a verdict over the faults STOP_BEFORE_ANSWER, MODEL_HANG only, not "
+                            + "a verdict of the whole item"), limits),
+                    () -> assertEquals(unchanged.path("verdict").asText(), result.path("verdict").asText()),
+                    () -> assertEquals(unchanged.path("groups").toString(), result.path("groups").toString()));
+        }
+
+        @Test
+        @DisplayName("adds no selection limit for an invocation of every fault or one recorded before the selection")
+        void shouldAddNoLimitWithoutSelection() throws IOException {
+            var runs = List.of(r3Run("f1", FULL, Fault.KILL), r3Run("o1", "R3-old", Fault.KILL));
+            var old = (ObjectNode) r3Invocation("R3-old");
+            old.remove(QuestionResults.R3_FAULTS);
+            var invocations = List.<JsonNode>of(r3Invocation(FULL, Fault.values()), old);
+
+            var result = QuestionResults.result("R3", runs, invocations, () -> 0);
+
+            var limits = result.path("limits").toString();
+            assertFalse(limits.contains("pm.experiment.r3.faults"), limits);
+        }
+
+        @Test
+        @DisplayName("selects the records of a subset invocation for a suffixed result")
+        void shouldSelectSubsetInvocationForSuffixedResult() throws IOException {
+            var runs = List.of(r3Run("s1", SUBSET, Fault.STOP_BEFORE_ANSWER), r3Run("f1", FULL, Fault.KILL));
+            var target = new QuestionResults.ResultTarget(directory.resolve("results"), "opencode-rerun",
+                    Set.of(SUBSET), false);
+
+            var selected = target.select(runs);
+            var invocations = target.select(List.of(r3Invocation(SUBSET, Fault.STOP_BEFORE_ANSWER),
+                    r3Invocation(FULL, Fault.values())));
+            var file = QuestionResults.write(target, "R3", QuestionResults.result("R3", selected, invocations,
+                    () -> 0));
+
+            assertAll("the suffixed result",
+                    () -> assertEquals(1, selected.size()),
+                    () -> assertEquals(1, invocations.size()),
+                    () -> assertEquals("R3-opencode-rerun.json", file.getFileName().toString()),
+                    () -> assertTrue(Files.readString(file).contains("only the faults STOP_BEFORE_ANSWER were "
+                            + "measured by invocation " + SUBSET)));
+        }
+
+        /** The R3 plan as the experiment made it before the selection, verbatim: the reference of byte-identity. */
+        private List<QuestionLoopExperiment.RunPlan> legacyPlans(QuestionLoopExperiment.Config config,
+                List<QuestionFixtures.Fixture> fixtures) {
+            var plans = new ArrayList<QuestionLoopExperiment.RunPlan>();
+            for (var host : config.hosts()) {
+                for (var warm : config.warmth().planned()) {
+                    for (var fixture : fixtures) {
+                        for (var index = 0; index < config.runs(); index++) {
+                            for (var fault : Fault.values()) {
+                                var form = fault == Fault.RESUMED_EXIT ? Form.RESUME : Form.HOLD;
+                                plans.add(QuestionLoopExperiment.RunPlan.of("R3", index, host, config.model(host),
+                                        warm, form, fixture, "entity").holding(QuestionLoopExperiment.r3Hold(host,
+                                        fault)).faulting(fault));
+                            }
+                        }
+                    }
+                }
+            }
+            return plans;
+        }
+
+        private QuestionLoopExperiment.Config config() {
+            var models = new EnumMap<Host, String>(Host.class);
+            models.put(Host.CLAUDE, QuestionLoopExperiment.CLAUDE_MODEL);
+            models.put(Host.OPENCODE, QuestionLoopExperiment.OPENCODE_GLOBAL_MODEL);
+            return new QuestionLoopExperiment.Config(List.of(Host.CLAUDE, Host.OPENCODE), models, 2, Integer.MAX_VALUE,
+                    4, directory.resolve("cache"), directory.resolve("telemetry"), "ref", directory.resolve("clones"),
+                    3, directory.resolve("workspace"), directory.resolve("evidence"), directory.resolve("results"),
+                    List.of("pm-exec"), Duration.ofMinutes(20), QuestionLoopExperiment.Warmth.BOTH,
+                    OpenCodeDataHome.GLOBAL);
+        }
+
+        /** A run record of R3 on OpenCode whose stub directory holds an empty event log. */
+        private JsonNode r3Run(String id, String invocation, Fault fault) throws IOException {
+            var stubDir = Files.createDirectories(directory.resolve(id).resolve("stub"));
+            Files.writeString(stubDir.resolve("events.jsonl"), "");
+            var run = QuestionStub.JSON.createObjectNode();
+            run.put("item", "R3");
+            run.put(QuestionResults.INVOCATION, invocation);
+            run.put("run", 0);
+            run.put("host", "opencode");
+            run.put("model", QuestionLoopExperiment.OPENCODE_GLOBAL_MODEL);
+            run.put("form", "fresh");
+            run.put("continuation", fault == Fault.RESUMED_EXIT ? "resume" : "hold");
+            run.put("fixture", "question/apply-answer/he-0");
+            run.put("kind", "entity");
+            run.put("fault", fault.name());
+            run.put("stub_dir", stubDir.toString());
+            run.putArray("workers");
+            return run;
+        }
+
+        private static JsonNode r3Invocation(String id, Fault... faults) {
+            var invocation = QuestionStub.JSON.createObjectNode();
+            invocation.put(QuestionResults.INVOCATION, id);
+            invocation.put("item", "R3");
+            invocation.put("runs", 20);
+            invocation.putNull("fixtures_limit");
+            invocation.put("opencode_data_home", "global");
+            invocation.putArray("opencode_models").add(QuestionLoopExperiment.OPENCODE_GLOBAL_MODEL);
+            invocation.put(QuestionResults.RUN_TIMEOUT, "PT20M");
+            invocation.put("planned_runs", faults.length);
+            var array = invocation.putArray(QuestionResults.R3_FAULTS);
+            for (var fault : faults) {
+                array.add(fault.name());
+            }
+            return invocation;
         }
     }
 

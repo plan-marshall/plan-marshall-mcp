@@ -46,7 +46,11 @@
  * {@code target/question-loop/work}, the archive every invocation writes at its end, and the relocation of stub logs
  * recorded under the OS temp directory.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionLoopExperiment}: the entry that runs one item, disabled
- * unless {@code -Dpm.experiment.question=<item>} is set.</li>
+ * unless {@code -Dpm.experiment.question=<item>} is set; its class documentation lists the run properties, among them
+ * {@code -Dpm.experiment.r3.faults=<fault>,<fault>} (case-insensitive names of {@code QuestionDriver.Fault}, all by
+ * default), which lets an R3 invocation measure only the named faults, for example a re-run of the faults whose
+ * injection was defective; its invocation record names them ({@code r3_faults}), and a limit of the result says that
+ * the item verdict then reads the groups of the measured faults only.</li>
  * <li>{@link de.planmarshall.e2e.experiment.question.QuestionReaggregation}: writes one item's result again from its
  * existing records without a run, disabled unless {@code -Dpm.experiment.reaggregate=<item>} is set.</li>
  * </ul>

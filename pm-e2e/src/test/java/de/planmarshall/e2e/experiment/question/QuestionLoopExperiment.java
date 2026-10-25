@@ -19,13 +19,16 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -92,6 +95,9 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * (a result file {@code <item>-<suffix>.json} from the records of the named invocations only), and
  * {@code pm.experiment.result.allow-missing-evidence} (a result with runs whose stub log is missing may replace an
  * existing result file: {@link QuestionResults.ResultTarget}),
+ * {@code pm.experiment.r3.faults} (a comma-separated list of {@link Fault} names, in any case, all faults by default:
+ * the faults an R3 invocation measures, an unknown name fails the run with the valid names; the invocation record
+ * names them and the result says which faults were measured, {@link #r3Faults(String)}),
  * {@code pm.experiment.run-timeout} ({@code PT20M}), {@code pm.experiment.q4.other-host},
  * {@code pm.experiment.q6.quorum-a} and {@code pm.experiment.q6.quorum-b} ({@code <host>:<model>}),
  * {@code pm.experiment.q7.open} ({@code PT1H}), {@code pm.experiment.r1.durations},
@@ -152,7 +158,8 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * the launch of the continuation. A model that does not end its turn after the ask is a finding of the run, not of
  * the server ({@link QuestionResults#limitOfQ7}).
  * <p>
- * R3 injects each fault where the criterion places it ({@link Fault}), on a stub that does not lose a worker at its
+ * R3 injects each fault, or each one {@code pm.experiment.r3.faults} selects ({@link #r3(Config, List, List)}), where
+ * the criterion places it ({@link Fault}), on a stub that does not lose a worker at its
  * process exit ({@link #stubSettings}): the exit is logged as an observation ({@value QuestionStub#EXIT_OBSERVED}) and
  * the task stays leased until the driver detects the missing acknowledgement, the only detection R3 measures; exit
  * detection itself was measured in Part A. The stop before the answer comes once the stub
@@ -479,7 +486,9 @@ class QuestionLoopExperiment {
      * with, so the result can say which invocations it aggregates and whether they ran at the specified scale: among
      * them the run limit ({@value QuestionResults#RUN_TIMEOUT}, {@code pm.experiment.run-timeout}) and the holds of its
      * runs ({@code holds_s}; a run waits up to the run limit plus four times its hold), and the OpenCode models its
-     * runs start ({@code opencode_models}, the harness default as {@code null}).
+     * runs start ({@code opencode_models}, the harness default as {@code null}); for R3 the faults its runs inject
+     * ({@value QuestionResults#R3_FAULTS}, in the order of {@link Fault}: every fault, or those {@value #R3_FAULTS}
+     * selected).
      *
      * @param item   the item
      * @param config the configuration
@@ -517,6 +526,11 @@ class QuestionLoopExperiment {
         var holds = record.putArray("holds_s");
         plans.stream().map(plan -> plan.hold().toSeconds()).distinct().sorted().forEach(holds::add);
         record.put("planned_runs", plans.size());
+        if ("R3".equals(item)) {
+            var faults = record.putArray(QuestionResults.R3_FAULTS);
+            plans.stream().map(RunPlan::fault).filter(Objects::nonNull).distinct().sorted()
+                    .forEach(fault -> faults.add(fault.name()));
+        }
         return record;
     }
 
@@ -701,14 +715,8 @@ class QuestionLoopExperiment {
                     plans.add(base.resumingSession(expired));
                 }
             });
-            case "R3" -> each(config, config.hosts(), limit(QuestionFixtures.applyAnswer(config.cache()), config),
-                    (host, warm, fixture, index) -> {
-                        for (var fault : Fault.values()) {
-                            var form = fault == Fault.RESUMED_EXIT ? Form.RESUME : Form.HOLD;
-                            plans.add(RunPlan.of(item, index, host, config.model(host), warm, form, fixture, "entity")
-                                    .holding(r3Hold(host, fault)).faulting(fault));
-                        }
-                    });
+            case "R3" -> plans.addAll(r3(config, limit(QuestionFixtures.applyAnswer(config.cache()), config),
+                    r3Faults(System.getProperty(R3_FAULTS))));
             case "R4" -> plans.addAll(r4(config,
                     () -> limit(QuestionFixtures.largeScenarios(telemetry(config), config.clones()), config)));
             default -> throw new IllegalArgumentException("unknown item " + item + ": Q1 to Q7, R1 to R4");
@@ -718,6 +726,69 @@ class QuestionLoopExperiment {
 
     /** The operator's hold of an R3 run, beside {@link Fault#CALL_CUT}. */
     static final Duration R3_HOLD = Duration.ofSeconds(30);
+
+    /**
+     * The test-only property that selects the faults an R3 invocation measures: a comma-separated list of
+     * {@link Fault} names, in any case, with white space around a name ignored; all faults without it
+     * ({@link #r3Faults(String)}).
+     */
+    static final String R3_FAULTS = "pm.experiment.r3.faults";
+
+    /**
+     * The faults an R3 invocation measures, from {@value #R3_FAULTS}: every fault, in the order of {@link Fault},
+     * without the property; else the named faults, in the same order whatever the order of the list, each once. A
+     * re-run of the faults whose injection was defective does not repeat the others.
+     *
+     * @param value the value of {@value #R3_FAULTS}, {@code null} when it is not set
+     * @return the selected faults, in the order of {@link Fault}
+     * @throws IllegalArgumentException for a name that is no fault, or a value that names none; the message lists the
+     *                                  valid names
+     */
+    static List<Fault> r3Faults(String value) {
+        if (value == null) {
+            return List.of(Fault.values());
+        }
+        var valid = String.join(", ", Arrays.stream(Fault.values()).map(Fault::name).toList());
+        var selected = EnumSet.noneOf(Fault.class);
+        for (var name : value.split(",")) {
+            if (name.isBlank()) {
+                continue;
+            }
+            var fault = Arrays.stream(Fault.values()).filter(candidate -> candidate.name().equalsIgnoreCase(
+                    name.strip())).findFirst().orElseThrow(() -> new IllegalArgumentException("unknown fault '"
+                            + name.strip() + "' in -D" + R3_FAULTS + "=" + value + "; valid: " + valid));
+            selected.add(fault);
+        }
+        if (selected.isEmpty()) {
+            throw new IllegalArgumentException("-D" + R3_FAULTS + "=" + value + " names no fault; valid: " + valid);
+        }
+        return List.copyOf(selected);
+    }
+
+    /**
+     * Plans R3: per host, warmth, fixture and run index each selected fault, in the order of {@link Fault}, in the
+     * continuation form resume for {@link Fault#RESUMED_EXIT} and hold for every other, with the hold of
+     * {@link #r3Hold(Host, Fault)}. With every fault selected the plan is the one R3 had before the selection.
+     *
+     * @param config   the configuration
+     * @param fixtures the fixtures, limited
+     * @param faults   the selected faults ({@link #r3Faults(String)})
+     * @return the planned runs
+     */
+    static List<RunPlan> r3(Config config, List<Fixture> fixtures, List<Fault> faults) {
+        var plans = new ArrayList<RunPlan>();
+        each(config, config.hosts(), fixtures, (host, warm, fixture, index) -> {
+            for (var fault : Fault.values()) {
+                if (!faults.contains(fault)) {
+                    continue;
+                }
+                var form = fault == Fault.RESUMED_EXIT ? Form.RESUME : Form.HOLD;
+                plans.add(RunPlan.of("R3", index, host, config.model(host), warm, form, fixture, "entity")
+                        .holding(r3Hold(host, fault)).faulting(fault));
+            }
+        });
+        return plans;
+    }
 
     /**
      * @param host  the host
