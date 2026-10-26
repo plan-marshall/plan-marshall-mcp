@@ -1,0 +1,145 @@
+= The question-loop verification at the specified scale
+:nofooter:
+
+link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-loop-follow-up`
+
+[horizontal]
+Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
+Where:: pm-e2e (the maintained measurement code, gated by properties), `pm-mcp-core` (the client profile values and the profile verification stage), `plan-marshall-documentation` (the results, the developer document, the specification values); experiment-only code stays on its branch
+Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+
+== What
+
+The leftovers of link:question-loop-verification.adoc[`question-loop-verification`]. That package measured every item Q1 to Q7 and R1 to R4 at smoke scale (3 runs, 2 fixtures), so every verdict reads _not at the specified scale_ (link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] and its limits). The mechanisms are described in link:../../../plan-marshall-documentation/doc/developer/question-loop-experiment.adoc[The Question-Loop Experiment]; the code is kept on the pushed branch `verification/question-loop-experiment` of this repository (`488ce47`). This package turns the durable parts of that code into maintained code, settles what the smoke run left open, and repeats the measurement at the specified scale of 20 runs per group, with the criteria of the original package unchanged. A criterion is changed only by the package owner and only with evidence; the tasks that would change one are decisions (task 2), not edits.
+
+The run costs differ by orders of magnitude and are planned with that in mind (task 6): OpenCode runs are cheap (60 runs of R3 cost 0.22 USD), Claude Code costs dollars per invocation of 24 runs (about 2.3 to 2.9 USD), Antigravity reports no figures; the wall time is the cost of R1 (6.6 h for 12 OpenCode runs) and R2 (9.3 h for 24 runs).
+
+== Tasks
+
+Ordered by dependency: the extraction first, then the decisions and the preparation of the hosts, then the measurements, then the values they settle.
+
+=== 1. Extract the durable experiment code into pm-e2e
+
+[horizontal]
+Deliverable:: The durable parts of the experiment as maintained code: the stub MCP server with leases, fencing and replay; the driver that launches the harnesses through `pm-exec`; the fixtures (corpus cache and probe); the result evaluation and aggregation, with the `evidence_missing` guard and the per-invocation archive; the per-host classification of early exits and quota. The developer document is updated to the extracted form.
+Lands:: pm-e2e, under the rules of this repository (Maven, JUnit 5, no Mockito, `package-info.java` per package). The measurement is gated by properties, so that no normal build calls a harness; what stays experiment-only stays gated or on the branch. The developer document in `plan-marshall-documentation`.
+Done when:: the extracted classes have their own tests at the coverage bar of the repository, `verify`, `verify -Ppre-commit`, `verify -Pcoverage` and `verify -Pintegration-tests` are green with the measurement gate off, a gated run reproduces one smoke group of the results, and the developer document describes only what is in the tree.
+
+=== 2. Decide what the package owner owns
+
+Each decision is recorded with its evidence in the Evaluation Reference or the owning specification before the runs that depend on it; none is settled by editing a criterion in passing.
+
+[horizontal]
+Deliverable:: A recorded decision for each of the following.
+* *R3 `CALL_CUT`.* A held call that the host cuts (Antigravity at 180 s) is carried on by the same worker. The measured finding fails on every host because the criterion counts the cut as undetected. Decide whether the criterion or the profile (the `cut` setting) changes.
+* *Q4 reference form.* One deepseek fresh/default run missed for a format-only reason: it submitted `f(7) == [...]` instead of the bare list, and `followsReference` compares exactly. Decide whether the reference form of the item accepts it.
+* *R2 at 24 hours.* Not run, by the operator's decision of 1 hour at most. It stays _not run_ unless the operator decides otherwise; record the decision either way.
+* *R4 scenario choice and forcing.* How the ask of the large-work scenarios is forced on a host that does not ask unless forced, whether large work has a fallback form, and which scenarios carry it (see task 10).
+* *Q7 host scope.* Q7 is hard-wired to Claude Code: make it host-generic, or record why it stays Claude Code only. Antigravity skipped Q7.
+Lands:: link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#limits[Evaluation Reference, Limits] and, where a value follows, its owning specification.
+Done when:: every decision is recorded with its reason, and the tasks below name the decided form.
+
+=== 3. OpenCode: profile, version and measurement setup
+
+[horizontal]
+Deliverable::
+* Re-verify OpenCode 2.x (2.1.2 to 2.1.4 measured) against the shipped client profile: `supported_versions` is `>=1.0.0 <2.0.0`, `headless.argv` is `run --standalone` without `--dir` (the project comes from `PWD`), the tool naming `plan-marshall_<tool>` is verified only on 1.18, and the anchored version pattern `^(\d+\.\d+\.\d+)\s*$` does not match `opencode v2.1.4`. Decide per finding whether the profile or the pattern changes.
+* Define the session id pointer for the `sessionID` field of OpenCode's output lines (the schema's `session_id` expects a JSON Pointer); the operator accepted the proposal.
+* Investigate the refusal in R2 warm/300 after a stub restart: generations 2 and 3 of run `R2-opencode-warm-probe-resumability-001-9356d016` refused to call the tools, saying they were removed from the tool catalog although the stub offered them (OpenCode session `ses_e87037d5dffejxVc1hFQphFa3p` in `opencode.db`). Name the cause, or record it as a finding of the host.
+* Re-measure with a data home per worker: the measurements ran on the global OpenCode data home, serially, which departs from the specified per-worker data home.
+* Record the model choice per role in the profile verification: `gpt-5.4-nano` reached the tools in only 44 of 108 runs, `deepseek-v4.1-flash` is the model the measurement used.
+Lands:: the OpenCode profile and the profile verification in `pm-mcp-core` (link:../../../pm-mcp-core/doc/specification/client-profiles/01-profile-schema.adoc#profile-verification[Client Profiles § Profile Verification]), the per-worker data home in the driver of task 1.
+Done when:: the shipped profile and the version pattern match the versions the package measures, the session id pointer is in the profile and validated, the refusal is explained, and a run with a per-worker data home reproduces the figures of the serial run or states the difference.
+
+=== 4. Antigravity: what is observable, and its configuration path
+
+[horizontal]
+Deliverable::
+* Record what Antigravity cannot show: the expired-session case is not measurable, the canary re-read is not observable in its output, and its output reports no cost or tokens. State per item whether it is measured another way or stays _not measurable_.
+* The cut call: the host cuts a held call at 180 s and the same worker carries on; the outcome follows the decision of task 2 (criterion or `cut` setting).
+* Q6: all 3 invalid votes of the Antigravity groups came from the Claude voter closing its vote task as infeasible; decide whether the voter or the protocol is at fault and repeat the groups.
+* The MCP configuration path: the specification said `.agents/mcp_config.json`, the experiment used a workspace plugin `.agents/plugins/<name>/mcp_config.json`, and a probe re-run settled the question in the pull request of `pm-mcp-core`; take the final text of that change and make the driver and the profile agree with it.
+* Q2: Antigravity cannot withhold its own question tool; the measurement of what that tool does is task 9.
+Lands:: the Antigravity profile and its verification in `pm-mcp-core`, the driver of task 1, the limits of the Evaluation Reference.
+Done when:: each Antigravity item is either measured at its scale or carries a recorded reason it cannot be, and the configuration path is one in the driver, the profile and the specification.
+
+=== 5. Codex
+
+[horizontal]
+Deliverable:: Codex measured for every item that applies to a worker host (Q1 to Q7, R1 to R4), or a recorded reason per item. Codex was not measured at all.
+Lands:: the driver of task 1 (a host adapter), a Codex profile where the shipped set has none, the Evaluation Reference.
+Done when:: every item has a Codex row or a recorded reason, at the scale of task 7.
+
+=== 6. Plan the runs
+
+[horizontal]
+Deliverable:: A run plan for tasks 7 to 11: the groups (item, host, model, warm or fresh), the number of invocations, the expected wall time and the expected cost per host, the order that puts the cheap hosts first, and the budget the operator accepts. The wall times are serial where a host needs it (OpenCode's data home, task 3) and parallel where it does not.
+Lands:: the package's records in `plan-marshall-documentation` (the developer document), not in code.
+Done when:: the operator has accepted the plan, and each later task's runs fit it.
+
+=== 7. Re-measure the Claude Code groups of before the reboot of 2026-10-24
+
+[horizontal]
+Deliverable:: Q1, Q2, Q7, R1, R2, R3 and R4 on Claude Code come from before the reboot; their stub logs are lost, only the run records and the worker outputs survive. Re-measure these groups under the fixed driver, so that every figure comes from a stub log again. The groups carry two known defects, to be absent in the new runs: 128 runs had an operator answer that contradicted its reply (Q1 20, Q2 25, Q7 1, R3 Claude 23; the per-run list is the file `answer-audit.json` of the measurement), and two Q1 runs and one Q3 run show the warm-asker-exit signature.
+Lands:: the Evaluation Reference rows of those items; the replaced rows say that the old figures are superseded.
+Done when:: no row of the Evaluation Reference rests on a lost stub log or on a run whose operator answer contradicts its reply, and the audit of the answers is clean for the new runs.
+
+=== 8. Run Q1 to Q7 and R1 to R4 at the specified scale
+
+[horizontal]
+Deliverable:: Every item run at 20 runs per group, with the criteria unchanged, on every host where the item applies (Claude Code with `claude-haiku-4-5`, OpenCode with its per-worker data home, Antigravity as far as task 4 allows, Codex per task 5), warm and fresh. Each verdict is then _passed_ or _failed_ at the specified scale, no longer _not at the specified scale_.
+Lands:: the Evaluation Reference rows Q1 to Q7 and R1 to R4, with the limits that remain.
+Done when:: every row names its verdict at 20 runs per group, or the group that was not run with its reason (task 2 for R2 at 24 hours).
+
+=== 9. Settle Q2 and the question bound of Q5
+
+[horizontal]
+Deliverable::
+* Q2: no host question tool was called in any run, so what such a tool does in a headless worker is unobserved. Where a host cannot withhold it (Antigravity), force a call and record whether it hangs, fails or answers itself.
+* Q5: only the bound value 3 was tried; fresh Claude Code with the bound failed (1 timeout) and the fresh OpenCode groups failed (2 timeouts each); the same question was asked again where the replies only restated the options. Whether a run reached the bound was not read from the event log. Run variants of the bound with the event-log evidence of whether the bound was reached, and settle the value.
+Lands:: the Evaluation Reference, the question bound in link:../../../pm-mcp-core/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#question-bound[Model Work § Question Bound], the host that cannot withhold its question tool in the owning specification.
+Done when:: the Q2 behaviour of each host is observed or recorded as not observable, and the bound is a value with event-log evidence per variant.
+
+=== 10. Measure the cost of large work (R4)
+
+[horizontal]
+Deliverable:: R4 was run minimally: two scenarios (`q-api-vacuity-read-exceeds-dispatch` and `q-pm-detector-residue-caller-root`), fresh only, one run each in hold and in resume; on OpenCode there was no ask in 4 of 4 runs because the asking is not forced, and large work has no fallback form. The hold and resume cost of large work is not measured, both corpus items are drafts, and 16 other scenarios stay unused (they need tasks replayed from records whose commits are gone, or outside state that changed). With the decision of task 2 on the forcing and the scenario choice, measure the tokens and time of hold, resume and the fallback with small and large work before the ask, per harness and model.
+Lands:: the Evaluation Reference row R4; the figures set the `questions` values of the shipped roles in link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc#roles[Model Work § Roles as Configuration Artifacts], which stay open until this task is done.
+Done when:: hold, resume and fallback figures for small and large work exist per measured harness and model, and the `questions` values of the shipped roles are set from them or recorded as deliberately open.
+
+=== 11. Repeat the groups that claude-haiku-4-5 fails with claude-sonnet-5-5
+
+[horizontal]
+Deliverable:: The original package said an item that `claude-haiku-4-5` fails is repeated with `claude-sonnet-5-5`; nothing was repeated. Decide per failing group of tasks 7 to 10 whether a repeat is meaningful, and repeat those groups at 20 runs.
+Lands:: the Evaluation Reference, per group with its model.
+Done when:: every failing Claude Code group has a Sonnet row or a recorded reason for none.
+
+=== 12. Settle the resumability values and the profile schema
+
+[horizontal]
+Deliverable::
+* The measured candidates (hold and resume up to 3,600 s on Claude Code, OpenCode 2.x and Antigravity) sit beside the unchanged shipped values (`false` and `null`) in link:../../../pm-mcp-core/doc/specification/client-profiles/01-profile-schema.adoc#headless-resumability[Client Profiles § Resumability]. Run the stage `resumability` of `pm-operator profile verify` and settle the shipped values from it.
+* The stage expects a resume of a missing session to fail at once, but OpenCode and Antigravity start a new session instead: decide whether the stage or the expectation changes.
+* The profile schema has no place for four findings: whether a model reaches the tools, a missing session that starts a new one, a cut call the worker survives, and the OpenCode tool-catalog refusal of task 3. Decide the schema additions.
+Lands:: `pm-mcp-core` (the client profile schema, the shipped profiles, the profile verification stage), with its documentation in `plan-marshall-documentation`.
+Done when:: the shipped `headless.resumability` values per profile are the measured ones, the stage and its expectation agree with the measured hosts, and each finding has a place in the schema or a recorded reason for none.
+
+=== 13. Record the results and close
+
+[horizontal]
+Deliverable:: The rows of the Evaluation Reference at the specified scale, their limits, the developer document, and the values of tasks 9, 10 and 12 written into their owning specifications; a specification the results prove wrong is corrected in the same change.
+Lands:: `plan-marshall-documentation` (pull request beside the code pull request, per the way of a change in link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc[Project Setup]).
+Done when:: no limit of the Evaluation Reference says _not at the specified scale_ for a question-loop item without its reason, and the documents hold no statement that the results of this package contradict.
+
+== Trace
+
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+
+* Requirements: link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-12[PM-WF-12], link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-18[PM-WF-18], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-2[PM-WORK-2], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-4[PM-WORK-4]
+* Specification: link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] (rows Q1 to Q7 and R1 to R4), link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#limits[Limits]; link:../../../pm-mcp-core/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#continuation[Model Work § Continuing after a Question]; link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc#roles[Model Work § Roles as Configuration Artifacts]; link:../../../pm-mcp-core/doc/specification/client-profiles/01-profile-schema.adoc#headless-resumability[Client Profiles § Resumability]; link:../../../pm-mcp-core/doc/specification/client-profiles/01-profile-schema.adoc#profile-verification[Client Profiles § Profile Verification]
+* Developer documentation: link:../../../plan-marshall-documentation/doc/developer/question-loop-experiment.adoc[The Question-Loop Experiment]
+* Watch: link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]
+
+== Done When
+
+Tasks 1 to 13 are done: the maintained measurement code is in pm-e2e behind its gate, every item Q1 to Q7 and R1 to R4 has its result at the specified scale or a recorded reason on every host that applies, the decisions of task 2 are recorded, the shipped `headless.resumability` values, the `questions` values of the shipped roles and the question bound are settled in their owning specifications.
