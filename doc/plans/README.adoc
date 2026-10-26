@@ -105,6 +105,12 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |nothing
 |Milestone 4
 
+|link:question-loop-follow-up.adoc[`question-loop-follow-up`]
+|The question-loop verification at the specified scale, and its open decisions
+|`open`
+|link:question-loop-verification.adoc[`question-loop-verification`]
+|Milestone 4
+
 |link:idle-memory-bound.adoc[`idle-memory-bound`]
 |Idle memory bound of a runtime that has worked
 |`open`
