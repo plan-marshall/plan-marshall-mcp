@@ -101,7 +101,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 
 |link:question-loop-verification.adoc[`question-loop-verification`]
 |A worker's question and its continuation verified with real harnesses
-|`open`
+|`done`
 |nothing
 |Milestone 4
 
