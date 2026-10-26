@@ -58,10 +58,10 @@ Deliverable::
 * Record what Antigravity cannot show: the expired-session case is not measurable, the canary re-read is not observable in its output, and its output reports no cost or tokens. State per item whether it is measured another way or stays _not measurable_.
 * The cut call: the host cuts a held call at 180 s and the same worker carries on; the outcome follows the decision of task 2 (criterion or `cut` setting).
 * Q6: all 3 invalid votes of the Antigravity groups came from the Claude voter closing its vote task as infeasible; decide whether the voter or the protocol is at fault and repeat the groups.
-* The MCP configuration path: the specification said `.agents/mcp_config.json`, the experiment used a workspace plugin `.agents/plugins/<name>/mcp_config.json`, and a probe re-run settled the question in the pull request of `pm-mcp-core`; take the final text of that change and make the driver and the profile agree with it.
+* The MCP configuration path: settled on 2026-10-26 on agy 1.4.7 by one print run: both `.agents/mcp_config.json` in the worker directory (the specification's form) and the workspace plugin `.agents/plugins/<name>/mcp_config.json` (the experiment's form) are loaded, a `mcp_config.json` at the directory root is not; `agy mcp list` shows only the global file and is no evidence either way. Choose one form for the profile and the driver and say why (the plugin form needs a `plugin.json`, the specification's form does not).
 * Q2: Antigravity cannot withhold its own question tool; the measurement of what that tool does is task 9.
 Lands:: the Antigravity profile and its verification in `pm-mcp-core`, the driver of task 1, the limits of the Evaluation Reference.
-Done when:: each Antigravity item is either measured at its scale or carries a recorded reason it cannot be, and the configuration path is one in the driver, the profile and the specification.
+Done when:: each Antigravity item is either measured at its scale or carries a recorded reason it cannot be, and the configuration path is the same form in the driver, the profile and the specification.
 
 === 5. Codex
 
