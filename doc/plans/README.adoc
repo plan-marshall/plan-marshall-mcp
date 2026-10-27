@@ -18,7 +18,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:local-adapter-on-api-contract.adoc[`local-adapter-on-api-contract`]
 |Local adapter on the API contract
 |`open`
-|link:../../../pm-mcp-clients/doc/plans/api-contract.adoc[`pm-mcp-clients` / `api-contract`]
+|nothing
 |Milestone 2
 
 |link:transport-library.adoc[`transport-library`]
@@ -42,25 +42,25 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:operator-channel-api.adoc[`operator-channel-api`]
 |Operator channel on the API
 |`open`
-|link:../../../pm-mcp-clients/doc/plans/api-contract.adoc[`pm-mcp-clients` / `api-contract`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/audit-trail.adoc[`pm-mcp-core` / `audit-trail`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workspace-confinement.adoc[`pm-mcp-core` / `workspace-confinement`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/service-unit.adoc[`pm-mcp-core` / `service-unit`]; link:../../../pm-mcp-core/doc/plans/stalled-scope-detection.adoc[`pm-mcp-core` / `stalled-scope-detection`]
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/audit-trail.adoc[`pm-mcp-core` / `audit-trail`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workspace-confinement.adoc[`pm-mcp-core` / `workspace-confinement`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/service-unit.adoc[`pm-mcp-core` / `service-unit`]
 |Milestone 2
 
 |link:integration-layers.adoc[`integration-layers`]
 |Exit: daemon and release-shape layers
 |`open`
-|link:local-adapter-on-api-contract.adoc[`local-adapter-on-api-contract`]; link:transport-library.adoc[`transport-library`]; link:protocol-filter-and-sessionless-tests.adoc[`protocol-filter-and-sessionless-tests`]; link:lifecycle-wiring.adoc[`lifecycle-wiring`]; link:operator-channel-api.adoc[`operator-channel-api`]; link:../../../pm-mcp-clients/doc/plans/integration-layers.adoc[`pm-mcp-clients` / `integration-layers`]
+|link:local-adapter-on-api-contract.adoc[`local-adapter-on-api-contract`]; link:transport-library.adoc[`transport-library`]; link:protocol-filter-and-sessionless-tests.adoc[`protocol-filter-and-sessionless-tests`]; link:lifecycle-wiring.adoc[`lifecycle-wiring`]; link:operator-channel-api.adoc[`operator-channel-api`]
 |Milestone 2
 
 |link:engine-wiring.adoc[`engine-wiring`]
 |The engine served by the daemon
 |`open`
-|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workflow-engine.adoc[`pm-mcp-core` / `workflow-engine`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/plan-instance.adoc[`pm-mcp-core` / `plan-instance`]; link:../../../pm-mcp-core/doc/plans/operator-and-question-stores.adoc[`pm-mcp-core` / `operator-and-question-stores`]
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workflow-engine.adoc[`pm-mcp-core` / `workflow-engine`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/plan-instance.adoc[`pm-mcp-core` / `plan-instance`]
 |Milestone 3
 
 |link:enrolment-and-integrity-api.adoc[`enrolment-and-integrity-api`]
 |Enrolment and store integrity on the API
 |`open`
-|link:operator-channel-api.adoc[`operator-channel-api`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/enrolment-store.adoc[`pm-mcp-core` / `enrolment-store`]; link:../../../pm-mcp-core/doc/plans/project-machine-store.adoc[`pm-mcp-core` / `project-machine-store`]; link:../../../pm-mcp-clients/doc/plans/operator-enrolment-verbs.adoc[`pm-mcp-clients` / `operator-enrolment-verbs`]
+|link:operator-channel-api.adoc[`operator-channel-api`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/enrolment-store.adoc[`pm-mcp-core` / `enrolment-store`]
 |Milestone 3
 
 |link:default-units-and-drift-tests.adoc[`default-units-and-drift-tests`]
@@ -72,19 +72,19 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:job-runtime-wiring.adoc[`job-runtime-wiring`]
 |Job runtime and worker connections in the daemon
 |`open`
-|link:engine-wiring.adoc[`engine-wiring`]; link:../../../pm-mcp-core/doc/plans/job-runner.adoc[`pm-mcp-core` / `job-runner`]; link:../../../pm-mcp-core/doc/plans/worker-launch.adoc[`pm-mcp-core` / `worker-launch`]; link:../../../pm-mcp-core/doc/plans/supervisor.adoc[`pm-mcp-core` / `supervisor`]
+|link:engine-wiring.adoc[`engine-wiring`]
 |Milestone 4
 
 |link:worker-surface-tools.adoc[`worker-surface-tools`]
 |`pm_wait` and the worker surface of the skill tools
 |`open`
-|link:job-runtime-wiring.adoc[`job-runtime-wiring`]; link:../../../pm-mcp-core/doc/plans/waits.adoc[`pm-mcp-core` / `waits`]; link:../../../pm-mcp-core/doc/plans/task-queue-and-protocol.adoc[`pm-mcp-core` / `task-queue-and-protocol`]
+|link:job-runtime-wiring.adoc[`job-runtime-wiring`]
 |Milestone 4
 
 |link:harness-and-roles-api.adoc[`harness-and-roles-api`]
 |Harness enrolment and roles on the API
 |`open`
-|link:operator-channel-api.adoc[`operator-channel-api`]; link:../../../pm-mcp-core/doc/plans/worker-launch.adoc[`pm-mcp-core` / `worker-launch`]; link:../../../pm-mcp-core/doc/plans/role-sets-and-model-caller.adoc[`pm-mcp-core` / `role-sets-and-model-caller`]; link:../../../pm-mcp-core/doc/plans/role-qualification.adoc[`pm-mcp-core` / `role-qualification`]; link:../../../pm-mcp-clients/doc/plans/operator-harness-and-roles-verbs.adoc[`pm-mcp-clients` / `operator-harness-and-roles-verbs`]
+|link:operator-channel-api.adoc[`operator-channel-api`]
 |Milestone 4
 
 |link:worker-integration-tests.adoc[`worker-integration-tests`]
@@ -120,7 +120,13 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:qualification-corpus-in-the-build.adoc[`qualification-corpus-in-the-build`]
 |The qualification corpus shipped and validated
 |`open`
-|link:../../../pm-mcp-core/doc/plans/role-qualification.adoc[`pm-mcp-core` / `role-qualification`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
+|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
+|Milestone 4
+
+|link:native-build-verification.adoc[`native-build-verification`]
+|The native build of the daemon against the deployed engine: the metadata of the engine modules, the `kill` and `proc_pidpath` downcalls, the Keychain and Secret Service paths
+|`open`
+|nothing
 |Milestone 4
 
 |===
