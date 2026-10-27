@@ -1,0 +1,30 @@
+= The native build of the daemon against the deployed engine
+:nofooter:
+
+link:README.adoc[Work packages of `plan-marshall-mcp`] » `native-build-verification`
+
+[horizontal]
+Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4 (the job runtime and the credential stores of `pm-mcp-core` run in the daemon)
+Where:: pm-mcp-server (the native build of `pm-mcpd`), pm-e2e (the native layout)
+Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+
+== What
+
+* *Run it*: `verify -Pnative,integration-tests` with `GRAALVM_HOME` and `JAVA_HOME` on a GraalVM 25 installation, against the `SNAPSHOT` of `pm-mcp-core` that its merge deployed, and against the client binaries of `pm-mcp-clients` (the native layout of `pm-e2e` needs them, otherwise it is skipped and the build output says so).
+* *The native-image metadata of the engine*: `pm-mcp-core` modules carry their metadata (`META-INF/native-image/de.planmarshall/<name>/`) and name this build as its check; the build proves that it resolves every class of the modules the daemon uses.
+* *The `kill` downcall*: the native check of the descriptor with `options.captureCallState` that `pm-runtime` (`ProcessGroupSignals`, `KillBinding`) binds through the foreign function interface, by signalling a real process group in a native test; it is the only check of that descriptor.
+* *The process-path downcall*: the `libproc` `proc_pidpath` downcall (`jint, void*, jint -> jint`) that `pm-runtime` (`runtime.worker.SystemProcessExecutables`, added by #190) registers in `reachability-metadata.json` loads in the native binary on macOS; on Linux the same class reads `/proc/<pid>/exe` and the check is skipped with that reason.
+* *The credential paths*: the Keychain downcalls (macOS) and the Secret Service client (Linux) of `pm-runtime` load in the native binary and complete a round trip where the host allows it, and are skipped with their reason where it does not.
+* *The report*: each check is recorded `passed`, `failed`, or `skipped` with its reason, with the revision of the `SNAPSHOT` it ran against; a failure is a pull request in `pm-mcp-core`, not a workaround here.
+
+== Trace
+
+Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+
+* Requirements: link:../../../plan-marshall-documentation/doc/requirements/09-technology.adoc#PM-TECH-3[PM-TECH-3] (the native executable); link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-3[PM-ARCH-3]
+* Specification: link:../../../pm-mcp-core/doc/specification/job-runtime/01-pipeline-and-subprocesses.adoc[Job Runtime § Process Termination & Cancellation Protocol]; link:../../../pm-mcp-core/doc/specification/credentials-and-enrolment/01-provider-credentials.adoc[Credentials & Enrolment Specification]
+* Watch: link:../../../pm-mcp-core/doc/implementation-watch/job-runtime.adoc[Job Runtime]
+
+== Done When
+
+The native build of `pm-mcpd` ran against the named `SNAPSHOT` and its report lists the five checks above (the metadata, the `kill` downcall, the `proc_pidpath` downcall, the credential paths, the report); every `failed` check has a pull request in `pm-mcp-core`; the epic of `pm-mcp-core` has the report.
