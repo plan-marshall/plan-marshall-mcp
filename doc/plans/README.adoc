@@ -100,7 +100,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |Milestone 4
 
 |link:question-loop-verification.adoc[`question-loop-verification`]
-|A worker's question and its continuation verified with real harnesses — its Done When is met only in part: the results at the specified scale, the settled values and the deletion of the experiment code are carried by link:question-loop-follow-up.adoc[`question-loop-follow-up`]
+|A worker's question and its continuation verified with real harnesses — its Done When is met only in part: the results at the specified scale and the settled values are carried by link:question-loop-follow-up.adoc[`question-loop-follow-up`], and the experiment code it would have deleted stays on its branch, gated, by that package's decision
 |`done`
 |nothing
 |Milestone 4
