@@ -110,13 +110,13 @@ public final class QuestionDriver implements AutoCloseable {
     public static final String HARNESS_ERROR_OUTPUT = "harness_error_output";
 
     /** The event the stub logs when a generation's relay connects: the first event the generation causes itself. */
-    static final String CONNECTED = "connected";
+    public static final String CONNECTED = "connected";
     /** The event the stub logs for every tool call of a generation. */
-    static final String CALL = "call";
+    public static final String CALL = "call";
     /** The event the stub logs for every ask it records. */
-    static final String ASKED = "asked";
+    public static final String ASKED = "asked";
     /** The event the driver logs when it injects a fault into a generation. */
-    static final String FAULT_INJECTED = "fault_injected";
+    public static final String FAULT_INJECTED = "fault_injected";
 
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Duration TERMINATION_GRACE = Duration.ofSeconds(10);
@@ -539,7 +539,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param generation its generation
      * @return the file its {@code stderr} goes to
      */
-    static Path stderrFile(Path runDir, String worker, int generation) {
+    public static Path stderrFile(Path runDir, String worker, int generation) {
         return runDir.resolve("stderr-" + worker + "-g" + generation + ".log");
     }
 
@@ -562,13 +562,13 @@ public final class QuestionDriver implements AutoCloseable {
      * The event the driver logs, and the field of a Q7 run record, when it ends the fresh asker that still runs at
      * its silence limit after the ask ({@link #endAsker}): a harness action, the end of a turn the model did not end.
      */
-    static final String ASKER_ENDED_BY_DRIVER = "asker_ended_by_driver";
+    public static final String ASKER_ENDED_BY_DRIVER ="asker_ended_by_driver";
 
     /**
      * The event the driver logs when the open time of a Q7 run starts: the asking generation has stopped (it exited,
      * or the driver ended it), so the record is open with no worker of the task connected.
      */
-    static final String OPEN_TIME_STARTED = "open_time_started";
+    public static final String OPEN_TIME_STARTED ="open_time_started";
 
     /** How long {@link #endAsker} waits for the driver's own {@code worker_exited} of an ended asker. */
     private static final Duration EXIT_EVENT_WAIT = Duration.ofSeconds(30);
@@ -1422,7 +1422,7 @@ public final class QuestionDriver implements AutoCloseable {
      * taken and closed by the asking worker over its held {@code pm_wait} before the driver would start a generation
      * for it ({@link #continuedByHold(String)}): no new generation is started then.
      */
-    static final String CONTINUED_BY_HOLD = "continued_by_hold";
+    public static final String CONTINUED_BY_HOLD ="continued_by_hold";
 
     /**
      * A continuation made by hold within the decision: the stub continued the answered decision in a new task, offered
@@ -1522,7 +1522,7 @@ public final class QuestionDriver implements AutoCloseable {
      * {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04}: the asker ended its turn 4 s after the ask, and
      * the decision was seen 270 s after it, at Claude Code's silence limit of 240 s plus 30 s).
      */
-    static final String WARM_ASKER_EXITED = "warm_asker_exited";
+    public static final String WARM_ASKER_EXITED ="warm_asker_exited";
 
     /**
      * The event the driver logs, and the field of a run record, when the continuation of a warm asker's decision was not
@@ -1538,7 +1538,7 @@ public final class QuestionDriver implements AutoCloseable {
      * in a state no new generation can take over: {@link RecoveryStep#GAP}, which the driver also logs as an event of
      * this name). Without it, such a run waited out its run limit and was recorded as timed out only.
      */
-    static final String CONTINUATION_GAP = "continuation_gap";
+    public static final String CONTINUATION_GAP ="continuation_gap";
 
     /** How a warm asker stopped after its ask ({@link #awaitWarmStop}). */
     enum WarmStop {
@@ -1780,14 +1780,14 @@ public final class QuestionDriver implements AutoCloseable {
     }
 
     /** The event the driver logs when it detects a lost worker ({@link #superviseAnswer}). */
-    static final String LOST_DETECTED = "lost_detected";
+    public static final String LOST_DETECTED ="lost_detected";
 
     /**
      * The event the driver logs, on a stub that does not lose a worker at its exit, when the answer never reached a
      * generation whose process exited ({@link #superviseAnswer}); also the reason of the loss it then ends the
      * generation with. It is no detection.
      */
-    static final String ANSWER_UNDELIVERED = "answer_undelivered";
+    public static final String ANSWER_UNDELIVERED ="answer_undelivered";
 
     /**
      * @param events     the stub log
@@ -2042,7 +2042,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param worker a worker
      * @return whether it is a voter, the worker of a vote task ({@value QuestionStub#VOTE_PREFIX}...)
      */
-    static boolean voter(String worker) {
+    public static boolean voter(String worker) {
         return worker.startsWith(QuestionStub.VOTE_PREFIX);
     }
 
@@ -2253,13 +2253,13 @@ public final class QuestionDriver implements AutoCloseable {
      * An item of the envelope's evidence as the stub accepts it (the stub's envelope check: text that
      * starts with {@code pm://}, at most 512 characters): the URI of the task entity of the plan.
      */
-    static final String EVIDENCE_EXAMPLE = "pm://" + QuestionStub.PLAN_ID + "/T-1";
+    public static final String EVIDENCE_EXAMPLE ="pm://" + QuestionStub.PLAN_ID + "/T-1";
 
     /**
      * The evidence rule of the contract: the stub refuses an ask whose evidence holds anything but {@code pm://} URIs
      * with {@code invalid_link_args} ({@code every item must be a pm:// URI}).
      */
-    static final String EVIDENCE_RULE = "The envelope's evidence is a list of at most 20 pm:// URIs and nothing else "
+    public static final String EVIDENCE_RULE ="The envelope's evidence is a list of at most 20 pm:// URIs and nothing else "
             + "(it may be empty): name the entity you work on as pm://<plan_id>/<entity>; a file name, a quote or a "
             + "line of code is no evidence item and belongs into the description.";
 
