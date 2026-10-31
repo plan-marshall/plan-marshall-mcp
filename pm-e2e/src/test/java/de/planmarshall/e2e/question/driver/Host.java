@@ -20,6 +20,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import de.planmarshall.e2e.question.stub.QuestionStub;
@@ -36,8 +37,8 @@ public enum Host {
 
     /** Claude Code. */
     CLAUDE("claude", "AskUserQuestion", 15, false, 240, 30, "session_id",
-            List.of(".claude", ".claude.json", ".cache/claude", ".local/state/claude", ".local/share/claude",
-                    ".config/claude")),
+        List.of(".claude", ".claude.json", ".cache/claude", ".local/state/claude", ".local/share/claude",
+                ".config/claude")),
     /**
      * OpenCode 2.x, on the data home {@link QuestionDriver.OpenCodeDataHome} selects. A {@code pm_wait} held by the
      * stub for 150 s returned uncut, and one held for 330 s was still uncut after about 260 s, when the probe itself was

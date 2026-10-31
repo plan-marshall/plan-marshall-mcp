@@ -43,6 +43,7 @@ import java.util.TreeSet;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -1125,8 +1126,8 @@ public final class QuestionResults {
             var at = detection.get().path("at").asLong();
             var continuations = view.named(CONTINUED).stream().filter(event -> event.path("at").asLong() >= at).count()
                     + view.named(ANSWER_DELIVERED).stream()
-                            .filter(event -> event.path("at").asLong() >= at && event.path("resumed").asBoolean())
-                            .count();
+                    .filter(event -> event.path("at").asLong() >= at && event.path("resumed").asBoolean())
+                    .count();
             early += earlyHere ? 1 : 0;
             detected += withinHere ? 1 : 0;
             once += continuations == 1 ? 1 : 0;

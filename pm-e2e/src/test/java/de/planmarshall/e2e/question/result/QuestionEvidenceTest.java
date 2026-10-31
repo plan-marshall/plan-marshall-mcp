@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import de.planmarshall.e2e.question.fixture.QuestionFixtures;
@@ -87,7 +88,7 @@ class QuestionEvidenceTest {
 
         @Test
         @DisplayName("a run without its stub log counts as evidence_missing and does not overwrite a result file")
-        void refusesToReplace() throws IOException {
+        void refusesToReplace() throws Exception {
             var target = new ResultTarget(directory, null, Set.of(), false);
             Files.writeString(target.file("Q1"), "existing", StandardCharsets.UTF_8);
             var result = missingResult();
@@ -101,7 +102,7 @@ class QuestionEvidenceTest {
 
         @Test
         @DisplayName("allowed, or as a new file, the result is written with the runs counted apart")
-        void writesWhenAllowedOrNew() throws IOException {
+        void writesWhenAllowedOrNew() throws Exception {
             var allowed = new ResultTarget(directory, null, Set.of(), true);
             Files.writeString(allowed.file("Q1"), "existing", StandardCharsets.UTF_8);
             var fresh = new ResultTarget(directory, "new", Set.of(), false);
@@ -139,7 +140,7 @@ class QuestionEvidenceTest {
 
         @Test
         @DisplayName("holds the invocation's records, stub logs, archive and answer audit in the store's layout")
-        void layout() throws IOException {
+        void layout() throws Exception {
             var own = run("r-1", INVOCATION, true);
             var other = run("r-2", "inv-2", true);
             var results = results(own, other);
@@ -164,7 +165,7 @@ class QuestionEvidenceTest {
 
         @Test
         @DisplayName("a run without its stub log is stored without stub logs and counted missing")
-        void missingStubLog() throws IOException {
+        void missingStubLog() throws Exception {
             var results = results(run("r-1", INVOCATION, false));
 
             var store = QuestionEvidence.store(results, "Q1", INVOCATION, () -> 0);
@@ -204,7 +205,7 @@ class QuestionEvidenceTest {
 
         @Test
         @DisplayName("copies the stub logs into the work root and rewrites only stub_dir, once")
-        void relocates() throws IOException {
+        void relocates() throws Exception {
             var results = results(run("r-1", INVOCATION, true), run("r-2", "inv-2", true));
             var runsFile = results.resolve(QuestionEvidence.RUNS_FILE);
             var work = directory.resolve("work");
@@ -225,7 +226,7 @@ class QuestionEvidenceTest {
 
         @Test
         @DisplayName("a record without its stub logs anywhere is refused")
-        void noSource() throws IOException {
+        void noSource() throws Exception {
             var results = results(run("r-1", INVOCATION, false));
 
             assertThrows(IOException.class, () -> QuestionEvidence.relocate(results.resolve(
@@ -234,7 +235,7 @@ class QuestionEvidenceTest {
 
         @Test
         @DisplayName("a line that names its stub directory twice is refused")
-        void twice() throws IOException {
+        void twice() throws Exception {
             var record = run("r-1", INVOCATION, true);
             record.put("copy", record.path(RunView.STUB_DIR).asText());
             var line = QuestionStub.JSON.writeValueAsString(record).replace("\"copy\"", "\"" + RunView.STUB_DIR

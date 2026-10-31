@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import de.planmarshall.e2e.question.fixture.QuestionFixtures.Check;
@@ -245,7 +246,7 @@ class QuestionFixturesTest {
 
         @Test
         @DisplayName("every apply-answer task carries the forcing text, its facts no answered framing")
-        void applyAnswer() throws IOException {
+        void applyAnswer() throws Exception {
             var fixtures = QuestionFixtures.applyAnswer(cache());
 
             var fixture = fixtures.getFirst();
@@ -260,7 +261,7 @@ class QuestionFixturesTest {
 
         @Test
         @DisplayName("the controls of Q2 stay unforced, the two-flaw tasks of Q5 carry their own forcing text")
-        void controlsAndTwoFlaws() throws IOException {
+        void controlsAndTwoFlaws() throws Exception {
             var root = cache();
 
             var controls = QuestionFixtures.controls(root);
@@ -295,7 +296,7 @@ class QuestionFixturesTest {
 
         @Test
         @DisplayName("both large-work scenarios of R4 carry the forcing text exactly as the loop tasks do")
-        void largeScenariosForced() throws IOException {
+        void largeScenariosForced() throws Exception {
             var source = new MapSource(recipeFiles());
 
             var fixtures = QuestionFixtures.largeScenarios(source, directory.resolve("clones"));
@@ -313,7 +314,7 @@ class QuestionFixturesTest {
 
         @Test
         @DisplayName("the unused recipes are the ones besides the large scenarios")
-        void unusedScenarios() throws IOException {
+        void unusedScenarios() throws Exception {
             var files = new HashMap<>(recipeFiles());
             files.put(QuestionFixtures.SCENARIOS + "/q-other.json", "{}");
 
@@ -361,7 +362,7 @@ class QuestionFixturesTest {
 
     @Test
     @DisplayName("a prepared worker directory holds a fresh canary")
-    void prepare() throws IOException {
+    void prepare() throws Exception {
         var canary = QuestionFixtures.prepare(QuestionFixtures.probe(), directory.resolve("w"));
 
         assertAll(

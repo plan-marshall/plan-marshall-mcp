@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import de.planmarshall.e2e.question.driver.Fault;
@@ -125,7 +126,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("a group of 3 passing runs passes, stated with 3 runs and the client version")
-        void threePassing() throws IOException {
+        void threePassing() throws Exception {
             var records = List.<JsonNode>of(q4Run(REFERENCE), q4Run(REFERENCE), q4Run(REFERENCE));
 
             var result = QuestionResults.evaluate("Q4", records);
@@ -141,7 +142,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("a group of 2 passing runs and 1 failing run must be extended to 10")
-        void disagreeing() throws IOException {
+        void disagreeing() throws Exception {
             var records = List.<JsonNode>of(q4Run(REFERENCE), q4Run(REFERENCE), q4Run("[6, 2, 1]"));
 
             var result = QuestionResults.evaluate("Q4", records);
@@ -157,7 +158,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("a group of 3 failing runs fails")
-        void allFailing() throws IOException {
+        void allFailing() throws Exception {
             var records = List.<JsonNode>of(q4Run("x"), q4Run("y"), q4Run("z"));
 
             var result = QuestionResults.evaluate("Q4", records);
@@ -192,7 +193,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("groups are kept apart by fixture")
-        void groupedByFixture() throws IOException {
+        void groupedByFixture() throws Exception {
             var other = q4Run(REFERENCE);
             other.put("fixture", "f-2");
 
@@ -208,7 +209,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("Q1: a run passes when each ask is accepted first or after one refusal and none is lost")
-        void q1() throws IOException {
+        void q1() throws Exception {
             var accepted = run("Q1", Map.of(), List.of(event("ask_refused", WORKER, 1, 5),
                     event(RunReadings.ASKED, WORKER, 1, 10)));
             var refusedTwice = run("Q1", Map.of(), List.of(event("ask_refused", WORKER, 1, 5),
@@ -226,7 +227,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("Q4: an answer stated as f(x) == <reference> follows the reference")
-        void q4ReferenceForm() throws IOException {
+        void q4ReferenceForm() throws Exception {
             var records = List.<JsonNode>of(q4Run("f(7) == " + REFERENCE), q4Run(REFERENCE), q4Run(REFERENCE));
 
             var result = QuestionResults.evaluate("Q4", records);
@@ -253,7 +254,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("Q5: without a run that reached bound 3, bounds 4 and 5 are not scheduled")
-        void q5BoundNotReached() throws IOException {
+        void q5BoundNotReached() throws Exception {
             var records = List.<JsonNode>of(q5Run(2, 3), q5Run(2, 3), q5Run(2, 3));
 
             var result = QuestionResults.evaluate("Q5", records);
@@ -266,7 +267,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("Q5: a run that reached bound 3 schedules bound 4")
-        void q5BoundReached() throws IOException {
+        void q5BoundReached() throws Exception {
             var records = List.<JsonNode>of(q5Run(3, 3), q5Run(2, 3), q5Run(2, 3));
 
             var result = QuestionResults.evaluate("Q5", records);
@@ -296,7 +297,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("R1: durations run longest first and descend only on a failure")
-        void r1Descent() throws IOException {
+        void r1Descent() throws Exception {
             var failing = List.<JsonNode>of(r1Run(3600, false), r1Run(3600, false), r1Run(3600, false));
             var passing = List.<JsonNode>of(r1Run(3600, true), r1Run(3600, true), r1Run(3600, true));
 
@@ -318,7 +319,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("R3: a call cut the worker survives by waiting again is no lost continuation and passes")
-        void r3CutSurvived() throws IOException {
+        void r3CutSurvived() throws Exception {
             var cut = event(QuestionDriver.FAULT_INJECTED, WORKER, 1, 20);
             cut.put("fault", Fault.CALL_CUT.name());
             cut.put("cut_by", "host");
@@ -343,7 +344,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("R4 has no verdict but reports its figures")
-        void r4() throws IOException {
+        void r4() throws Exception {
             var record = run("R4", Map.of("size", "large", "reference", "cache"),
                     List.of(event(RunReadings.ASKED, WORKER, 1, 10), submitted("cache", 20)));
 
@@ -401,7 +402,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("a run without its stub log counts as evidence_missing, never as no_ask")
-        void evidenceMissing() throws IOException {
+        void evidenceMissing() throws Exception {
             var missing = q4Run(REFERENCE);
             missing.put(RunView.STUB_DIR, directory.resolve("gone").resolve("stub").toString());
 
@@ -417,7 +418,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("an invocation with fewer records than planned is flagged incomplete with a limit")
-        void incomplete() throws IOException {
+        void incomplete() throws Exception {
             var record = q4Run(REFERENCE);
             var invocation = QuestionStub.JSON.createObjectNode();
             invocation.put("invocation", "inv-1");
@@ -435,7 +436,7 @@ class QuestionResultsTest {
 
         @Test
         @DisplayName("run and invocation records are appended and read back per item")
-        void records() throws IOException {
+        void records() throws Exception {
             var record = q4Run(REFERENCE);
             var invocation = QuestionStub.JSON.createObjectNode();
             invocation.put("invocation", "inv-1");

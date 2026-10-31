@@ -29,6 +29,7 @@ import java.util.TreeSet;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -223,7 +224,7 @@ public final class ResultLimits {
                 entry.getValue())).toList();
         limit(result, values.size() < 2 ? "The run limit of the invocations is not recorded."
                 : "The invocations ran with different run limits (pm.experiment.run-timeout; a run waits that long "
-                        + "plus four times its hold): " + String.join(", ", named) + ".");
+                + "plus four times its hold): " + String.join(", ", named) + ".");
     }
 
     /**
@@ -257,10 +258,10 @@ public final class ResultLimits {
                 + "early_exit and not as timed_out; its run keeps its ask, counts in continued and not in submitted, "
                 + "and the driver ends the wait at once on such an exit: " + namedRuns(counted) + ". The verdict "
                 + "reads these runs as any other; " + (differing.isEmpty()
-                        ? "no group's verdict reads differently without them."
-                        : QuestionResults.VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT + " is the verdict without them, an "
-                                + "additional figure, where it reads differently: " + String.join("; ", differing)
-                                + "."));
+                ? "no group's verdict reads differently without them."
+                : QuestionResults.VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT + " is the verdict without them, an "
+                + "additional figure, where it reads differently: " + String.join("; ", differing)
+                + "."));
     }
 
     /**
@@ -383,7 +384,7 @@ public final class ResultLimits {
                 + "recommendation that does; where none does, the reply goes as the operator's own option ("
                 + AnswerAudit.ANSWER_FALLBACK_OWN + "). " + composed + " of " + runs.size() + " records carry "
                 + AnswerAudit.ANSWER_COMPOSITIONS + (fallbacks.isEmpty() ? "; no answer fell back."
-                        : "; fell back: " + namedRuns(fallbacks) + "."));
+                : "; fell back: " + namedRuns(fallbacks) + "."));
     }
 
     /**
@@ -582,7 +583,7 @@ public final class ResultLimits {
         limit(result, "The stop before the answer (STOP_BEFORE_ANSWER) is injected once the stub shows the asker "
                 + "holding pm_wait after its ask, before the answer is sent; an asker that never holds is not stopped "
                 + "(fault_not_injected). Stopped while holding: " + stops.stream()
-                        .filter(run -> run.path("fault_held").asBoolean()).count() + " of " + stops.size() + " runs.");
+                .filter(run -> run.path("fault_held").asBoolean()).count() + " of " + stops.size() + " runs.");
         var cuts = new TreeMap<String, long[]>();
         runs.stream().filter(run -> Fault.CALL_CUT.name().equals(run.path("fault").asText())).forEach(run -> {
             var counts = cuts.computeIfAbsent(run.path(HOST).asText(), _ -> new long[2]);
@@ -612,9 +613,9 @@ public final class ResultLimits {
                 + "deadline. Exit detection itself was measured in Part A. Where the answer never reached a generation "
                 + "whose process had exited, the driver ended it after its delivery wait ("
                 + QuestionDriver.ANSWER_UNDELIVERED + "), no detection. Runs with this stub: " + runs.stream()
-                        .filter(run -> run.has(QuestionResults.STUB_LOSE_ON_EXIT)
-                                && !run.path(QuestionResults.STUB_LOSE_ON_EXIT).asBoolean(true))
-                        .count() + " of " + runs.size() + ".");
+                .filter(run -> run.has(QuestionResults.STUB_LOSE_ON_EXIT)
+                        && !run.path(QuestionResults.STUB_LOSE_ON_EXIT).asBoolean(true))
+                .count() + " of " + runs.size() + ".");
     }
 
     /**
@@ -645,7 +646,7 @@ public final class ResultLimits {
         var present = Arrays.stream(Fault.values()).map(Fault::name).filter(measured::contains).toList();
         var text = new StringBuilder("The faults of an R3 invocation are selected by " + Fault.PROPERTY + ": ")
                 .append(String.join("; ", selections)).append(". The item verdict is computed from the groups "
-                        + "present");
+                + "present");
         if (absent.isEmpty()) {
             text.append(", and every fault has a group from the aggregated invocations.");
         } else {

@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 
+
 import de.planmarshall.e2e.question.stub.QuestionStub.Form;
 
 /**
@@ -108,7 +109,7 @@ public enum Fault {
             }
             var fault = Arrays.stream(values()).filter(candidate -> candidate.name().equalsIgnoreCase(name.strip()))
                     .findFirst().orElseThrow(() -> new IllegalArgumentException("unknown fault '" + name.strip()
-                            + "' in -D" + PROPERTY + "=" + value + "; valid: " + valid));
+                    + "' in -D" + PROPERTY + "=" + value + "; valid: " + valid));
             selected.add(fault);
         }
         if (selected.isEmpty()) {

@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 
+
 import com.fasterxml.jackson.databind.JsonNode;
 import de.planmarshall.e2e.question.driver.Host.Invocation;
 import de.planmarshall.e2e.question.stub.QuestionStub;
@@ -50,18 +51,18 @@ class HostTest {
 
         @Test
         @DisplayName("a fresh launch keeps no session, allows the stub's tools and disallows the question tool")
-        void fresh() throws IOException {
+        void fresh() throws Exception {
             var argv = Host.CLAUDE.argv(invocation("/bin/claude", null, null, false));
 
             assertEquals(List.of("/bin/claude", "-p", "do it", "--mcp-config", CONFIG.toString(),
-                    "--strict-mcp-config", "--allowedTools", "mcp__plan-marshall__pm_wait,Read", "--disallowedTools",
-                    "AskUserQuestion", "--output-format", "stream-json", "--verbose", "--no-session-persistence"),
+                            "--strict-mcp-config", "--allowedTools", "mcp__plan-marshall__pm_wait,Read", "--disallowedTools",
+                            "AskUserQuestion", "--output-format", "stream-json", "--verbose", "--no-session-persistence"),
                     argv);
         }
 
         @Test
         @DisplayName("a resumed launch keeps its session and resumes the given one")
-        void resumed() throws IOException {
+        void resumed() throws Exception {
             var argv = Host.CLAUDE.argv(invocation("/bin/claude", null, "s-1", true));
 
             assertAll(
@@ -71,7 +72,7 @@ class HostTest {
 
         @Test
         @DisplayName("a named model is passed with --model")
-        void model() throws IOException {
+        void model() throws Exception {
             var argv = Host.CLAUDE.argv(invocation("/bin/claude", "sonnet", null, true));
 
             assertEquals(List.of("--model", "sonnet"), argv.subList(argv.size() - 2, argv.size()));
@@ -84,7 +85,7 @@ class HostTest {
 
         @Test
         @DisplayName("a fresh launch on the default model drops --model and --session")
-        void fresh() throws IOException {
+        void fresh() throws Exception {
             var argv = Host.OPENCODE.argv(invocation("/opt/opencode", null, null, true), null);
 
             assertEquals(List.of("/opt/opencode", "run", "--standalone", "--format", "json", "--agent",
@@ -93,7 +94,7 @@ class HostTest {
 
         @Test
         @DisplayName("a resumed, model-bound launch names both")
-        void resumedWithModel() throws IOException {
+        void resumedWithModel() throws Exception {
             var argv = Host.OPENCODE.argv(invocation("/opt/opencode", "opencode/m", "ses_1", true), null);
 
             assertEquals(List.of("/opt/opencode", "run", "--standalone", "--format", "json", "--agent",
@@ -102,7 +103,7 @@ class HostTest {
 
         @Test
         @DisplayName("a template from the property replaces the default")
-        void template() throws IOException {
+        void template() throws Exception {
             var argv = Host.OPENCODE.argv(invocation("/opt/opencode", "m", null, true),
                     "[\"opencode\",\"run\",\"-m\",\"{model}\",\"{prompt}\"]");
 
@@ -116,7 +117,7 @@ class HostTest {
 
         @Test
         @DisplayName("a fresh launch on the default model drops --model and --conversation")
-        void fresh() throws IOException {
+        void fresh() throws Exception {
             var argv = Host.ANTIGRAVITY.argv(invocation("/home/u/.local/bin/agy", null, null, true), null);
 
             assertEquals(List.of("/home/u/.local/bin/agy", "--print", "do it", "--output-format", "json",
@@ -125,7 +126,7 @@ class HostTest {
 
         @Test
         @DisplayName("a resumed, model-bound launch names the model and the conversation")
-        void resumedWithModel() throws IOException {
+        void resumedWithModel() throws Exception {
             var argv = Host.ANTIGRAVITY.argv(invocation("/bin/agy", "gemini", "c-1", true), null);
 
             assertEquals(List.of("/bin/agy", "--print", "do it", "--output-format", "json",
@@ -134,7 +135,7 @@ class HostTest {
 
         @Test
         @DisplayName("a template may name the MCP configuration")
-        void templateWithConfig() throws IOException {
+        void templateWithConfig() throws Exception {
             var argv = Host.ANTIGRAVITY.argv(invocation("/bin/agy", null, null, true),
                     "[\"agy\",\"--mcp\",\"{mcp_config}\",\"{prompt}\"]");
 
@@ -165,7 +166,7 @@ class HostTest {
                 "CLAUDE|{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"a\"}|{\"type\":\"result\",\"session_id\":\"b\"}|b",
                 "OPENCODE|{\"type\":\"step_start\",\"sessionID\":\"ses_a\"}|{\"type\":\"text\",\"part\":{\"sessionID\":\"ses_b\"}}|ses_b",
                 "ANTIGRAVITY|{\"status\":\"RUNNING\"}|{\"conversation_id\":\"c-1\",\"response\":\"done\"}|c-1"})
-        void perHost(Host host, String first, String second, String expected) throws IOException {
+        void perHost(Host host, String first, String second, String expected) throws Exception {
             var outputs = List.of(json(first), json(second));
 
             assertEquals(Optional.of(expected), host.sessionId(outputs));
@@ -173,7 +174,7 @@ class HostTest {
 
         @Test
         @DisplayName("another host's field, a non-textual value or no field gives no session id")
-        void none() throws IOException {
+        void none() throws Exception {
             var outputs = List.of(json("{\"sessionID\":\"ses_a\"}"), json("{\"session_id\":7}"));
 
             assertAll(
@@ -185,7 +186,7 @@ class HostTest {
 
     @Test
     @DisplayName("the client version comes from Claude Code's init line; the other hosts are probed")
-    void version() throws IOException {
+    void version() throws Exception {
         var outputs = List.of(json("{\"type\":\"system\",\"subtype\":\"init\",\"claude_code_version\":\"2.1.0\"}"));
 
         assertAll(

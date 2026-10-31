@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import de.planmarshall.e2e.question.driver.QuestionDriver.Launch;
@@ -320,7 +321,7 @@ class QuestionDriverTest {
 
         @Test
         @DisplayName("the override names the executable by its absolute path, and must be an executable file")
-        void override() throws IOException {
+        void override() throws Exception {
             var executable = executable(directory.resolve("bin"), "claude");
             var plain = Files.writeString(directory.resolve("plain"), "", StandardCharsets.UTF_8);
 
@@ -333,7 +334,7 @@ class QuestionDriverTest {
 
         @Test
         @DisplayName("without an override the PATH is searched first, then the known locations")
-        void searchOrder() throws IOException {
+        void searchOrder() throws Exception {
             var first = executable(directory.resolve("first"), "opencode");
             var known = executable(directory.resolve("known"), "opencode");
             var searchPath = directory.resolve("empty") + File.pathSeparator + first.getParent();
@@ -539,7 +540,7 @@ class QuestionDriverTest {
 
         @Test
         @DisplayName("a log still being written skips its unfinished last line and fails on an earlier broken one")
-        void linesSoFar() throws IOException {
+        void linesSoFar() throws Exception {
             var cut = Files.writeString(directory.resolve("cut.jsonl"), "{\"a\":1}\n{\"b\":", StandardCharsets.UTF_8);
             var broken = Files.writeString(directory.resolve("broken.jsonl"), "{\"a\":\n{\"b\":2}\n",
                     StandardCharsets.UTF_8);
@@ -560,14 +561,14 @@ class QuestionDriverTest {
 
         @Test
         @DisplayName("a warm asker that exited without pm_wait after its ask is logged as warm_asker_exited")
-        void exited() throws IOException, InterruptedException {
+        void exited() throws Exception {
             var bytes = new byte[4];
             new SecureRandom().nextBytes(bytes);
             var socket = Path.of("/tmp", "pmq-drv-" + HexFormat.of().formatHex(bytes) + ".sock");
             var settings = new Settings(Host.CLAUDE, null, directory.resolve("workspace"), directory.resolve("run"),
                     List.of("pm-exec"));
             try (var driver = QuestionDriver.start(QuestionStub.Settings.of(directory.resolve("stub"), socket),
-                    settings)) {
+                         settings)) {
                 var process = new ProcessBuilder("true").start();
                 process.waitFor();
                 var launch = new Launch(WORKER, 1, "implementer", "prompt", false, null, List.of(), null);

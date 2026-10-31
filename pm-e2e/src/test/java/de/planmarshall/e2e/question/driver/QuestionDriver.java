@@ -43,6 +43,7 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -141,7 +142,7 @@ public final class QuestionDriver implements AutoCloseable {
      * Where OpenCode keeps its data ({@code XDG_DATA_HOME}), set by {@value #PROPERTY}: {@code global} (the default)
      * or {@code worker}.
      */
-    enum OpenCodeDataHome {
+    public enum OpenCodeDataHome {
         /**
          * The operator's own data home, which the worker inherits: it has the operator's login, so the models of the
          * login are routable ({@code opencode/gpt-5.4-nano} ran there, verified 2026-10-21), and every OpenCode
@@ -156,14 +157,14 @@ public final class QuestionDriver implements AutoCloseable {
         WORKER;
 
         /** The system property that selects it. */
-        static final String PROPERTY = "pm.experiment.opencode.data-home";
+        public static final String PROPERTY = "pm.experiment.opencode.data-home";
 
         /**
          * @param value {@code global} or {@code worker}, in any case; {@code null} for the default
          * @return the data home
          * @throws IllegalArgumentException for any other value
          */
-        static OpenCodeDataHome of(String value) {
+        public static OpenCodeDataHome of(String value) {
             if (value == null) {
                 return GLOBAL;
             }
@@ -187,7 +188,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param openCodeDataHome where an OpenCode worker keeps its data
      * @param parallel         how many runs the measurement runs at once, recorded with every launch
      */
-    record Settings(Host host, String model, Path workspace, Path runDir, List<String> exec,
+    public record Settings(Host host, String model, Path workspace, Path runDir, List<String> exec,
     OpenCodeDataHome openCodeDataHome, int parallel) {
 
         /**
@@ -199,7 +200,7 @@ public final class QuestionDriver implements AutoCloseable {
          * @param runDir    where the worker output and the relay logs go
          * @param exec      the {@code pm-exec} command line
          */
-        Settings(Host host, String model, Path workspace, Path runDir, List<String> exec) {
+        public Settings(Host host, String model, Path workspace, Path runDir, List<String> exec) {
             this(host, model, workspace, runDir, exec, OpenCodeDataHome.GLOBAL, 1);
         }
     }
@@ -216,7 +217,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param workTools   the host tools beside the stub's (file tools for real work), by the host's names
      * @param sessionId   the session to resume, {@code null} for a new session
      */
-    record Launch(String worker, int generation, String role, String prompt, boolean resumable, Duration toolTimeout,
+    public record Launch(String worker, int generation, String role, String prompt, boolean resumable, Duration toolTimeout,
     List<String> workTools, String sessionId) {
     }
 
@@ -230,13 +231,15 @@ public final class QuestionDriver implements AutoCloseable {
      * @param output    its arrival-stamped output
      * @param relayLog  its relay's host-side log
      */
-    record Worker(Launch launch, Host host, Process process, Path directory, Path output, Path relayLog) {
+    public record Worker(Launch launch, Host host, Process process, Path directory, Path output, Path relayLog) {
 
-        String id() {
+        /** @return the worker id */
+        public String id() {
             return launch.worker();
         }
 
-        int generation() {
+        /** @return the generation */
+        public int generation() {
             return launch.generation();
         }
     }
@@ -254,7 +257,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param tail       the last {@value #STDERR_TAIL} lines of {@code stderr} that are not lines of {@code pm-exec}'s
      *                   own
      */
-    record LaunchFailure(String worker, int generation, int exit, String stderr, List<String> tail) {
+    public record LaunchFailure(String worker, int generation, int exit, String stderr, List<String> tail) {
     }
 
     /** How many of the harness's last {@code stderr} lines a launch failure records. */
@@ -278,7 +281,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param continuation whether it is a continuation generation: its worker asked in an earlier generation
      * @param voter        whether it is a voter
      */
-    record EarlyExit(String worker, int generation, int exit, String detail, boolean continuation, boolean voter) {
+    public record EarlyExit(String worker, int generation, int exit, String detail, boolean continuation, boolean voter) {
 
         /**
          * @return the outcome it is recorded as: {@value #VOTER_EARLY_EXIT} for a voter, else
@@ -301,7 +304,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param generation its generation
      * @param detail     the matching line ({@link #quotaDetail(String, List)})
      */
-    record QuotaError(String worker, int generation, String detail) {
+    public record QuotaError(String worker, int generation, String detail) {
     }
 
     private final QuestionStub.Settings stubSettings;
@@ -336,9 +339,9 @@ public final class QuestionDriver implements AutoCloseable {
      * @param model its model, {@code null} for the harness default
      * @return the sibling driver
      */
-    QuestionDriver sibling(Host host, String model) {
+    public QuestionDriver sibling(Host host, String model) {
         var sibling = new QuestionDriver(stubSettings, new Settings(host, model, settings.workspace(),
-                settings.runDir(), settings.exec(), settings.openCodeDataHome(), settings.parallel()), stub, false,
+                        settings.runDir(), settings.exec(), settings.openCodeDataHome(), settings.parallel()), stub, false,
                 family, endedOnLaunch);
         siblings.add(sibling);
         return sibling;
@@ -353,14 +356,14 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the worker
      * @throws IOException if it cannot be started
      */
-    Worker startLeased(String taskId, String entity, Launch launch) throws IOException {
+    public Worker startLeased(String taskId, String entity, Launch launch) throws IOException {
         stub.leaseAtSpawn(taskId, launch.worker(), launch.generation());
         return launch(withPrompt(launch, launch.prompt() + "\n\nStart: call pm_state with entity \"" + entity
                 + "\" and follow its link ack."));
     }
 
     /** @return every worker this driver started */
-    List<Worker> workers() {
+    public List<Worker> workers() {
         return List.copyOf(workers);
     }
 
@@ -372,7 +375,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the driver
      * @throws IOException if the stub cannot start or a directory not be created
      */
-    static QuestionDriver start(QuestionStub.Settings stubSettings, Settings settings) throws IOException {
+    public static QuestionDriver start(QuestionStub.Settings stubSettings, Settings settings) throws IOException {
         Files.createDirectories(settings.workspace());
         Files.createDirectories(settings.runDir());
         return new QuestionDriver(stubSettings, settings, QuestionStub.start(stubSettings), true,
@@ -380,12 +383,12 @@ public final class QuestionDriver implements AutoCloseable {
     }
 
     /** @return the running stub */
-    QuestionStub stub() {
+    public QuestionStub stub() {
         return stub;
     }
 
     /** @return the driver's settings */
-    Settings settings() {
+    public Settings settings() {
         return settings;
     }
 
@@ -395,7 +398,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the new stub
      * @throws IOException if it cannot be restarted
      */
-    QuestionStub restartStub() throws IOException {
+    public QuestionStub restartStub() throws IOException {
         stub.event("stub_restart", Map.of());
         stub.close();
         stub = QuestionStub.start(stubSettings);
@@ -410,7 +413,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the worker
      * @throws IOException if it cannot be started
      */
-    Worker startFresh(TaskSpec spec, Launch launch) throws IOException {
+    public Worker startFresh(TaskSpec spec, Launch launch) throws IOException {
         stub.queue(spec);
         stub.leaseAtSpawn(spec.taskId(), launch.worker(), launch.generation());
         return launch(withPrompt(launch, launch.prompt() + "\n\nStart: call pm_state with entity \"" + spec.entity()
@@ -424,7 +427,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the worker
      * @throws IOException if it cannot be started
      */
-    Worker startWarm(Launch launch) throws IOException {
+    public Worker startWarm(Launch launch) throws IOException {
         return launch(withPrompt(launch, launch.prompt() + "\n\nStart: call pm_wait. Take task after task; end "
                 + "your turn only when pm_wait returns 'wait: end'."));
     }
@@ -439,7 +442,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the resumed worker
      * @throws IOException if it cannot be started
      */
-    Worker resume(Worker previous, String taskId, String sessionId, int generation) throws IOException {
+    public Worker resume(Worker previous, String taskId, String sessionId, int generation) throws IOException {
         stub.leaseAtSpawn(taskId, previous.id(), generation);
         var entity = previous.launch();
         var launch = new Launch(entity.worker(), generation, entity.role(), "The answer to your question is there. "
@@ -460,7 +463,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the started worker
      * @throws IOException if it cannot be started
      */
-    Worker resumeWithoutTask(Worker previous, String sessionId, int generation) throws IOException {
+    public Worker resumeWithoutTask(Worker previous, String sessionId, int generation) throws IOException {
         var entity = previous.launch();
         return launch(new Launch(entity.worker(), generation, entity.role(), "Continue.", true, entity.toolTimeout(),
                 entity.workTools(), sessionId));
@@ -472,7 +475,7 @@ public final class QuestionDriver implements AutoCloseable {
      *         on OpenCode, {@code conversation_id} on Antigravity)
      * @throws IOException if the output cannot be read
      */
-    Optional<String> sessionId(Worker worker) throws IOException {
+    public Optional<String> sessionId(Worker worker) throws IOException {
         return worker.host().sessionId(outputLines(worker.output()));
     }
 
@@ -491,7 +494,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the client version
      * @throws IOException if the output cannot be read
      */
-    String clientVersion(Worker worker) throws IOException {
+    public String clientVersion(Worker worker) throws IOException {
         var fromOutput = worker.host().versionFromOutput(outputLines(worker.output()));
         if (fromOutput.isPresent()) {
             return fromOutput.get();
@@ -528,7 +531,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return what it wrote to {@code stderr} so far, empty when nothing
      * @throws IOException if the file cannot be read
      */
-    String stderr(Worker worker) throws IOException {
+    public String stderr(Worker worker) throws IOException {
         var file = stderrFile(settings.runDir(), worker.id(), worker.generation());
         return Files.exists(file) ? Files.readString(file, StandardCharsets.UTF_8) : "";
     }
@@ -551,7 +554,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the exit code, or empty if it still runs
      * @throws InterruptedException if interrupted
      */
-    Optional<Integer> awaitExit(Worker worker, Duration timeout) throws InterruptedException {
+    public Optional<Integer> awaitExit(Worker worker, Duration timeout) throws InterruptedException {
         if (worker.process().waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
             return Optional.of(worker.process().exitValue());
         }
@@ -562,13 +565,13 @@ public final class QuestionDriver implements AutoCloseable {
      * The event the driver logs, and the field of a Q7 run record, when it ends the fresh asker that still runs at
      * its silence limit after the ask ({@link #endAsker}): a harness action, the end of a turn the model did not end.
      */
-    public static final String ASKER_ENDED_BY_DRIVER ="asker_ended_by_driver";
+    public static final String ASKER_ENDED_BY_DRIVER = "asker_ended_by_driver";
 
     /**
      * The event the driver logs when the open time of a Q7 run starts: the asking generation has stopped (it exited,
      * or the driver ended it), so the record is open with no worker of the task connected.
      */
-    public static final String OPEN_TIME_STARTED ="open_time_started";
+    public static final String OPEN_TIME_STARTED = "open_time_started";
 
     /** How long {@link #endAsker} waits for the driver's own {@code worker_exited} of an ended asker. */
     private static final Duration EXIT_EVENT_WAIT = Duration.ofSeconds(30);
@@ -584,7 +587,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param holdingWait   whether it held a {@code pm_wait} when the driver ended it (by the stub log: a
      *                      {@code wait_started} without an end), {@code false} when it exited by itself
      */
-    record AskerEnd(String worker, int generation, boolean endedByDriver, long afterAskMs, boolean holdingWait) {
+    public record AskerEnd(String worker, int generation, boolean endedByDriver, long afterAskMs, boolean holdingWait) {
     }
 
     /**
@@ -602,7 +605,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log cannot be read
      * @throws InterruptedException if interrupted
      */
-    AskerEnd endAsker(Worker asker, long askedAt, Duration silenceLimit) throws IOException, InterruptedException {
+    public AskerEnd endAsker(Worker asker, long askedAt, Duration silenceLimit) throws IOException, InterruptedException {
         var waitFor = Duration.ofMillis(Math.max(0, askedAt + silenceLimit.toMillis() - System.currentTimeMillis()));
         var exited = awaitExit(asker, waitFor).isPresent();
         AskerEnd end;
@@ -632,7 +635,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param worker the worker
      * @throws InterruptedException if interrupted
      */
-    void terminate(Worker worker) throws InterruptedException {
+    public void terminate(Worker worker) throws InterruptedException {
         var stopped = continueStopped(worker.process());
         if (!worker.process().isAlive()) {
             stopped.forEach(ProcessHandle::destroyForcibly);
@@ -740,7 +743,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param worker the worker
      * @param fault  the fault
      */
-    void inject(Worker worker, Fault fault) {
+    public void inject(Worker worker, Fault fault) {
         inject(worker, fault, Map.of());
     }
 
@@ -782,7 +785,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the number of processes the stop injected into it reached ({@link #stopTree}), empty when it was not
      *         stopped
      */
-    Optional<Integer> signalledPids(Worker worker) {
+    public Optional<Integer> signalledPids(Worker worker) {
         return Optional.ofNullable(signalledPids.get(worker.id() + "#" + worker.generation()));
     }
 
@@ -801,7 +804,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log cannot be read
      * @throws InterruptedException if interrupted
      */
-    Optional<Wait> stopWhileHolding(Worker worker, long askedAt, Duration within)
+    public Optional<Wait> stopWhileHolding(Worker worker, long askedAt, Duration within)
             throws IOException, InterruptedException {
         var held = awaitHold(worker, askedAt, System.currentTimeMillis() + within.toMillis());
         if (held.isEmpty()) {
@@ -866,10 +869,10 @@ public final class QuestionDriver implements AutoCloseable {
      *                   while the held one was open: the host had given the held call up), {@code reply_failed} or
      *                   {@code disconnected} (the stub's events)
      */
-    record CallCut(String worker, int generation, long heldSince, long cutAt, String evidence) {
+    public record CallCut(String worker, int generation, long heldSince, long cutAt, String evidence) {
 
         /** @return the milliseconds from the start of the held call to its cut */
-        long afterMs() {
+        public long afterMs() {
             return cutAt - heldSince;
         }
     }
@@ -894,7 +897,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log cannot be read
      * @throws InterruptedException if interrupted
      */
-    Optional<CallCut> awaitCallCut(Worker worker, long since, long untilMillis, Host.CutSetting setting)
+    public Optional<CallCut> awaitCallCut(Worker worker, long since, long untilMillis, Host.CutSetting setting)
             throws IOException, InterruptedException {
         while (true) {
             var events = jsonLinesSoFar(stub.events());
@@ -1177,7 +1180,7 @@ public final class QuestionDriver implements AutoCloseable {
     }
 
     /** What the driver does after a loss, read from the stub ({@link #recovery}). */
-    enum RecoveryStep {
+    public enum RecoveryStep {
         /** The lost task waits resumable with its stored session: resume it again. */
         RESUME,
         /**
@@ -1212,7 +1215,7 @@ public final class QuestionDriver implements AutoCloseable {
      *                    to, empty when none
      * @param holderEnded whether that holder has ended: the lost generation itself, or one whose process is gone
      */
-    record Recovery(RecoveryStep step, String task, String entity, String state, String holder,
+    public record Recovery(RecoveryStep step, String task, String entity, String state, String holder,
     boolean holderEnded) {
     }
 
@@ -1220,7 +1223,7 @@ public final class QuestionDriver implements AutoCloseable {
      * The reason of a {@value #CONTINUATION_GAP} when the stub's continuation is held by an ended generation in a state
      * no new generation can take over ({@link RecoveryStep#GAP}).
      */
-    static final String HELD_BY_ENDED_GENERATION = "held_by_ended_generation";
+    public static final String HELD_BY_ENDED_GENERATION = "held_by_ended_generation";
 
     /** The states of a continuation that a new generation's lease takes over from an ended holder. */
     private static final Set<String> HANDOVER_STATES = Set.of("task.offered", "entity.active", "envelope.task.active",
@@ -1250,7 +1253,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the step
      * @throws IOException if the event log cannot be read
      */
-    Recovery recovery(Worker worker, String decisionId, String taskId) throws IOException {
+    public Recovery recovery(Worker worker, String decisionId, String taskId) throws IOException {
         var lost = worker.id() + "#" + worker.generation();
         var recovery = recovery(jsonLinesSoFar(stub.events()), decisionId, taskId, lost,
                 holder -> holder.equals(lost) || ended(holder), stub::state);
@@ -1394,7 +1397,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log or a worker's output cannot be read
      * @throws InterruptedException if interrupted
      */
-    Optional<String> awaitAnswer(String decisionId, Duration timeout, Duration hold,
+    public Optional<String> awaitAnswer(String decisionId, Duration timeout, Duration hold,
             Function<ObjectNode, List<PartAnswer>> reply) throws IOException, InterruptedException {
         var deadline = System.currentTimeMillis() + timeout.toMillis();
         while (true) {
@@ -1422,7 +1425,7 @@ public final class QuestionDriver implements AutoCloseable {
      * taken and closed by the asking worker over its held {@code pm_wait} before the driver would start a generation
      * for it ({@link #continuedByHold(String)}): no new generation is started then.
      */
-    public static final String CONTINUED_BY_HOLD ="continued_by_hold";
+    public static final String CONTINUED_BY_HOLD = "continued_by_hold";
 
     /**
      * A continuation made by hold within the decision: the stub continued the answered decision in a new task, offered
@@ -1443,7 +1446,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param channel     the channel the decision was answered through ({@code quorum} or {@code cli}), empty when
      *                    the log does not say
      */
-    record HeldContinuation(String decision, String task, String worker, int generation, String outcome,
+    public record HeldContinuation(String decision, String task, String worker, int generation, String outcome,
     long closedAt, long submittedAt, String channel) {
     }
 
@@ -1457,7 +1460,7 @@ public final class QuestionDriver implements AutoCloseable {
      *         asking worker did not take and close that task over {@code pm_wait}
      * @throws IOException if the event log cannot be read
      */
-    Optional<HeldContinuation> continuedByHold(String decisionId) throws IOException {
+    public Optional<HeldContinuation> continuedByHold(String decisionId) throws IOException {
         var held = heldContinuation(jsonLinesSoFar(stub.events()), decisionId);
         if (held.isPresent()) {
             var value = held.get();
@@ -1522,13 +1525,13 @@ public final class QuestionDriver implements AutoCloseable {
      * {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04}: the asker ended its turn 4 s after the ask, and
      * the decision was seen 270 s after it, at Claude Code's silence limit of 240 s plus 30 s).
      */
-    public static final String WARM_ASKER_EXITED ="warm_asker_exited";
+    public static final String WARM_ASKER_EXITED = "warm_asker_exited";
 
     /**
      * The event the driver logs, and the field of a run record, when the continuation of a warm asker's decision was not
      * taken over its {@code pm_wait} ({@link #awaitWarmContinuation}): its value is the step, in lower case.
      */
-    static final String WARM_CONTINUATION = "warm_continuation";
+    public static final String WARM_CONTINUATION = "warm_continuation";
 
     /**
      * The field of a run record whose continuation got no worker: its value names the reason, {@code not_taken} (the
@@ -1538,10 +1541,10 @@ public final class QuestionDriver implements AutoCloseable {
      * in a state no new generation can take over: {@link RecoveryStep#GAP}, which the driver also logs as an event of
      * this name). Without it, such a run waited out its run limit and was recorded as timed out only.
      */
-    public static final String CONTINUATION_GAP ="continuation_gap";
+    public static final String CONTINUATION_GAP = "continuation_gap";
 
     /** How a warm asker stopped after its ask ({@link #awaitWarmStop}). */
-    enum WarmStop {
+    public enum WarmStop {
         /** It called {@code pm_wait} at or after the ask. */
         WAITED,
         /** Its process exited without a call of {@code pm_wait} after the ask. */
@@ -1564,7 +1567,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log cannot be read
      * @throws InterruptedException if interrupted
      */
-    WarmStop awaitWarmStop(Worker asker, long askedAt, Duration within) throws IOException, InterruptedException {
+    public WarmStop awaitWarmStop(Worker asker, long askedAt, Duration within) throws IOException, InterruptedException {
         var until = System.currentTimeMillis() + within.toMillis();
         while (true) {
             var alive = asker.process().isAlive();
@@ -1589,7 +1592,7 @@ public final class QuestionDriver implements AutoCloseable {
     }
 
     /** What became of the continuation of a warm asker's decision ({@link #awaitWarmContinuation}). */
-    enum WarmStep {
+    public enum WarmStep {
         /** Not decided yet: the stub has not continued the decision, or its continuation is queued and the asker runs. */
         PENDING,
         /** The continuation is no longer queued: a generation took it (over the asker's {@code pm_wait}, as before). */
@@ -1610,7 +1613,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param entity the entity of that task, empty when none
      * @param state  that task's state in the stub, empty when none
      */
-    record WarmContinuation(WarmStep step, String task, String entity, String state) {
+    public record WarmContinuation(WarmStep step, String task, String entity, String state) {
     }
 
     /**
@@ -1630,7 +1633,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log cannot be read
      * @throws InterruptedException if interrupted
      */
-    WarmContinuation awaitWarmContinuation(Worker asker, String decisionId, Duration within)
+    public WarmContinuation awaitWarmContinuation(Worker asker, String decisionId, Duration within)
             throws IOException, InterruptedException {
         var until = System.currentTimeMillis() + within.toMillis();
         while (true) {
@@ -1735,7 +1738,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log cannot be read
      * @throws InterruptedException if interrupted
      */
-    boolean superviseAnswer(Worker worker, Duration deliveryWithin) throws IOException, InterruptedException {
+    public boolean superviseAnswer(Worker worker, Duration deliveryWithin) throws IOException, InterruptedException {
         var delivered = awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText())
                 && matches(event, worker), System.currentTimeMillis() + deliveryWithin.toMillis());
         if (delivered.isEmpty()) {
@@ -1780,14 +1783,14 @@ public final class QuestionDriver implements AutoCloseable {
     }
 
     /** The event the driver logs when it detects a lost worker ({@link #superviseAnswer}). */
-    public static final String LOST_DETECTED ="lost_detected";
+    public static final String LOST_DETECTED = "lost_detected";
 
     /**
      * The event the driver logs, on a stub that does not lose a worker at its exit, when the answer never reached a
      * generation whose process exited ({@link #superviseAnswer}); also the reason of the loss it then ends the
      * generation with. It is no detection.
      */
-    public static final String ANSWER_UNDELIVERED ="answer_undelivered";
+    public static final String ANSWER_UNDELIVERED = "answer_undelivered";
 
     /**
      * @param events     the stub log
@@ -1809,7 +1812,7 @@ public final class QuestionDriver implements AutoCloseable {
      *         data directory: a change after the ask is a change of the worktree
      * @throws IOException if a file cannot be read
      */
-    String worktreeDigest(Worker worker) throws IOException {
+    public String worktreeDigest(Worker worker) throws IOException {
         try (Stream<Path> walk = Files.walk(worker.directory())) {
             var digest = MessageDigest.getInstance("SHA-256");
             for (var path : walk.filter(Files::isRegularFile).sorted().toList()) {
@@ -1840,7 +1843,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the log cannot be read
      * @throws InterruptedException if interrupted
      */
-    Optional<JsonNode> awaitEvent(Predicate<JsonNode> match, long untilMillis)
+    public Optional<JsonNode> awaitEvent(Predicate<JsonNode> match, long untilMillis)
             throws IOException, InterruptedException {
         while (true) {
             for (var event : jsonLinesSoFar(stub.events())) {
@@ -1866,7 +1869,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the log cannot be read
      * @throws InterruptedException if interrupted
      */
-    Optional<JsonNode> awaitEventWhileLaunched(Predicate<JsonNode> match, long untilMillis)
+    public Optional<JsonNode> awaitEventWhileLaunched(Predicate<JsonNode> match, long untilMillis)
             throws IOException, InterruptedException {
         while (true) {
             var found = awaitEvent(match, 0);
@@ -1883,7 +1886,7 @@ public final class QuestionDriver implements AutoCloseable {
      *         ({@link #quotaError(Worker)}), empty when none did
      * @throws IOException if a worker's output or {@code stderr} cannot be read
      */
-    Optional<QuotaError> quotaError() throws IOException {
+    public Optional<QuotaError> quotaError() throws IOException {
         for (var worker : workers) {
             var quota = quotaError(worker);
             if (quota.isPresent()) {
@@ -2009,7 +2012,7 @@ public final class QuestionDriver implements AutoCloseable {
      *         end the run ({@link #voterEarlyExits()})
      * @throws IOException if the event log or a worker's output cannot be read
      */
-    Optional<EarlyExit> earlyExit() throws IOException {
+    public Optional<EarlyExit> earlyExit() throws IOException {
         return allEarlyExits().stream().filter(early -> !early.voter()).findFirst();
     }
 
@@ -2023,7 +2026,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the voters that ended early, in the order they were started
      * @throws IOException if the event log or a worker's output cannot be read
      */
-    List<EarlyExit> voterEarlyExits() throws IOException {
+    public List<EarlyExit> voterEarlyExits() throws IOException {
         return allEarlyExits().stream().filter(EarlyExit::voter).toList();
     }
 
@@ -2136,7 +2139,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @throws IOException          if the event log or a worker's output cannot be read
      * @throws InterruptedException if interrupted while a worker is ended
      */
-    Optional<LaunchFailure> launchFailure() throws IOException, InterruptedException {
+    public Optional<LaunchFailure> launchFailure() throws IOException, InterruptedException {
         for (var worker : workers) {
             var failure = launchFailure(worker);
             if (failure.isPresent()) {
@@ -2228,7 +2231,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param extra what the fixture adds
      * @return the prompt
      */
-    static String contract(String role, String extra) {
+    public static String contract(String role, String extra) {
         return """
                 You are a headless worker of the role %s of plan-marshall. Your work reaches the server only through \
                 the tools pm_wait, pm_state and pm_do of the MCP server plan-marshall. Never ask anyone in prose, \
@@ -2253,13 +2256,13 @@ public final class QuestionDriver implements AutoCloseable {
      * An item of the envelope's evidence as the stub accepts it (the stub's envelope check: text that
      * starts with {@code pm://}, at most 512 characters): the URI of the task entity of the plan.
      */
-    public static final String EVIDENCE_EXAMPLE ="pm://" + QuestionStub.PLAN_ID + "/T-1";
+    public static final String EVIDENCE_EXAMPLE = "pm://" + QuestionStub.PLAN_ID + "/T-1";
 
     /**
      * The evidence rule of the contract: the stub refuses an ask whose evidence holds anything but {@code pm://} URIs
      * with {@code invalid_link_args} ({@code every item must be a pm:// URI}).
      */
-    public static final String EVIDENCE_RULE ="The envelope's evidence is a list of at most 20 pm:// URIs and nothing else "
+    public static final String EVIDENCE_RULE = "The envelope's evidence is a list of at most 20 pm:// URIs and nothing else "
             + "(it may be empty): name the entity you work on as pm://<plan_id>/<entity>; a file name, a quote or a "
             + "line of code is no evidence item and belongs into the description.";
 
@@ -2538,7 +2541,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @param host the host
      * @return the id
      */
-    static String missingSessionId(Host host) {
+    public static String missingSessionId(Host host) {
         if (host == Host.OPENCODE) {
             var bytes = new byte[13];
             RANDOM.nextBytes(bytes);
@@ -2608,7 +2611,7 @@ public final class QuestionDriver implements AutoCloseable {
      * @return the {@code pm-exec} command line: {@code -Dpm.experiment.exec}, else the native binary of a checkout of
      *         {@code pm-mcp-clients} beside this repository, else its JAR staged by {@code -Pintegration-tests}
      */
-    static List<String> resolveExec() {
+    public static List<String> resolveExec() {
         var configured = System.getProperty("pm.experiment.exec");
         if (configured != null) {
             return List.of(configured);
