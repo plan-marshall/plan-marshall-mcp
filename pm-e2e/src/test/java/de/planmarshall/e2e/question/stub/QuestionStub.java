@@ -73,17 +73,18 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * </ul>
  * Nothing is decided by time: a decision is answered only by {@link #answer(String, int, List)} or by its quorum.
  */
-final class QuestionStub implements AutoCloseable {
+public final class QuestionStub implements AutoCloseable {
 
-    static final ObjectMapper JSON = new ObjectMapper();
+    /** The JSON mapper of the stub, its logs and records. */
+    public static final ObjectMapper JSON = new ObjectMapper();
     /** The plan id every representation carries. */
-    static final String PLAN_ID = "qlv";
+    public static final String PLAN_ID = "qlv";
     /** The compiled question bound per entry of a state and per plan task. */
-    static final int QUESTION_BOUND = 3;
+    public static final int QUESTION_BOUND = 3;
     /** The server name every harness sees. */
-    static final String SERVER = "plan-marshall";
+    public static final String SERVER = "plan-marshall";
     /** The tools of the stub. */
-    static final List<String> TOOLS = List.of("pm_wait", "pm_state", "pm_do");
+    public static final List<String> TOOLS = List.of("pm_wait", "pm_state", "pm_do");
     /** The text of a wait answered without work. */
     static final String WAIT_AGAIN = "wait: again\n";
     /** The text of a wait that ends the worker. */
@@ -92,7 +93,7 @@ final class QuestionStub implements AutoCloseable {
      * The prefix of a vote task, its entity and the worker that serves it: {@code vote-<question_set>-<role>}
      * (Model Work § The Adjudication).
      */
-    static final String VOTE_PREFIX = "vote-";
+    public static final String VOTE_PREFIX = "vote-";
     /** The reason a held {@code pm_wait} is refused with when the stub stops (also the stop of a restart). */
     static final String STUB_STOPPED = "stub_stopped";
     /**
@@ -141,7 +142,7 @@ final class QuestionStub implements AutoCloseable {
     private static final String NONE_FITS = "none_fits";
 
     /** How a task continues after its worker asked. */
-    enum Form {
+    public enum Form {
         /** The worker holds its task in {@code pm_wait} until the answer. */
         HOLD,
         /** The worker ends with its session stored; a resumed generation continues. */
@@ -151,7 +152,7 @@ final class QuestionStub implements AutoCloseable {
     }
 
     /** The kind of a task entity. */
-    enum Kind {
+    public enum Kind {
         /** A task of a state that may declare {@code ask} and {@code consult:<role>}. */
         ENTITY,
         /** An envelope task over plan tasks, with {@code ask:TASK-NNN}. */
@@ -168,7 +169,7 @@ final class QuestionStub implements AutoCloseable {
      * @param roles the listed roles
      * @param score the declared score
      */
-    record Quorum(List<String> roles, int score) {
+    public record Quorum(List<String> roles, int score) {
     }
 
     /**
@@ -178,7 +179,7 @@ final class QuestionStub implements AutoCloseable {
      * @param text       what the plan task asks for
      * @param submitFree the free parameters of its submit link
      */
-    record PlanTask(String id, String text, String submitFree) {
+    public record PlanTask(String id, String text, String submitFree) {
     }
 
     /**
@@ -198,7 +199,7 @@ final class QuestionStub implements AutoCloseable {
      * @param form         how it continues after a question
      * @param submitFree   the free parameters of its submit link (not of an envelope)
      */
-    record TaskSpec(String taskId, String entryKey, String role, Kind kind, String entity, String summary,
+    public record TaskSpec(String taskId, String entryKey, String role, Kind kind, String entity, String summary,
     ObjectNode facts, List<PlanTask> planTasks, int cursor, boolean ask, List<String> consultRoles, Form form,
     String submitFree) {
 
@@ -212,7 +213,7 @@ final class QuestionStub implements AutoCloseable {
          * @param consult    the consultable roles
          * @return a task whose state declares {@code ask}
          */
-        static TaskSpec entity(String taskId, String role, String summary, ObjectNode facts, String submitFree,
+        public static TaskSpec entity(String taskId, String role, String summary, ObjectNode facts, String submitFree,
                 Form form, List<String> consult) {
             return new TaskSpec(taskId, taskId, role, Kind.ENTITY, taskId, summary, facts, List.of(), 0, true,
                     List.copyOf(consult), form, submitFree);
@@ -227,7 +228,7 @@ final class QuestionStub implements AutoCloseable {
          * @param form      the continuation form
          * @return the first envelope task ({@code envelope-1}) over the plan tasks
          */
-        static TaskSpec envelope(String taskId, String role, String summary, ObjectNode facts,
+        public static TaskSpec envelope(String taskId, String role, String summary, ObjectNode facts,
                 List<PlanTask> planTasks, Form form) {
             return new TaskSpec(taskId, taskId, role, Kind.ENVELOPE, "envelope-1", summary, facts,
                     List.copyOf(planTasks), 0, true, List.of(), form, "");
@@ -249,11 +250,11 @@ final class QuestionStub implements AutoCloseable {
      * @param kind       how it was taken: {@code chosen}, {@code interpreted}, {@code own_option},
      *                   {@code delegated} or {@code none_fits}
      */
-    record PartAnswer(String questionId, String branchKey, String text, String kind) {
+    public record PartAnswer(String questionId, String branchKey, String text, String kind) {
     }
 
     /** The outcome of an answer. */
-    enum AnswerResult {
+    public enum AnswerResult {
         /** Recorded. */
         ANSWERED,
         /** An unknown decision or option, or a part left out. */
@@ -279,7 +280,7 @@ final class QuestionStub implements AutoCloseable {
      *                      task stays leased until the driver's supervision detects
      *                      the missing acknowledgement, so the acknowledgement is the only detection R3 measures
      */
-    record Settings(Path directory, Path socket, Duration window, Duration progressEvery, int questionBound,
+    public record Settings(Path directory, Path socket, Duration window, Duration progressEvery, int questionBound,
     Map<String, Quorum> quorums, boolean loseOnExit) {
 
         /**
@@ -292,7 +293,7 @@ final class QuestionStub implements AutoCloseable {
          * @param questionBound the question bound
          * @param quorums       the quorum declaration per decision kind
          */
-        Settings(Path directory, Path socket, Duration window, Duration progressEvery, int questionBound,
+        public Settings(Path directory, Path socket, Duration window, Duration progressEvery, int questionBound,
                 Map<String, Quorum> quorums) {
             this(directory, socket, window, progressEvery, questionBound, quorums, true);
         }
@@ -303,25 +304,41 @@ final class QuestionStub implements AutoCloseable {
          * @return the settings with the bounded wait of Claude Code and OpenCode ({@code 240 s}), progress every
          *         {@code 5 s}, the compiled question bound, no quorum, and the loss of a worker at its process exit
          */
-        static Settings of(Path directory, Path socket) {
+        public static Settings of(Path directory, Path socket) {
             return new Settings(directory, socket, Duration.ofSeconds(240), Duration.ofSeconds(5), QUESTION_BOUND,
                     Map.of());
         }
 
-        Settings withWindow(Duration value) {
+        /**
+         * @param value the bounded wait of {@code pm_wait}
+         * @return these settings with it
+         */
+        public Settings withWindow(Duration value) {
             return new Settings(directory, socket, value, progressEvery, questionBound, quorums, loseOnExit);
         }
 
-        Settings withQuestionBound(int value) {
+        /**
+         * @param value the question bound
+         * @return these settings with it
+         */
+        public Settings withQuestionBound(int value) {
             return new Settings(directory, socket, window, progressEvery, value, quorums, loseOnExit);
         }
 
-        Settings withQuorums(Map<String, Quorum> value) {
+        /**
+         * @param value the quorum declaration per decision kind
+         * @return these settings with it
+         */
+        public Settings withQuorums(Map<String, Quorum> value) {
             return new Settings(directory, socket, window, progressEvery, questionBound, Map.copyOf(value),
                     loseOnExit);
         }
 
-        Settings withLoseOnExit(boolean value) {
+        /**
+         * @param value whether a worker's process exit ends the generation as lost
+         * @return these settings with it
+         */
+        public Settings withLoseOnExit(boolean value) {
             return new Settings(directory, socket, window, progressEvery, questionBound, quorums, value);
         }
     }
@@ -479,7 +496,7 @@ final class QuestionStub implements AutoCloseable {
      * @return the running stub
      * @throws IOException if the directory, the records, or the socket cannot be used
      */
-    static QuestionStub start(Settings settings) throws IOException {
+    public static QuestionStub start(Settings settings) throws IOException {
         Files.createDirectories(settings.directory());
         Files.deleteIfExists(settings.socket());
         var server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
@@ -497,22 +514,22 @@ final class QuestionStub implements AutoCloseable {
     }
 
     /** @return the settings */
-    Settings settings() {
+    public Settings settings() {
         return settings;
     }
 
     /** @return the event log */
-    Path events() {
+    public Path events() {
         return events;
     }
 
     /** @return the question records */
-    Path records() {
+    public Path records() {
         return records;
     }
 
     /** @return the ids of the decisions delivered to the operator, in the order of delivery */
-    BlockingQueue<String> operatorDecisions() {
+    public BlockingQueue<String> operatorDecisions() {
         return operatorDecisions;
     }
 
@@ -521,7 +538,7 @@ final class QuestionStub implements AutoCloseable {
      *
      * @param spec the task
      */
-    void queue(TaskSpec spec) {
+    public void queue(TaskSpec spec) {
         lock.lock();
         try {
             tasks.put(spec.taskId(), new Task(spec));
@@ -540,7 +557,7 @@ final class QuestionStub implements AutoCloseable {
      * @param worker     the worker
      * @param generation its generation
      */
-    void leaseAtSpawn(String taskId, String worker, int generation) {
+    public void leaseAtSpawn(String taskId, String worker, int generation) {
         lock.lock();
         try {
             advanceGeneration(worker, generation);
@@ -566,7 +583,7 @@ final class QuestionStub implements AutoCloseable {
      * @param parts      one answer per part
      * @return the outcome
      */
-    AnswerResult answer(String decisionId, int revision, List<PartAnswer> parts) {
+    public AnswerResult answer(String decisionId, int revision, List<PartAnswer> parts) {
         lock.lock();
         try {
             var decision = decisions.get(decisionId);
@@ -598,7 +615,7 @@ final class QuestionStub implements AutoCloseable {
      * @param consultationId the consultation
      * @param text           the answer
      */
-    void answerConsultation(String consultationId, String text) {
+    public void answerConsultation(String consultationId, String text) {
         lock.lock();
         try {
             var task = tasks.get(consultationId);
@@ -620,7 +637,7 @@ final class QuestionStub implements AutoCloseable {
      * @param generation    its generation
      * @param sessionStored whether the harness stored its session
      */
-    void workerExited(String worker, int generation, boolean sessionStored) {
+    public void workerExited(String worker, int generation, boolean sessionStored) {
         lock.lock();
         try {
             var key = worker + "#" + generation;
@@ -685,7 +702,7 @@ final class QuestionStub implements AutoCloseable {
      * @param generation its generation
      * @param reason     why
      */
-    void lost(String worker, int generation, String reason) {
+    public void lost(String worker, int generation, String reason) {
         lock.lock();
         try {
             var key = worker + "#" + generation;
@@ -706,7 +723,7 @@ final class QuestionStub implements AutoCloseable {
      * @param worker     the worker
      * @param generation its generation
      */
-    void end(String worker, int generation) {
+    public void end(String worker, int generation) {
         lock.lock();
         try {
             ended.add(worker + "#" + generation);
@@ -721,7 +738,7 @@ final class QuestionStub implements AutoCloseable {
      * @return its state ({@code task.queued}, {@code task.offered}, the active state, {@code task.<outcome>}), or
      *         empty for an unknown task
      */
-    Optional<String> state(String taskId) {
+    public Optional<String> state(String taskId) {
         lock.lock();
         try {
             return Optional.ofNullable(tasks.get(taskId)).map(task -> task.state);
@@ -731,7 +748,7 @@ final class QuestionStub implements AutoCloseable {
     }
 
     /** @return the ids of every task, in the order they were queued */
-    List<String> taskIds() {
+    public List<String> taskIds() {
         lock.lock();
         try {
             return List.copyOf(tasks.keySet());
@@ -745,7 +762,7 @@ final class QuestionStub implements AutoCloseable {
      * @return a snapshot: {@code id}, {@code revision}, {@code task_id}, {@code form}, {@code answered},
      *         {@code envelope}, {@code votes}, {@code items}; empty for an unknown decision
      */
-    Optional<ObjectNode> decision(String decisionId) {
+    public Optional<ObjectNode> decision(String decisionId) {
         lock.lock();
         try {
             var decision = decisions.get(decisionId);
@@ -773,7 +790,7 @@ final class QuestionStub implements AutoCloseable {
      * @param name   the event
      * @param fields its fields (strings, numbers, booleans, JSON nodes)
      */
-    void event(String name, Map<String, ?> fields) {
+    public void event(String name, Map<String, ?> fields) {
         var node = JSON.createObjectNode();
         node.put("at", System.currentTimeMillis());
         node.put("nanos", System.nanoTime());
