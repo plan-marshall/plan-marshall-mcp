@@ -308,6 +308,82 @@ class QuestionDriverTest {
     }
 
     @Nested
+    @DisplayName("usage-limit refusal")
+    class UsageLimit {
+
+        private static String event(String status, String extra) {
+            return "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"" + status + "\"" + extra + "}}";
+        }
+
+        @ParameterizedTest(name = "status {0}")
+        @DisplayName("a rate_limit_event that allows the account is no refusal")
+        @ValueSource(strings = {"allowed", "allowed_warning"})
+        void allowed(String status) {
+            var line = event(status, ",\"rateLimitType\":\"seven_day\",\"resetsAt\":1793520000,\"utilization\":0.96");
+
+            assertAll(() -> assertEquals(Optional.empty(), QuestionDriver.rateLimitRefusal(List.of(stamped(line)))),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.quotaError("w", 1, "",
+                            List.of(stamped(line)))));
+        }
+
+        @Test
+        @DisplayName("any other status refuses, with the type and the reset as an ISO instant")
+        void refused() {
+            var allowed = event("allowed_warning", "");
+            var refusing = event("rejected", ",\"rateLimitType\":\"seven_day\",\"resetsAt\":1793520000");
+
+            var refusal = QuestionDriver.rateLimitRefusal(List.of(stamped(allowed), stamped("no json"),
+                    stamped("{\"type\":\"assistant\"}"), stamped(refusing)));
+            var quota = QuestionDriver.quotaError("w1", 2, "", List.of(stamped(refusing))).orElseThrow();
+            var fields = QuestionDriver.quotaFields(quota);
+
+            assertAll(() -> assertEquals(new QuestionDriver.RateLimitRefusal("rejected", "seven_day",
+                            "2026-11-01T08:00:00Z", refusing), refusal.orElseThrow()),
+                    () -> assertTrue(quota.usageLimit()),
+                    () -> assertEquals(QuestionDriver.RATE_LIMIT_EVENT, quota.rule()),
+                    () -> assertEquals(refusing, quota.detail()),
+                    () -> assertEquals("w1", quota.worker()),
+                    () -> assertEquals(QuestionDriver.RATE_LIMIT_EVENT, fields.get(QuestionDriver.QUOTA_RULE)),
+                    () -> assertEquals("seven_day", fields.get(QuestionDriver.RATE_LIMIT_TYPE)),
+                    () -> assertEquals("rejected", fields.get(QuestionDriver.RATE_LIMIT_STATUS)),
+                    () -> assertEquals("2026-11-01T08:00:00Z", fields.get(QuestionDriver.RESETS_AT)));
+        }
+
+        @Test
+        @DisplayName("a refusal without type or reset records them empty, a textual reset as given")
+        void refusedWithoutDetails() {
+            var bare = QuestionDriver.rateLimitRefusal(List.of(stamped(event("blocked", "")))).orElseThrow();
+            var textual = QuestionDriver.rateLimitRefusal(List.of(stamped(event("blocked",
+                    ",\"resetsAt\":\"tomorrow\"")))).orElseThrow();
+            var nullReset = QuestionDriver.rateLimitRefusal(List.of(stamped(event("blocked",
+                    ",\"resetsAt\":null")))).orElseThrow();
+
+            assertAll(() -> assertEquals("", bare.rateLimitType()), () -> assertEquals("", bare.resetsAt()),
+                    () -> assertEquals("tomorrow", textual.resetsAt()), () -> assertEquals("", nullReset.resetsAt()));
+        }
+
+        @Test
+        @DisplayName("an event without a textual status is no refusal")
+        void noStatus() {
+            var lines = List.of(stamped("{\"type\":\"rate_limit_event\",\"status\":\"allowed_warning\"}"),
+                    stamped("{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":3}}"));
+
+            assertEquals(Optional.empty(), QuestionDriver.rateLimitRefusal(lines));
+        }
+
+        @Test
+        @DisplayName("the harness's own quota error wins over a refusing event and records no refusal")
+        void harnessErrorFirst() {
+            var quota = QuestionDriver.quotaError("w1", 1, "error: quota reached\n",
+                    List.of(stamped(event("rejected", "")))).orElseThrow();
+
+            assertAll(() -> assertFalse(quota.usageLimit()),
+                    () -> assertEquals(QuestionDriver.HARNESS_ERROR_OUTPUT, quota.rule()),
+                    () -> assertFalse(QuestionDriver.quotaFields(quota).containsKey(QuestionDriver.RESETS_AT)));
+        }
+    }
+
+    @Nested
     @DisplayName("environment and executable")
     class EnvironmentAndExecutable {
 

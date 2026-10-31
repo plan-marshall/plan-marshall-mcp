@@ -187,6 +187,37 @@ class ResultLimitsTest {
     }
 
     @Test
+    @DisplayName("names the runs the usage limit refused with their reset and the runs not started after them")
+    void usageLimit() throws Exception {
+        var refused = run("claude", "i1");
+        refused.put(RunView.NOT_RUN, true);
+        refused.put(QuestionDriver.QUOTA_ERROR, true);
+        refused.put(QuestionDriver.QUOTA_RULE, QuestionDriver.RATE_LIMIT_EVENT);
+        refused.put(QuestionDriver.RESETS_AT, "2026-11-01T08:00:00Z");
+        var unnamed = run("claude", "i3");
+        unnamed.put(RunView.NOT_RUN, true);
+        var stopped = invocation("PT20M");
+        stopped.put(QuestionResults.INVOCATION, "i2");
+        stopped.put(QuestionResults.USAGE_LIMIT_STOPPED_RUNS, 5);
+        var none = result();
+        var onlyRefused = result();
+        var onlyStopped = result();
+        var quota = result();
+
+        ResultLimits.limitOfUsageLimit(none, List.of(run("claude", "i1")), List.of(invocation("PT20M")));
+        ResultLimits.limitOfUsageLimit(onlyRefused, List.of(refused, unnamed), List.of());
+        ResultLimits.limitOfUsageLimit(onlyStopped, List.of(), List.of(stopped));
+        ResultLimits.limitOfQuotaErrors(quota, List.of(refused));
+
+        assertAll(() -> assertEquals(List.of(), limits(none)),
+                () -> assertTrue(limits(onlyRefused).getFirst().contains("i1 (resets 2026-11-01T08:00:00Z)")),
+                () -> assertTrue(limits(onlyRefused).getFirst().contains("i3 (resets not named)")),
+                () -> assertTrue(limits(onlyRefused).getFirst().endsWith("remaining runs.")),
+                () -> assertTrue(limits(onlyStopped).getFirst().contains("i2 5")),
+                () -> assertEquals(List.of(), limits(quota)));
+    }
+
+    @Test
     @DisplayName("names continuations without a worker and warm askers that exited, each on its own")
     void continuationGaps() {
         var gap = run("claude", "i1");

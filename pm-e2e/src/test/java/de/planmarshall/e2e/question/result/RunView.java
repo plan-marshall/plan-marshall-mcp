@@ -49,6 +49,15 @@ boolean evidenceMissing) {
     public static final String SETUP_FAILED = "setup_failed";
     /** The field of a run record with the reason of its {@value #SETUP_FAILED}: the first line of git's output. */
     public static final String SETUP_FAILED_REASON = "setup_failed_reason";
+    /**
+     * The field of a run record, and the group column, of a run the account's usage limit refused
+     * ({@code QuestionDriver#RATE_LIMIT_EVENT}): it counts as not run, in no figure and no verdict, never as a failure.
+     */
+    public static final String NOT_RUN = "not_run";
+    /** The field of a {@value #NOT_RUN} run record with its reason. */
+    public static final String NOT_RUN_REASON = "not_run_reason";
+    /** The reason of a run refused by the account's usage limit. */
+    public static final String USAGE_LIMIT = "usage_limit";
 
     static final String EVENT = "event";
     static final String WORKER = "worker";
@@ -149,6 +158,23 @@ boolean evidenceMissing) {
      */
     public static boolean setupFailed(JsonNode run) {
         return run.path(SETUP_FAILED).asBoolean();
+    }
+
+    /**
+     * @param run a run record
+     * @return whether the account's usage limit refused it, so that it counts as not run ({@value #NOT_RUN})
+     */
+    public static boolean notRun(JsonNode run) {
+        return run.path(NOT_RUN).asBoolean();
+    }
+
+    /**
+     * @param run a run record
+     * @return whether it is in no figure and no verdict of its group: its setup failed ({@value #SETUP_FAILED}) or the
+     *         usage limit refused it ({@value #NOT_RUN})
+     */
+    public static boolean excluded(JsonNode run) {
+        return setupFailed(run) || notRun(run);
     }
 
     /**

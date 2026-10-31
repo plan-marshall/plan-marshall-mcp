@@ -25,6 +25,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -109,6 +110,23 @@ public final class QuestionDriver implements AutoCloseable {
     public static final String QUOTA_RULE = "quota_rule";
     /** The rule of {@link #quotaDetail(String, List)}: the harness's own error output only. */
     public static final String HARNESS_ERROR_OUTPUT = "harness_error_output";
+    /**
+     * The rule of {@link #rateLimitRefusal(List)}: a {@code rate_limit_event} line of Claude Code's {@code stream-json}
+     * output whose {@code rate_limit_info.status} is neither {@code allowed} nor {@code allowed_warning}, a refusal by
+     * the account's usage limit. Such a refusal does not contain the text {@code quota}.
+     */
+    public static final String RATE_LIMIT_EVENT = "rate_limit_event";
+    /** The field of a {@value #RATE_LIMIT_EVENT} quota error with the event's {@code rate_limit_info.status}. */
+    public static final String RATE_LIMIT_STATUS = "rate_limit_status";
+    /** The field of a {@value #RATE_LIMIT_EVENT} quota error with the event's {@code rateLimitType}. */
+    public static final String RATE_LIMIT_TYPE = "rate_limit_type";
+    /**
+     * The field of a {@value #RATE_LIMIT_EVENT} quota error with the event's {@code resetsAt}: an ISO instant when the
+     * event gives epoch seconds, else its text, empty when it gives none.
+     */
+    public static final String RESETS_AT = "resets_at";
+    /** The statuses of a {@code rate_limit_event} under which the account may run. */
+    static final Set<String> RATE_LIMIT_ALLOWED = Set.of("allowed", "allowed_warning");
 
     /** The event the stub logs when a generation's relay connects: the first event the generation causes itself. */
     public static final String CONNECTED = "connected";
@@ -296,15 +314,34 @@ public final class QuestionDriver implements AutoCloseable {
     }
 
     /**
-     * A worker generation whose harness answered with a quota or limit error ({@link #QUOTA_PATTERN} in its own error
-     * output, {@link #quotaDetail(String, List)}): Antigravity said {@code Individual quota reached} in the last three
-     * Antigravity runs of the Q3 smoke pass.
+     * A worker generation whose harness answered with a quota or limit error: {@link #QUOTA_PATTERN} in its own error
+     * output ({@value #HARNESS_ERROR_OUTPUT}, {@link #quotaDetail(String, List)}; Antigravity said
+     * {@code Individual quota reached} in the last three Antigravity runs of the Q3 smoke pass), or a refusing
+     * {@code rate_limit_event} of Claude Code ({@value #RATE_LIMIT_EVENT}, {@link #rateLimitRefusal(List)}).
      *
      * @param worker     the worker id
      * @param generation its generation
-     * @param detail     the matching line ({@link #quotaDetail(String, List)})
+     * @param detail     the matching line
+     * @param rule       the rule it was detected by: {@value #HARNESS_ERROR_OUTPUT} or {@value #RATE_LIMIT_EVENT}
+     * @param refusal    the refusing event under {@value #RATE_LIMIT_EVENT}, {@code null} under the other rule
      */
-    public record QuotaError(String worker, int generation, String detail) {
+    public record QuotaError(String worker, int generation, String detail, String rule, RateLimitRefusal refusal) {
+
+        /** @return whether the account's usage limit refused the generation ({@value #RATE_LIMIT_EVENT}) */
+        public boolean usageLimit() {
+            return refusal != null;
+        }
+    }
+
+    /**
+     * A {@code rate_limit_event} of Claude Code that refuses the generation ({@value #RATE_LIMIT_EVENT}).
+     *
+     * @param status        its {@code rate_limit_info.status}
+     * @param rateLimitType its {@code rateLimitType}, empty when it gives none
+     * @param resetsAt      its {@code resetsAt} as an ISO instant (from epoch seconds) or as given, empty when none
+     * @param line          the output line
+     */
+    public record RateLimitRefusal(String status, String rateLimitType, String resetsAt, String line) {
     }
 
     private final QuestionStub.Settings stubSettings;
@@ -1909,8 +1946,10 @@ public final class QuestionDriver implements AutoCloseable {
      * structured output matches {@link #QUOTA_PATTERN}, whether or not it still runs and whether or not
      * it called the stub. A tool's input or result, the assistant's text or a file the worker read never ends the run:
      * before 2026-10-23 every output line was matched, and two R4 large-work runs were ended because the worker read a
-     * repository file that contains the word. The first detection is logged as the event {@code quota_error} with the
-     * rule.
+     * repository file that contains the word. Else a refusing {@code rate_limit_event} of its structured output is
+     * one ({@value #RATE_LIMIT_EVENT}, {@link #rateLimitRefusal(List)}): Claude Code's usage limit refuses without the
+     * word. The first detection is logged as the event {@code quota_error} with the rule and, for a refusal, the
+     * event's status, {@code rateLimitType} and {@code resetsAt}.
      *
      * @param worker a worker
      * @return its quota error, empty when none
@@ -1922,18 +1961,98 @@ public final class QuestionDriver implements AutoCloseable {
         if (known != null) {
             return Optional.of(known);
         }
-        var detail = quotaDetail(stderr(worker), jsonLinesSoFar(worker.output()));
-        if (detail.isEmpty()) {
+        var outputs = jsonLinesSoFar(worker.output());
+        var quota = quotaError(worker.id(), worker.generation(), stderr(worker), outputs);
+        if (quota.isEmpty()) {
             return Optional.empty();
         }
-        var quota = new QuotaError(worker.id(), worker.generation(), detail.get());
-        if (quotaErrors.putIfAbsent(key, quota) == null) {
+        if (quotaErrors.putIfAbsent(key, quota.get()) == null) {
             var fields = identity(worker);
-            fields.put("detail", quota.detail());
-            fields.put(QUOTA_RULE, HARNESS_ERROR_OUTPUT);
+            fields.putAll(quotaFields(quota.get()));
             stub.event(QUOTA_ERROR, fields);
         }
         return Optional.of(quotaErrors.get(key));
+    }
+
+    /**
+     * The quota error of one generation by both rules: its own error output first ({@value #HARNESS_ERROR_OUTPUT}),
+     * else a refusing {@code rate_limit_event} ({@value #RATE_LIMIT_EVENT}).
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param stderr     what it wrote to {@code stderr}
+     * @param outputs    its arrival-stamped output lines ({@code at}, {@code line})
+     * @return its quota error, empty when none
+     */
+    public static Optional<QuotaError> quotaError(String worker, int generation, String stderr,
+            List<JsonNode> outputs) {
+        var detail = quotaDetail(stderr, outputs);
+        if (detail.isPresent()) {
+            return Optional.of(new QuotaError(worker, generation, detail.get(), HARNESS_ERROR_OUTPUT, null));
+        }
+        return rateLimitRefusal(outputs).map(refusal -> new QuotaError(worker, generation, refusal.line(),
+                RATE_LIMIT_EVENT, refusal));
+    }
+
+    /**
+     * @param quota a quota error
+     * @return the fields its event and its run record carry: {@code detail}, {@value #QUOTA_RULE} and, for a refusal
+     *         ({@value #RATE_LIMIT_EVENT}), {@value #RATE_LIMIT_STATUS}, {@value #RATE_LIMIT_TYPE} and
+     *         {@value #RESETS_AT}
+     */
+    public static Map<String, String> quotaFields(QuotaError quota) {
+        var fields = new LinkedHashMap<String, String>();
+        fields.put("detail", quota.detail());
+        fields.put(QUOTA_RULE, quota.rule());
+        if (quota.usageLimit()) {
+            fields.put(RATE_LIMIT_STATUS, quota.refusal().status());
+            fields.put(RATE_LIMIT_TYPE, quota.refusal().rateLimitType());
+            fields.put(RESETS_AT, quota.refusal().resetsAt());
+        }
+        return fields;
+    }
+
+    /**
+     * The refusal by the account's usage limit in a worker's structured output, the rule {@value #RATE_LIMIT_EVENT}:
+     * the first {@code rate_limit_event} line whose {@code rate_limit_info.status} is neither {@code allowed} nor
+     * {@code allowed_warning}. Every {@code rate_limit_event} of the parallel-limit runs had {@code allowed_warning};
+     * any other status refuses. An event without a textual {@code rate_limit_info.status} names no status and is no
+     * refusal: a refusal stops the invocation, so it is read only where the event states it.
+     *
+     * @param outputs the arrival-stamped output lines ({@code at}, {@code line})
+     * @return the first refusing event, empty when none
+     */
+    public static Optional<RateLimitRefusal> rateLimitRefusal(List<JsonNode> outputs) {
+        for (var output : outputs) {
+            var text = output.path("line").asText();
+            JsonNode line;
+            try {
+                line = QuestionStub.JSON.readTree(text);
+            } catch (JsonProcessingException _) {
+                continue;
+            }
+            if (line == null || !RATE_LIMIT_EVENT.equals(line.path("type").asText())) {
+                continue;
+            }
+            var info = line.path("rate_limit_info");
+            var status = info.path("status");
+            if (status.isTextual() && !RATE_LIMIT_ALLOWED.contains(status.asText())) {
+                return Optional.of(new RateLimitRefusal(status.asText(), info.path("rateLimitType").asText(""),
+                        resetsAt(info.path("resetsAt")), text));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * @param value a {@code resetsAt}
+     * @return an ISO instant for epoch seconds, the text of any other value, empty when there is none
+     */
+    static String resetsAt(JsonNode value) {
+        if (value.isIntegralNumber()) {
+            return Instant.ofEpochSecond(value.asLong()).toString();
+        }
+        return value.isMissingNode() || value.isNull() ? "" : value.asText();
     }
 
     /**

@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 
 import de.planmarshall.e2e.question.QuestionLoopMeasurement.Config;
@@ -180,7 +181,8 @@ class QuestionLoopMeasurementTest {
         @Test
         @DisplayName("plans Q6 with a vote and a consult run, Q7 fresh on Claude Code with a restart")
         void plansQ6AndQ7() {
-            var q6 = QuestionLoopMeasurement.q6(config(), List.of(QuestionFixtures.probe()));
+            var q6 = QuestionLoopMeasurement.q6(config(), List.of(QuestionFixtures.probe()),
+                    QuestionLoopMeasurement.q6Kinds(null));
             var q7 = QuestionLoopMeasurement.q7(config(), List.of(QuestionFixtures.probe()), Duration.ofMinutes(1));
 
             assertAll(() -> assertEquals(8, q6.stream().filter(plan -> "vote".equals(plan.kind())).count()),
@@ -188,6 +190,32 @@ class QuestionLoopMeasurementTest {
                     () -> assertEquals(2, q7.size()),
                     () -> assertTrue(q7.stream().allMatch(plan -> plan.host() == Host.CLAUDE && plan.restart()
                             && !plan.warm() && QuestionLoopMeasurement.endsAskerBeforeOpenTime(plan))));
+        }
+
+        @Test
+        @DisplayName("plans Q6 with the consultation part only when the kinds name consult")
+        void plansQ6ConsultOnly() {
+            var q6 = QuestionLoopMeasurement.q6(config(), List.of(QuestionFixtures.probe()),
+                    QuestionLoopMeasurement.q6Kinds(" Consult "));
+
+            assertAll(() -> assertEquals(8, q6.size()),
+                    () -> assertTrue(q6.stream().allMatch(plan -> "consult".equals(plan.kind()))),
+                    () -> assertTrue(q6.stream().filter(plan -> plan.host() == Host.CLAUDE)
+                            .noneMatch(QuestionLoopMeasurement::usesOpenCode)));
+        }
+
+        @ParameterizedTest
+        @CsvSource(delimiter = '|', value = {"''|vote,consult", "vote|vote", "consult,vote|vote,consult",
+                "consult, consult|consult"})
+        @DisplayName("reads the kinds of Q6 in the order vote, consult, both by default")
+        void readsQ6Kinds(String value, String expected) {
+            assertEquals(List.of(expected.split(",")), QuestionLoopMeasurement.q6Kinds(value));
+        }
+
+        @Test
+        @DisplayName("refuses an unknown kind of Q6")
+        void refusesUnknownQ6Kind() {
+            assertThrows(IllegalArgumentException.class, () -> QuestionLoopMeasurement.q6Kinds("consult,quorum"));
         }
 
         @Test
@@ -220,7 +248,7 @@ class QuestionLoopMeasurementTest {
         }
 
         @Test
-        @DisplayName("plans R4 small work in every form and loads the large work only when it has runs")
+        @DisplayName("plans R4 small and large work in hold, resume and fallback, loading the large work only with runs")
         void plansR4() throws Exception {
             var small = QuestionLoopMeasurement.r4(config(List.of(Host.CLAUDE), 1, 0, Warmth.FRESH,
                     OpenCodeDataHome.GLOBAL, List.of()), () -> {
@@ -230,8 +258,10 @@ class QuestionLoopMeasurementTest {
                     OpenCodeDataHome.GLOBAL, List.of()), () -> List.of(QuestionFixtures.probe()));
 
             assertAll(() -> assertEquals(3, small.size()),
-                    () -> assertEquals(4, large.size()),
-                    () -> assertTrue(large.stream().noneMatch(plan -> plan.form() == Form.FALLBACK)));
+                    () -> assertEquals(6, large.size()),
+                    () -> assertEquals(Set.of(Form.HOLD, Form.RESUME, Form.FALLBACK),
+                            large.stream().map(RunPlan::form).collect(Collectors.toSet())),
+                    () -> assertEquals(2, large.stream().filter(plan -> plan.form() == Form.FALLBACK).count()));
         }
 
         @Test
@@ -383,6 +413,56 @@ class QuestionLoopMeasurementTest {
                     () -> assertTrue(invocation.path("setup_stop_message").asText().contains("s1")),
                     () -> assertTrue(record.path(RunView.SETUP_FAILED).asBoolean()),
                     () -> assertEquals("no clone", record.path(RunView.SETUP_FAILED_REASON).asText()));
+        }
+
+        @Test
+        @DisplayName("stops every further run after a usage-limit refusal and records it as not run with the reset")
+        void usageLimitStops() {
+            var stops = new SetupStops();
+            var refusal = new QuestionDriver.RateLimitRefusal("rejected", "seven_day", "2026-11-01T08:00:00Z", "{}");
+            var record = QuestionStub.JSON.createObjectNode();
+
+            var before = stops.stop("s1");
+            QuestionLoopMeasurement.recordQuotaError(record, new QuestionDriver.QuotaError("w1", 1, "{}",
+                    QuestionDriver.RATE_LIMIT_EVENT, refusal));
+            stops.refused(record.path(QuestionDriver.RESETS_AT).asText());
+            stops.refused("");
+            var other = stops.stop("s2");
+            var same = stops.stop("s1");
+            var invocation = stops.applyTo(QuestionStub.JSON.createObjectNode());
+
+            assertAll(() -> assertFalse(before), () -> assertTrue(other), () -> assertTrue(same),
+                    () -> assertTrue(stops.any()),
+                    () -> assertEquals(2, invocation.path("usage_limit_refused").asInt()),
+                    () -> assertEquals(2, invocation.path(QuestionResults.USAGE_LIMIT_STOPPED_RUNS).asInt()),
+                    () -> assertEquals("[\"2026-11-01T08:00:00Z\"]",
+                            invocation.path("usage_limit_resets_at").toString()),
+                    () -> assertFalse(invocation.has(RunView.SETUP_FAILED)),
+                    () -> assertTrue(RunView.notRun(record)),
+                    () -> assertEquals(RunView.USAGE_LIMIT, record.path(RunView.NOT_RUN_REASON).asText()),
+                    () -> assertEquals(QuestionDriver.RATE_LIMIT_EVENT,
+                            record.path(QuestionDriver.QUOTA_RULE).asText()),
+                    () -> assertEquals("seven_day", record.path(QuestionDriver.RATE_LIMIT_TYPE).asText()),
+                    () -> assertEquals("rejected", record.path(QuestionDriver.RATE_LIMIT_STATUS).asText()),
+                    () -> assertTrue(record.path(QuestionDriver.QUOTA_ERROR).asBoolean()));
+        }
+
+        @Test
+        @DisplayName("records a quota error of the harness's own output as a run, not as not run")
+        void harnessQuotaError() {
+            var stops = new SetupStops();
+            var record = QuestionStub.JSON.createObjectNode();
+
+            QuestionLoopMeasurement.recordQuotaError(record, new QuestionDriver.QuotaError("w1", 2,
+                    "error: quota reached", QuestionDriver.HARNESS_ERROR_OUTPUT, null));
+
+            assertAll(() -> assertFalse(RunView.notRun(record)),
+                    () -> assertEquals(QuestionDriver.HARNESS_ERROR_OUTPUT,
+                            record.path(QuestionDriver.QUOTA_RULE).asText()),
+                    () -> assertEquals(2, record.path("quota_error_generation").asInt()),
+                    () -> assertFalse(record.has(QuestionDriver.RESETS_AT)),
+                    () -> assertFalse(stops.any()),
+                    () -> assertFalse(stops.stop("s1")));
         }
 
         @Test

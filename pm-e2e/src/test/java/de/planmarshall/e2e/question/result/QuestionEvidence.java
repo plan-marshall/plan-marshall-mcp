@@ -102,7 +102,7 @@ public final class QuestionEvidence {
     /** The group columns every run lands in, as the analysis lists them. */
     private static final List<String> COLUMNS = List.of(QuestionDriver.EARLY_EXIT,
             QuestionDriver.CONTINUATION_EARLY_EXIT, QuestionDriver.VOTER_EARLY_EXIT, QuestionDriver.QUOTA_ERROR,
-            RunView.SETUP_FAILED, QuestionResults.EVIDENCE_MISSING);
+            RunView.SETUP_FAILED, RunView.NOT_RUN, QuestionResults.EVIDENCE_MISSING);
 
     private QuestionEvidence() {
     }

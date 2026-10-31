@@ -133,6 +133,11 @@ public final class QuestionResults {
     public static final String QUESTION_BOUND = "question_bound";
     /** The field of an invocation record with the runs it did not start because a setup of the scenario failed. */
     public static final String SETUP_STOPPED_RUNS = "setup_stopped_runs";
+    /**
+     * The field of an invocation record with the runs it did not start because the account's usage limit refused an
+     * earlier run of it.
+     */
+    public static final String USAGE_LIMIT_STOPPED_RUNS = "usage_limit_stopped_runs";
     /** The group column, and the result's total, of the runs whose stub log is missing. */
     public static final String EVIDENCE_MISSING = "evidence_missing";
     /** The mark of a verdict judged with runs whose stub log is missing. */
@@ -339,7 +344,7 @@ public final class QuestionResults {
                 continue;
             }
             var planned = recorded.path(PLANNED_RUNS).asInt(-1);
-            var stopped = recorded.path(SETUP_STOPPED_RUNS).asInt(0);
+            var stopped = recorded.path(SETUP_STOPPED_RUNS).asInt(0) + recorded.path(USAGE_LIMIT_STOPPED_RUNS).asInt(0);
             if (planned >= 0 && entry.getValue() + stopped < planned) {
                 node.put("incomplete", true);
                 node.put(PLANNED_RUNS, planned);
@@ -566,7 +571,7 @@ public final class QuestionResults {
         }
         counts(views, group);
         figures(item, views, group, first);
-        var launched = views.stream().filter(view -> !RunView.setupFailed(view.run())).toList();
+        var launched = views.stream().filter(view -> !RunView.excluded(view.run())).toList();
         var passes = launched.isEmpty() ? List.<Boolean>of() : judge(item, launched, group);
         var verdict = R4.equals(item) ? Verdict.NONE : Scale.verdict(passes);
         var passing = (int) passes.stream().filter(Boolean::booleanValue).count();
@@ -647,8 +652,9 @@ public final class QuestionResults {
      * Adds the counts every group reports beside its item's figures, so that no run leaves the result without a trace:
      * {@code runs}, {@code timed_out}, {@code no_ask}, the early exits, {@code quota_error}, {@code setup_failed},
      * {@code asked}, {@code continued}, {@code submitted}, {@code answer_fallback_own}, {@value #TIMED_OUT_RUNS},
-     * {@value #CONTINUATION_NOT_STARTED} and, where a run lost its stub log, {@value #EVIDENCE_MISSING}. A quota-error
-     * run counts in {@code quota_error} only, a run whose setup failed in {@code setup_failed} only, and a run without
+     * {@value #CONTINUATION_NOT_STARTED}, where a run lost its stub log {@value #EVIDENCE_MISSING}, and where the
+     * usage limit refused a run {@value RunView#NOT_RUN}. A quota-error run counts in {@code quota_error} only, a run
+     * whose setup failed in {@code setup_failed} only, a refused run in {@value RunView#NOT_RUN} only, and a run without
      * its stub log in {@value #EVIDENCE_MISSING} only. They are reported figures: no verdict reads them.
      *
      * @param views the group's runs
@@ -662,8 +668,13 @@ public final class QuestionResults {
             tally.put(name, 0);
         }
         var evidenceMissing = 0;
+        var notRun = 0;
         var timedOutRuns = QuestionStub.JSON.createArrayNode();
         for (var view : views) {
+            if (RunView.notRun(view.run())) {
+                notRun++;
+                continue;
+            }
             if (RunView.setupFailed(view.run())) {
                 tally.merge(RunView.SETUP_FAILED, 1, Integer::sum);
                 continue;
@@ -699,6 +710,9 @@ public final class QuestionResults {
         group.set(TIMED_OUT_RUNS, timedOutRuns);
         if (evidenceMissing > 0) {
             group.put(EVIDENCE_MISSING, evidenceMissing);
+        }
+        if (notRun > 0) {
+            group.put(RunView.NOT_RUN, notRun);
         }
     }
 

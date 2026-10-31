@@ -181,19 +181,21 @@ public final class RunReadings {
 
     /**
      * Whether a run met a quota or limit error of its harness: its record says so under the rule
-     * {@value QuestionDriver#HARNESS_ERROR_OUTPUT}, or the harness's own error output of its workers shows one
-     * ({@link QuestionDriver#quotaDetail(String, List)}).
+     * {@value QuestionDriver#HARNESS_ERROR_OUTPUT} or {@value QuestionDriver#RATE_LIMIT_EVENT}, or the harness's own
+     * error output of its workers shows one ({@link QuestionDriver#quotaDetail(String, List)}), or their structured
+     * output carries a refusing {@code rate_limit_event} ({@link QuestionDriver#rateLimitRefusal(List)}).
      *
      * @param view a run
      * @return whether its harness answered with a quota error
      * @throws IOException if a worker's {@code stderr} cannot be read
      */
     public static boolean quotaError(RunView view) throws IOException {
-        if (view.run().path(QuestionDriver.QUOTA_ERROR).asBoolean()
-                && QuestionDriver.HARNESS_ERROR_OUTPUT.equals(view.run().path(QuestionDriver.QUOTA_RULE).asText())) {
+        var rule = view.run().path(QuestionDriver.QUOTA_RULE).asText();
+        if (view.run().path(QuestionDriver.QUOTA_ERROR).asBoolean() && (QuestionDriver.HARNESS_ERROR_OUTPUT.equals(rule)
+                || QuestionDriver.RATE_LIMIT_EVENT.equals(rule))) {
             return true;
         }
-        return QuestionDriver.quotaDetail(stderrOf(view), view.outputs()).isPresent();
+        return QuestionDriver.quotaError("", 0, stderrOf(view), view.outputs()).isPresent();
     }
 
     private static String stderrOf(RunView view) throws IOException {

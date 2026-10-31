@@ -36,6 +36,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Stream;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -105,7 +106,8 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * runs only where a run reached the bound before ({@link Scale#nextQ5Bound}), recorded per run as
  * {@value QuestionResults#QUESTION_BOUND}.</li>
  * <li>{@code pm.experiment.q4.other-host}, {@code pm.experiment.q6.quorum-a} and {@code pm.experiment.q6.quorum-b}
- * ({@code <host>:<model>}), {@code pm.experiment.q7.open} ({@code PT1H}).</li>
+ * ({@code <host>:<model>}), {@value #Q6_KINDS_PROPERTY} ({@code vote,consult}; {@code consult} runs the consultation
+ * part of Q6 without the vote runs), {@code pm.experiment.q7.open} ({@code PT1H}).</li>
  * <li>{@code pm.experiment.r1.durations} and {@value #R2_AGES} (ISO durations, comma-separated): {@code PT1H}, the
  * longest first; a shorter one runs only after a failure ({@link Scale#nextDuration}).</li>
  * <li>{@code pm.experiment.r2.expired-session}: a session id of an expired session, none by default.</li>
@@ -121,7 +123,8 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * resume or fallback, and recovers after a loss is the driver's ({@link QuestionDriver}); how each operator answer was
  * composed is recorded per run ({@link AnswerAudit#recordComposition}) and logged as {@value #ANSWER_COMPOSED}. A run
  * whose fixture setup fails is recorded as {@value RunView#SETUP_FAILED}, and the invocation does not start its
- * remaining runs of that scenario ({@link SetupStops}). {@link QuestionReaggregation} writes the result again from the
+ * remaining runs of that scenario; a run the account's usage limit refuses is recorded as {@value RunView#NOT_RUN}
+ * with the reset time, and the invocation starts no further run ({@link SetupStops}). {@link QuestionReaggregation} writes the result again from the
  * existing records, without a run.
  */
 @DisplayName("Question loop measurement: one item with -Dpm.experiment.question=<item>")
@@ -138,6 +141,8 @@ class QuestionLoopMeasurement {
     static final String Q5_BOUND_PROPERTY = "pm.experiment.q5.bound";
     /** The property of the R2 ages. */
     static final String R2_AGES = "pm.experiment.r2.ages";
+    /** The property of the kinds of Q6 an invocation runs ({@link #q6Kinds(String)}). */
+    static final String Q6_KINDS_PROPERTY = "pm.experiment.q6.kinds";
     /** The event the measurement logs for each part of an operator answer it composed. */
     static final String ANSWER_COMPOSED = "answer_composed";
     /** The model of Claude Code unless {@code pm.experiment.model.claude} names another. */
@@ -164,6 +169,7 @@ class QuestionLoopMeasurement {
     private static final String DECISION = "decision";
     private static final String ENTITY = "entity";
     private static final String VOTE = "vote";
+    private static final String CONSULT = "consult";
     private static final String QUORUM_A = "quorum-a";
     private static final Duration POLL = Duration.ofSeconds(1);
     private static final Duration ANSWER_WAIT = Duration.ofMinutes(15);
@@ -360,7 +366,7 @@ class QuestionLoopMeasurement {
         var stops = new SetupStops();
         try {
             execute(plans, config, id, stops);
-            if (stops.failures() > 0) {
+            if (stops.any()) {
                 QuestionResults.recordInvocation(config.results(), stops.applyTo(invocation));
             }
         } finally {
@@ -566,7 +572,8 @@ class QuestionLoopMeasurement {
                         Optional.ofNullable(System.getProperty("pm.experiment.q4.other-host")).map(Host::of)));
             }
             case "Q5" -> plans.addAll(q5(config, limit(QuestionFixtures.twoFlaws(config.cache()), config)));
-            case "Q6" -> plans.addAll(q6(config, limit(QuestionFixtures.applyAnswer(config.cache()), config)));
+            case "Q6" -> plans.addAll(q6(config, limit(QuestionFixtures.applyAnswer(config.cache()), config),
+                    q6Kinds(System.getProperty(Q6_KINDS_PROPERTY))));
             case "Q7" -> plans.addAll(q7(config, limit(QuestionFixtures.applyAnswer(config.cache()), config),
                     Duration.parse(System.getProperty("pm.experiment.q7.open", "PT1H"))));
             case "R1" -> plans.addAll(r1(config, durations("pm.experiment.r1.durations", LONGEST)));
@@ -628,19 +635,46 @@ class QuestionLoopMeasurement {
     }
 
     /**
-     * Plans Q6: per host, warmth, fixture and run index a vote run and a consult run.
+     * Plans Q6: per host, warmth, fixture and run index a run of each selected kind, a vote run and a consult run by
+     * default ({@value #Q6_KINDS_PROPERTY}).
      *
      * @param config   the configuration
      * @param fixtures the fixtures, limited
+     * @param kinds    the kinds to run ({@link #q6Kinds(String)})
      * @return the planned runs
      */
-    static List<RunPlan> q6(Config config, List<Fixture> fixtures) {
+    static List<RunPlan> q6(Config config, List<Fixture> fixtures, List<String> kinds) {
         var plans = new ArrayList<RunPlan>();
         each(config, config.hosts(), fixtures, (host, warm, fixture, index) -> {
-            plans.add(RunPlan.of("Q6", index, host, config.model(host), warm, Form.FALLBACK, fixture, VOTE));
-            plans.add(RunPlan.of("Q6", index, host, config.model(host), warm, Form.FALLBACK, fixture, "consult"));
+            for (var kind : kinds) {
+                plans.add(RunPlan.of("Q6", index, host, config.model(host), warm, Form.FALLBACK, fixture, kind));
+            }
         });
         return plans;
+    }
+
+    /**
+     * The kinds of Q6 to run, {@value #Q6_KINDS_PROPERTY}: {@code vote} and {@code consult}, comma-separated. The
+     * Claude Code part runs the consultation part only ({@code consult}); the vote quorum belongs to the second part.
+     *
+     * @param value the property's value, {@code null} or blank for both
+     * @return the kinds, in the order vote, consult
+     * @throws IllegalArgumentException for any other kind
+     */
+    static List<String> q6Kinds(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of(VOTE, CONSULT);
+        }
+        var named = new HashSet<String>();
+        for (var part : value.split(",")) {
+            var kind = part.strip().toLowerCase(Locale.ROOT);
+            if (!VOTE.equals(kind) && !CONSULT.equals(kind)) {
+                throw new IllegalArgumentException(Q6_KINDS_PROPERTY + ": unknown kind '" + part.strip()
+                        + "', expected vote or consult");
+            }
+            named.add(kind);
+        }
+        return Stream.of(VOTE, CONSULT).filter(named::contains).toList();
     }
 
     /**
@@ -738,9 +772,9 @@ class QuestionLoopMeasurement {
     }
 
     /**
-     * Plans R4: the probe as small work with every continuation form and {@link Config#runs()} runs, and the large
-     * work with {@link Config#largeRuns()} runs in the continuation forms hold and resume. A part with zero runs plans
-     * no run, and the large work is not loaded then.
+     * Plans R4: the probe as small work and the large work, each with every continuation form (hold, resume and
+     * fallback, decision of 2026-10-31), the small work with {@link Config#runs()} runs and the large work with
+     * {@link Config#largeRuns()} runs. A part with zero runs plans no run, and the large work is not loaded then.
      *
      * @param config the configuration
      * @param large  the large work
@@ -757,7 +791,7 @@ class QuestionLoopMeasurement {
         });
         if (config.largeRuns() > 0) {
             each(config.largeRuns(), config.warmth(), config.hosts(), large.load(), (host, warm, fixture, index) -> {
-                for (var form : List.of(Form.HOLD, Form.RESUME)) {
+                for (var form : Form.values()) {
                     plans.add(RunPlan.of("R4", index, host, config.model(host), warm, form, fixture, ENTITY)
                             .holding(Duration.ofMinutes(1)));
                 }
@@ -925,27 +959,63 @@ class QuestionLoopMeasurement {
     // --- execution ---
 
     /**
-     * The setup failures of one invocation ({@value RunView#SETUP_FAILED}): the scenarios whose setup failed in a run,
-     * how many runs failed so, and how many runs of those scenarios were not started afterwards. The invocation's record
-     * is appended again after its runs with the counts ({@link #applyTo(ObjectNode)}).
+     * The stops of one invocation: the setup failures ({@value RunView#SETUP_FAILED}) — the scenarios whose setup failed
+     * in a run, how many runs failed so, and how many runs of those scenarios were not started afterwards — and the
+     * refusals by the account's usage limit ({@value RunView#NOT_RUN}), after the first of which no further run of the
+     * invocation starts. The invocation's record is appended again after its runs with the counts
+     * ({@link #applyTo(ObjectNode)}).
      */
     static final class SetupStops {
 
         private final Set<String> failed = ConcurrentHashMap.newKeySet();
         private final AtomicInteger failures = new AtomicInteger();
         private final AtomicInteger stopped = new AtomicInteger();
+        private final AtomicInteger refusals = new AtomicInteger();
+        private final AtomicInteger limitStopped = new AtomicInteger();
+        private final Set<String> resets = ConcurrentHashMap.newKeySet();
 
         /**
          * @param fixture a fixture
-         * @return whether a run of it failed its setup, so that its remaining runs are not started; counts the run as
-         *         stopped then
+         * @return whether the run is not started: the usage limit refused an earlier run of the invocation, or a run of
+         *         the fixture failed its setup; counts the run as stopped for that reason then
          */
         boolean stop(String fixture) {
+            if (refusals.get() > 0) {
+                limitStopped.incrementAndGet();
+                return true;
+            }
             if (!failed.contains(fixture)) {
                 return false;
             }
             stopped.incrementAndGet();
             return true;
+        }
+
+        /**
+         * Records a run the account's usage limit refused.
+         *
+         * @param resetsAt the reset time the refusal named, empty when none
+         */
+        void refused(String resetsAt) {
+            refusals.incrementAndGet();
+            if (!resetsAt.isEmpty()) {
+                resets.add(resetsAt);
+            }
+        }
+
+        /** @return the runs the usage limit refused */
+        int refusals() {
+            return refusals.get();
+        }
+
+        /** @return the runs not started because the usage limit refused an earlier run of the invocation */
+        int limitStopped() {
+            return limitStopped.get();
+        }
+
+        /** @return whether the invocation's record needs the counts appended again */
+        boolean any() {
+            return failures() > 0 || refusals() > 0;
         }
 
         /**
@@ -970,11 +1040,24 @@ class QuestionLoopMeasurement {
 
         /**
          * @param invocation the invocation record written before the runs
-         * @return a copy with {@value RunView#SETUP_FAILED} (the count), {@code setup_failed_fixtures},
-         *         {@value QuestionResults#SETUP_STOPPED_RUNS} and a message that names the stop
+         * @return a copy with, after a setup failure, {@value RunView#SETUP_FAILED} (the count),
+         *         {@code setup_failed_fixtures}, {@value QuestionResults#SETUP_STOPPED_RUNS} and a message that names the
+         *         stop, and after a refusal {@code usage_limit_refused} (the count),
+         *         {@value QuestionResults#USAGE_LIMIT_STOPPED_RUNS}, {@code usage_limit_resets_at} and a message
          */
         ObjectNode applyTo(ObjectNode invocation) {
             var copy = invocation.deepCopy();
+            if (refusals() > 0) {
+                copy.put("usage_limit_refused", refusals());
+                copy.put(QuestionResults.USAGE_LIMIT_STOPPED_RUNS, limitStopped());
+                var times = copy.putArray("usage_limit_resets_at");
+                resets.stream().sorted().forEach(times::add);
+                copy.put("usage_limit_stop_message", "the account's usage limit refused " + refusals() + " run(s); "
+                        + "the invocation's remaining " + limitStopped() + " run(s) were not started");
+            }
+            if (failures() == 0) {
+                return copy;
+            }
             copy.put(RunView.SETUP_FAILED, failures());
             var fixtures = copy.putArray("setup_failed_fixtures");
             failed.stream().sorted().forEach(fixtures::add);
@@ -1060,7 +1143,34 @@ class QuestionLoopMeasurement {
         } catch (IOException | IllegalStateException e) {
             record.put("error", String.valueOf(e.getMessage()));
         }
+        if (RunView.notRun(record)) {
+            stops.refused(record.path(QuestionDriver.RESETS_AT).asText(""));
+        }
         QuestionResults.recordRun(config.results(), record);
+    }
+
+    /**
+     * Records a run ended by a quota error of a worker's harness: {@value QuestionDriver#QUOTA_ERROR}, its rule, worker,
+     * generation and detail. A refusal by the account's usage limit ({@value QuestionDriver#RATE_LIMIT_EVENT}) also
+     * records the event's status, {@code rateLimitType} and {@code resetsAt} and marks the run as not run
+     * ({@value RunView#NOT_RUN}, reason {@value RunView#USAGE_LIMIT}): it is never a failed run.
+     *
+     * @param record the run record
+     * @param quota  the quota error
+     */
+    static void recordQuotaError(ObjectNode record, QuestionDriver.QuotaError quota) {
+        record.put(QuestionDriver.QUOTA_ERROR, true);
+        record.put(QuestionDriver.QUOTA_RULE, quota.rule());
+        record.put("quota_error_worker", quota.worker());
+        record.put("quota_error_generation", quota.generation());
+        record.put("quota_error_detail", quota.detail());
+        if (quota.usageLimit()) {
+            record.put(QuestionDriver.RATE_LIMIT_STATUS, quota.refusal().status());
+            record.put(QuestionDriver.RATE_LIMIT_TYPE, quota.refusal().rateLimitType());
+            record.put(QuestionDriver.RESETS_AT, quota.refusal().resetsAt());
+            record.put(RunView.NOT_RUN, true);
+            record.put(RunView.NOT_RUN_REASON, RunView.USAGE_LIMIT);
+        }
     }
 
     /**
@@ -1555,11 +1665,7 @@ class QuestionLoopMeasurement {
             if (!ended) {
                 driver.quotaError().ifPresent(value -> {
                     ended = true;
-                    record.put(QuestionDriver.QUOTA_ERROR, true);
-                    record.put(QuestionDriver.QUOTA_RULE, QuestionDriver.HARNESS_ERROR_OUTPUT);
-                    record.put("quota_error_worker", value.worker());
-                    record.put("quota_error_generation", value.generation());
-                    record.put("quota_error_detail", value.detail());
+                    recordQuotaError(record, value);
                 });
             }
             if (!ended) {

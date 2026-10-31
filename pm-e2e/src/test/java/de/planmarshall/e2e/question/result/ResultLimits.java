@@ -95,6 +95,7 @@ public final class ResultLimits {
         limitOfContinuationEarlyExits(result, runs);
         limitOfContinuationsByHold(result, runs);
         limitOfQuotaErrors(result, runs);
+        limitOfUsageLimit(result, runs, contributing.values());
         limitOfSetupFailures(result, runs, contributing.values());
         limitOfMissingEvidence(result, runs);
         limitOfAnswerFallbacks(result, runs);
@@ -295,7 +296,7 @@ public final class ResultLimits {
     public static void limitOfQuotaErrors(ObjectNode result, List<JsonNode> runs) throws IOException {
         var affected = new ArrayList<String>();
         for (var run : runs) {
-            if (RunReadings.quotaError(RunView.read(run))) {
+            if (!RunView.notRun(run) && RunReadings.quotaError(RunView.read(run))) {
                 affected.add(runId(run));
             }
         }
@@ -307,6 +308,45 @@ public final class ResultLimits {
                     + QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR + " is the verdict without them, an additional "
                     + "figure: " + String.join(", ", affected) + ".");
         }
+    }
+
+    /**
+     * Adds a limit naming the runs the account's usage limit refused ({@value RunView#NOT_RUN},
+     * {@value QuestionDriver#RATE_LIMIT_EVENT}) with the reset time their refusal named, and the runs their invocations
+     * did not start afterwards ({@value QuestionResults#USAGE_LIMIT_STOPPED_RUNS}). Such a run is not run: it is in
+     * no figure and no verdict, never a failed run or a failed item, and its group runs again once the account may run.
+     *
+     * @param result       the result
+     * @param runs         its run records
+     * @param contributing the invocations that contributed run records
+     */
+    public static void limitOfUsageLimit(ObjectNode result, List<JsonNode> runs, Collection<JsonNode> contributing) {
+        var refused = new ArrayList<String>();
+        for (var run : runs) {
+            if (RunView.notRun(run)) {
+                var resets = run.path(QuestionDriver.RESETS_AT).asText("");
+                refused.add(runId(run) + " (resets " + (resets.isEmpty() ? "not named" : resets) + ")");
+            }
+        }
+        var stopped = new ArrayList<String>();
+        for (var invocation : contributing) {
+            var count = invocation.path(QuestionResults.USAGE_LIMIT_STOPPED_RUNS).asInt(0);
+            if (count > 0) {
+                stopped.add(invocation.path(INVOCATION).asText() + " " + count);
+            }
+        }
+        if (refused.isEmpty() && stopped.isEmpty()) {
+            return;
+        }
+        var text = new StringBuilder("A run the account's usage limit refused (a rate_limit_event of Claude Code whose "
+                + "status is neither allowed nor allowed_warning) is not run: it counts as " + RunView.NOT_RUN
+                + " only, is in no figure and no verdict of its group, and is never a failed run or a failed item; its "
+                + "group runs again once the account may run");
+        text.append(refused.isEmpty() ? "." : ": " + String.join("; ", refused) + ".");
+        text.append(" A refusal stops the invocation's remaining runs");
+        text.append(stopped.isEmpty() ? "." : ", not run and not counted as missing: " + String.join(", ", stopped)
+                + ".");
+        limit(result, text.toString());
     }
 
     /**

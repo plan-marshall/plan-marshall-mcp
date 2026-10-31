@@ -686,6 +686,27 @@ class QuestionResultsTest {
         }
 
         @Test
+        @DisplayName("a run the usage limit refused is not run: in no count, no figure and no verdict")
+        void notRun() throws Exception {
+            var passing = run("Q1", Map.of(), List.of(event(RunReadings.ASKED, WORKER, 1, 10)));
+            var refused = run("Q1", Map.of(QuestionDriver.QUOTA_ERROR, true, QuestionDriver.QUOTA_RULE,
+                    QuestionDriver.RATE_LIMIT_EVENT, RunView.NOT_RUN, true, QuestionDriver.RESETS_AT,
+                    "2026-11-01T08:00:00Z"), List.of());
+
+            var result = QuestionResults.evaluate("Q1", List.of(passing, refused));
+
+            var group = result.path("groups").get(0);
+            assertAll(
+                    () -> assertEquals(2, group.path("runs").asInt()),
+                    () -> assertEquals(1, group.path(RunView.NOT_RUN).asInt()),
+                    () -> assertEquals(0, group.path(QuestionDriver.QUOTA_ERROR).asInt()),
+                    () -> assertEquals(0, group.path("no_ask").asInt()),
+                    () -> assertEquals(1, group.path("judged_runs").asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertFalse(group.has(QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR)));
+        }
+
+        @Test
         @DisplayName("Q5 in the open form passes on a second, never repeated question")
         void q5Open() throws Exception {
             var second = run("Q5", Map.of(), List.of(asked("one", 10), asked("two", 11)));

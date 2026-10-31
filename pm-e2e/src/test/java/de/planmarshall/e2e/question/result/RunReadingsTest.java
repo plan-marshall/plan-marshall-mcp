@@ -399,8 +399,15 @@ class RunReadingsTest {
                     + directory.resolve("out.jsonl") + "\"}]}");
             var none = view("{\"workers\":[{\"worker\":\"w1\"},{\"output\":\"out.jsonl\"}]}");
             var byRule = view("{\"quota_error\":true,\"quota_rule\":\"" + QuestionDriver.HARNESS_ERROR_OUTPUT + "\"}");
+            var byRefusalRule = view("{\"quota_error\":true,\"quota_rule\":\"" + QuestionDriver.RATE_LIMIT_EVENT
+                    + "\"}");
+            var refusalLine = QuestionStub.JSON.createObjectNode();
+            refusalLine.put("line", "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\"}}");
+            var byRefusal = new RunView(json("{}"), List.of(), List.of(), List.of(refusalLine));
 
             assertAll(
+                    () -> assertTrue(RunReadings.quotaError(byRefusalRule)),
+                    () -> assertTrue(RunReadings.quotaError(byRefusal)),
                     () -> assertTrue(RunReadings.quotaError(byStderr)),
                     () -> assertTrue(RunReadings.quotaError(byOutput)),
                     () -> assertFalse(RunReadings.quotaError(none)),
