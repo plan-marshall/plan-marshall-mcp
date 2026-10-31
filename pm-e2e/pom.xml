@@ -119,6 +119,14 @@
                                             <excludes>
                                                 <exclude>**/*Test.class</exclude>
                                                 <exclude>**/*Test$*.class</exclude>
+                                                <!-- Named exclusion (operator decision): QuestionLoopMeasurement.Session
+                                                     drives a live harness (it launches workers, answers and supervises
+                                                     them), so it runs only in a measured run against a live harness and
+                                                     never in a build. Not copied here, it is in neither the JaCoCo
+                                                     report nor the check; every other question-loop class keeps the
+                                                     80 % instruction and branch bar. -->
+                                                <exclude>de/planmarshall/e2e/question/QuestionLoopMeasurement$Session.class</exclude>
+                                                <exclude>de/planmarshall/e2e/question/QuestionLoopMeasurement$Session$*.class</exclude>
                                             </excludes>
                                         </resource>
                                     </resources>

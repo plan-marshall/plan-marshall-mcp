@@ -102,6 +102,30 @@ class QuestionResultsTest {
         return run;
     }
 
+    /** Writes a run's stub log and one worker output file of the given lines, each arriving at 20. */
+    private ObjectNode run(String item, Map<String, Object> fields, List<ObjectNode> events, List<String> outputs)
+            throws IOException {
+        var run = run(item, fields, events);
+        var file = Path.of(run.path(RunView.STUB_DIR).asText()).resolveSibling("w-1.jsonl");
+        var lines = new StringBuilder();
+        for (var output : outputs) {
+            var stamped = QuestionStub.JSON.createObjectNode();
+            stamped.put("at", 20);
+            stamped.put("line", output);
+            lines.append(QuestionStub.JSON.writeValueAsString(stamped)).append('\n');
+        }
+        Files.writeString(file, lines, StandardCharsets.UTF_8);
+        run.putArray("workers").addObject().put("worker", WORKER).put("generation", 1).put("output", file.toString());
+        return run;
+    }
+
+    private static ObjectNode event(String name, String worker, int generation, long at, String field,
+            String value) {
+        var event = event(name, worker, generation, at);
+        event.put(field, value);
+        return event;
+    }
+
     private ObjectNode q4Run(String answer) throws IOException {
         return run("Q4", Map.of("reference", REFERENCE, "reply", "option"),
                 List.of(event(RunReadings.ASKED, WORKER, 1, 10), submitted(answer, 20)));
@@ -353,6 +377,470 @@ class QuestionResultsTest {
             assertAll(
                     () -> assertEquals("none", result.path("verdict").asText()),
                     () -> assertEquals(1, result.path("groups").get(0).path("answer_follows_reference").asInt()));
+        }
+    }
+
+    @Nested
+    @DisplayName("the item rules read from the stub log and the worker output")
+    class ItemChecks {
+
+        private static final String TOOL_USE = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":"
+                + "\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}]}}";
+
+        private ObjectNode closed(String task, String outcome, long at) {
+            return event("closed", WORKER, 1, at, "task", task).put("outcome", outcome);
+        }
+
+        @Test
+        @DisplayName("Q2: a fixture run asks and guesses nothing, a control does not ask, and no host tool or prose")
+        void q2() throws Exception {
+            var asking = run("Q2", Map.of(), List.of(event(RunReadings.ASKED, WORKER, 1, 10)));
+            var guessing = run("Q2", Map.of(), List.of(submitted("guess", 20)));
+            var hostTool = run("Q2", Map.of(), List.of(event(RunReadings.ASKED, WORKER, 1, 10)),
+                    List.of(TOOL_USE, "{\"type\":\"user\",\"is_error\":true}"));
+            var hanging = run("Q2", Map.of(QuestionResults.TIMED_OUT, true), List.of(), List.of(TOOL_USE));
+            var prose = run("Q2", Map.of(), List.of(event(RunReadings.ASKED, WORKER, 1, 10)),
+                    List.of("{\"type\":\"result\",\"result\":\"Which one shall I take?\"}"));
+            var quietControl = run("Q2", Map.of("control", true), List.of());
+            var askingControl = run("Q2", Map.of("control", true), List.of(event(RunReadings.ASKED, WORKER, 1, 10)));
+
+            var group = QuestionResults.evaluate("Q2", List.of(asking, guessing, hostTool, hanging, prose,
+                    quietControl, askingControl)).path("groups").get(0);
+
+            assertAll(
+                    () -> assertEquals(2, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(2, group.path("host_question_tool_calls").asInt()),
+                    () -> assertEquals(1, group.path("host_question_tool_behaviour").path("fails").asInt()),
+                    () -> assertEquals(1, group.path("host_question_tool_behaviour").path("hangs").asInt()),
+                    () -> assertEquals(1, group.path("prose_questions").asInt()),
+                    () -> assertEquals(5, group.path("q1_fixture_runs").asInt()),
+                    () -> assertEquals(1, group.path("guessed_decisions").asInt()),
+                    () -> assertEquals(2, group.path("control_runs").asInt()),
+                    () -> assertEquals(1, group.path("control_asks").asInt()));
+        }
+
+        @Test
+        @DisplayName("Q3: a warm worker stops at its next pm_wait with its worktree unchanged")
+        void q3Warm() throws Exception {
+            var warm = run("Q3", Map.of("form", "warm"), List.of(
+                    event("worktree_digest", WORKER, 1, 5, "digest", "a"),
+                    event(RunReadings.ASKED, WORKER, 1, 10),
+                    event("wait_started", WORKER, 1, 15),
+                    event("worktree_digest", WORKER, 1, 16, "digest", "a")));
+
+            var group = QuestionResults.evaluate("Q3", List.of(warm)).path("groups").get(0);
+
+            assertAll(
+                    () -> assertEquals(1, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(1, group.path("stopped").asInt()),
+                    () -> assertEquals(1, group.path("worktree_unchanged").asInt()),
+                    () -> assertEquals(1, group.path("asked_then_pm_wait").asInt()),
+                    () -> assertEquals(5, group.path("per_run").get(0)
+                            .path(QuestionResults.ASK_TO_NEXT_PM_WAIT_MS).asLong()),
+                    () -> assertEquals("pass", group.path(QuestionResults.VERDICT_BY_NEXT_PM_WAIT).asText()));
+        }
+
+        @Test
+        @DisplayName("Q3: a fresh worker that exits with a changed worktree fails, and a run without an ask fails")
+        void q3Fresh() throws Exception {
+            var changed = run("Q3", Map.of(), List.of(
+                    event("worktree_digest", WORKER, 1, 5, "digest", "a"),
+                    event(RunReadings.ASKED, WORKER, 1, 10),
+                    event(RunReadings.WORKER_EXITED, WORKER, 1, 30),
+                    event("worktree_digest", WORKER, 1, 31, "digest", "b"),
+                    event("answer_sent", "operator", 0, 50)));
+            var silent = run("Q3", Map.of(), List.of());
+
+            var group = QuestionResults.evaluate("Q3", List.of(changed, silent)).path("groups").get(0);
+
+            var perRun = group.path("per_run");
+            assertAll(
+                    () -> assertEquals(0, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(1, group.path("stopped").asInt()),
+                    () -> assertEquals(0, group.path("worktree_unchanged").asInt()),
+                    () -> assertEquals(1, group.path("exits_observed").asInt()),
+                    () -> assertEquals(1, group.path("exits_before_answer").asInt()),
+                    () -> assertEquals(20, perRun.get(0).path(QuestionResults.ASK_TO_EXIT_MS).asLong()),
+                    () -> assertTrue(perRun.get(0).path(QuestionResults.ASK_TO_NEXT_PM_WAIT_MS).isNull()),
+                    () -> assertTrue(perRun.get(1).path(QuestionResults.ASK_TO_EXIT_MS).isNull()));
+        }
+
+        @Test
+        @DisplayName("Q6: votes valid within the re-offer budget, the decision applied, no mix-up")
+        void q6() throws Exception {
+            var valid = run("Q6", Map.of("reference", "B"), List.of(
+                    event("vote_refused", WORKER, 1, 5, "task", "vote-2"),
+                    event("vote_refused", WORKER, 1, 6, "task", "vote-2"),
+                    closed("vote-1", RunReadings.SUBMITTED, 10),
+                    closed("vote-2", RunReadings.SUBMITTED, 11),
+                    closed("plan-1", RunReadings.SUBMITTED, 12),
+                    event("adjudicated", WORKER, 1, 13, "outcome", "decided"),
+                    event("consulted", WORKER, 1, 14, "question", "Which?"),
+                    event("consultation_delivered", WORKER, 1, 15),
+                    submitted("B", 20)));
+            var mixed = run("Q6", Map.of("reference", "B"), List.of(
+                    closed("vote-1", "lost", 10),
+                    event("link_refused", WORKER, 1, 11, "state", "consulting"),
+                    event("consulted", WORKER, 1, 12, "question", "Which?"),
+                    asked("which?", 13),
+                    submitted("A", 20)));
+
+            var group = QuestionResults.evaluate("Q6", List.of(valid, mixed)).path("groups").get(0);
+
+            assertAll(
+                    () -> assertEquals(1, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(3, group.path("votes").asInt()),
+                    () -> assertEquals(2, group.path("valid_votes").asInt()),
+                    () -> assertEquals(1, group.path("decided_by_quorum").asInt()),
+                    () -> assertEquals(3, group.path("consultation_question_mixups").asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.NOT_FOLLOWING_REFERENCE_RUNS).size()));
+        }
+
+        private ObjectNode asked(String question, long at) {
+            var asked = event(RunReadings.ASKED, WORKER, 1, at);
+            asked.putArray("question_texts").add(question);
+            asked.put("decision", "d1");
+            return asked;
+        }
+
+        private List<ObjectNode> q7Events(boolean leaks) {
+            var events = new ArrayList<ObjectNode>();
+            events.add(asked("Which?", 10));
+            if (leaks) {
+                events.add(event(QuestionDriver.CONNECTED, "w-2", 1, 12));
+                events.add(event("wait_started", "w-2", 1, 13));
+            }
+            events.add(event(QuestionDriver.OPEN_TIME_STARTED, "", 0, 15));
+            if (leaks) {
+                events.add(event("wait_end", "w-2", 1, 18));
+            }
+            events.add(event(RunReadings.WORKER_EXITED, "w-warm", 1, 20));
+            events.add(event("stub_restart", "", 0, 25));
+            events.add(event(QuestionResults.CONTINUED, "w-3", 1, 30, "task", "t-c").put("decision", "d1"));
+            events.add(event(QuestionResults.OFFERED, "w-3", 1, 32, "task", "t-c"));
+            events.add(event(RunReadings.ACKNOWLEDGED, "w-3", 1, 33, "task", "t-c"));
+            if (leaks) {
+                events.add(event(QuestionResults.OFFERED, "w-4", 1, 34, "task", "t-c"));
+                events.add(event("released", "w-4", 1, 35, "task", "t-c").put("reason", "fenced"));
+                events.add(event(QuestionResults.OFFERED, "w-5", 1, 36, "task", "t1-x"));
+            }
+            events.add(event("answer_recorded", "", 0, 40));
+            return events;
+        }
+
+        @Test
+        @DisplayName("Q7: no slot held while open, the warm worker recycled, the stub restarted, one delivery")
+        void q7() throws Exception {
+            var fields = Map.<String, Object>of("warm_worker", "w-warm", "task_id", "t1");
+            var clean = run("Q7", Map.of("warm_worker", "w-warm", "task_id", "t1",
+                    QuestionDriver.ASKER_ENDED_BY_DRIVER, true), q7Events(false));
+            var leaking = run("Q7", fields, q7Events(true));
+            var unanswered = run("Q7", fields, List.of(asked("Which?", 10)));
+
+            var group = QuestionResults.evaluate("Q7", List.of(clean, leaking, unanswered)).path("groups").get(0);
+
+            var leaked = group.path(QuestionResults.Q7_RUNS).get(1);
+            assertAll(
+                    () -> assertEquals(1, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(2, group.path(QuestionResults.LEASES_WHILE_OPEN).asInt()),
+                    () -> assertEquals(2, group.path("warm_worker_recycled").asInt()),
+                    () -> assertEquals(2, group.path("stub_restarted_while_open").asInt()),
+                    () -> assertEquals(1, group.path("answer_delivered_exactly_once").asInt()),
+                    () -> assertEquals(1, group.path("open_time_unavailable").asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.HELD_WAIT_GENERATIONS).asLong()),
+                    () -> assertEquals(1, group.path(QuestionResults.FENCED_UNACKNOWLEDGED_OFFER_RUNS).asInt()),
+                    () -> assertEquals(1, group.path(QuestionDriver.ASKER_ENDED_BY_DRIVER).asInt()),
+                    () -> assertEquals(1, leaked.path("offers_while_open").asLong()),
+                    () -> assertEquals(1, leaked.path(QuestionResults.WORKERS_CONNECTED_WHILE_OPEN).asLong()),
+                    () -> assertEquals(3, leaked.path(QuestionResults.HELD_WAIT_MS).asLong()),
+                    () -> assertTrue(leaked.path(QuestionResults.OFFER_COUNTED_TWICE_FENCED).asBoolean()),
+                    () -> assertEquals(QuestionResults.UNAVAILABLE, group.path(QuestionResults.Q7_RUNS).get(2)
+                            .path(QuestionResults.HELD_WAIT_MS).asText()));
+        }
+
+        @Test
+        @DisplayName("Q7: a group without any open time reports its held figures as unavailable")
+        void q7Unavailable() throws Exception {
+            var unanswered = run("Q7", Map.of("warm_worker", "w-warm"), List.of(asked("Which?", 10)));
+
+            var group = QuestionResults.evaluate("Q7", List.of(unanswered)).path("groups").get(0);
+
+            assertAll(
+                    () -> assertEquals(QuestionResults.UNAVAILABLE, group.path(QuestionResults.HELD_WAIT_MS).asText()),
+                    () -> assertEquals(QuestionResults.UNAVAILABLE,
+                            group.path(QuestionResults.WORKERS_CONNECTED_WHILE_OPEN).asText()));
+        }
+
+        private ObjectNode resumed(String name, String worker, int generation, long at) {
+            var event = event(name, worker, generation, at);
+            event.put("resumed", true);
+            return event;
+        }
+
+        @Test
+        @DisplayName("R2: a positive run continues from the session, a negative resume must not hang")
+        void r2() throws Exception {
+            var acknowledged = event(RunReadings.ACKNOWLEDGED, WORKER, 2, 35, "kind", "answer");
+            acknowledged.put("after_ms", 500);
+            var canary = event(RunReadings.SUBMITTED, WORKER, 2, 40);
+            canary.putObject("args").put("canary", "canary-1");
+            var fields = Map.<String, Object>of("age_s", 3600, "canary", "canary-1", "restart", true, "negative",
+                    false);
+            var continued = run("R2", fields, List.of(event(RunReadings.ASKED, WORKER, 1, 10),
+                    resumed(RunReadings.ANSWER_DELIVERED, WORKER, 2, 30), acknowledged, canary));
+            var lost = run("R2", Map.of("age_s", 3600, "canary", "canary-1", "negative", false),
+                    List.of(event(RunReadings.ASKED, WORKER, 1, 10)));
+            var failedAtOnce = run("R2", Map.of("age_s", 3600, "negative", true), List.of(
+                    resumed(RunReadings.WORKER_STARTED, WORKER, 2, 10),
+                    event(RunReadings.WORKER_EXITED, WORKER, 2, 20).put("exit", 1)));
+            var hung = run("R2", Map.of("age_s", 3600, "negative", true), List.of());
+
+            var result = QuestionResults.evaluate("R2", List.of(continued, lost, failedAtOnce, hung));
+
+            var negative = group(result, "negative=true");
+            var positive = group(result, "negative=false");
+            assertAll(
+                    () -> assertEquals(1, positive.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(500, positive.path("ack_after_ms_median").asLong()),
+                    () -> assertEquals(1, positive.path(QuestionResults.RESTART_BREAKDOWN).path("true")
+                            .path("continued_from_session").asInt()),
+                    () -> assertEquals(1, positive.path(QuestionResults.RESTART_BREAKDOWN).path("false")
+                            .path("runs").asInt()),
+                    () -> assertEquals(1, negative.path("negative_outcomes").path(RunReadings.FAILED_AT_ONCE)
+                            .asInt()),
+                    () -> assertEquals(1, negative.path("hung_resumes").asInt()),
+                    () -> assertEquals(1, negative.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertTrue(result.has("max_age_seconds")),
+                    () -> assertEquals(1, result.path(QuestionResults.DESCENT).size()));
+        }
+
+        private JsonNode group(JsonNode result, String part) {
+            for (var group : result.path("groups")) {
+                if (group.path("group").asText().contains(part)) {
+                    return group;
+                }
+            }
+            throw new AssertionError("no group with " + part);
+        }
+
+        @Test
+        @DisplayName("R3: a fault detected within the deadline and continued once passes; early or undetected fails")
+        void r3Detection() throws Exception {
+            var fault = Map.<String, Object>of("fault", Fault.KILL.name());
+            var detected = event(QuestionDriver.LOST_DETECTED, WORKER, 1, 100, "by", "silence");
+            detected.put("after_ms", 20_000);
+            var withinDeadline = run("R3", fault, List.of(event(RunReadings.ASKED, WORKER, 1, 10),
+                    event(QuestionDriver.FAULT_INJECTED, WORKER, 1, 50),
+                    event(RunReadings.ANSWER_DELIVERED, WORKER, 1, 60),
+                    event(RunReadings.WORKER_EXITED, WORKER, 1, 90), detected,
+                    event(QuestionResults.CONTINUED, "w-2", 1, 110)));
+            var tooEarly = event(QuestionDriver.LOST_DETECTED, WORKER, 1, 100, "by", "ack");
+            tooEarly.put("after_ms", 5_000);
+            var early = run("R3", fault, List.of(event(RunReadings.ASKED, WORKER, 1, 10), tooEarly));
+            var undetected = run("R3", fault, List.of(event(RunReadings.ASKED, WORKER, 1, 10),
+                    event(QuestionDriver.FAULT_INJECTED, WORKER, 1, 50)));
+            var nothing = run("R3", fault, List.of());
+
+            var group = QuestionResults.evaluate("R3", List.of(withinDeadline, early, undetected, nothing))
+                    .path("groups").get(0);
+
+            var exits = group.path(QuestionResults.EXIT_OBSERVATION);
+            assertAll(
+                    () -> assertEquals(1, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(1, group.path("detected_within_deadline").asInt()),
+                    () -> assertEquals(1, group.path("detected_early").asInt()),
+                    () -> assertEquals(1, group.path("continued_exactly_once").asInt()),
+                    () -> assertEquals(1, exits.path("exits_observed").asInt()),
+                    () -> assertEquals(1, exits.path("exits_before_detection").asInt()),
+                    () -> assertEquals("silence", exits.path("runs").get(0).path("detection_by").asText()),
+                    () -> assertTrue(exits.path("runs").get(2).path("detection_by").isNull()),
+                    () -> assertTrue(exits.path("runs").get(3).path("worker").isNull()));
+        }
+
+        @Test
+        @DisplayName("the counts keep quota errors, failed setups and continuation exits apart and add verdicts")
+        void counts() throws Exception {
+            var passing = run("Q1", Map.of(), List.of(event(RunReadings.ASKED, WORKER, 1, 10)));
+            var quota = run("Q1", Map.of(QuestionDriver.QUOTA_ERROR, true, QuestionDriver.QUOTA_RULE,
+                    QuestionDriver.HARNESS_ERROR_OUTPUT), List.of());
+            var exited = run("Q1", Map.of(QuestionDriver.CONTINUATION_EARLY_EXIT, true), List.of());
+            var timedOut = run("Q1", Map.of(QuestionResults.TIMED_OUT, true), List.of(
+                    event(RunReadings.ASKED, WORKER, 1, 10), event(QuestionResults.CONTINUED, WORKER, 2, 20),
+                    submitted("x", 30)));
+            var setup = run("Q1", Map.of(RunView.SETUP_FAILED, true), List.of());
+
+            var result = QuestionResults.evaluate("Q1", List.of(passing, quota, exited, timedOut, setup));
+
+            var group = result.path("groups").get(0);
+            assertAll(
+                    () -> assertEquals(5, group.path("runs").asInt()),
+                    () -> assertEquals(1, group.path(QuestionDriver.QUOTA_ERROR).asInt()),
+                    () -> assertEquals(1, group.path(RunView.SETUP_FAILED).asInt()),
+                    () -> assertEquals(1, group.path(QuestionDriver.CONTINUATION_EARLY_EXIT).asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.TIMED_OUT).asInt()),
+                    () -> assertEquals(1, group.path(QuestionResults.TIMED_OUT_RUNS).size()),
+                    () -> assertEquals(1, group.path(QuestionResults.CONTINUED).asInt()),
+                    () -> assertEquals(4, group.path("judged_runs").asInt()),
+                    () -> assertTrue(group.has(QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR)),
+                    () -> assertTrue(result.has(QuestionResults.VERDICT_WITHOUT_QUOTA_ERROR)));
+        }
+
+        @Test
+        @DisplayName("Q5 in the open form passes on a second, never repeated question")
+        void q5Open() throws Exception {
+            var second = run("Q5", Map.of(), List.of(asked("one", 10), asked("two", 11)));
+            var repeated = run("Q5", Map.of(), List.of(asked("one", 10), asked("One", 11)));
+
+            var group = QuestionResults.evaluate("Q5", List.of(second, repeated)).path("groups").get(0);
+
+            assertAll(
+                    () -> assertEquals(1, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(1, group.path("same_question_twice").asInt()),
+                    () -> assertFalse(group.path("bound_form").asBoolean()));
+        }
+
+        @Test
+        @DisplayName("Q5 in the bound form passes on a judgment or an infeasible report without loss or prose")
+        void q5Bound() throws Exception {
+            var judgment = event(RunReadings.SUBMITTED, WORKER, 1, 20);
+            judgment.putObject("args").put("judgment", "take B");
+            var judged = run("Q5", Map.of("bound", true), List.of(asked("one", 10), judgment));
+            var infeasible = run("Q5", Map.of("bound", true), List.of(asked("one", 10),
+                    event("infeasible", WORKER, 1, 20), closed("plan-1", "lost", 21)));
+            var neither = run("Q5", Map.of("bound", true), List.of(asked("one", 10)));
+
+            var group = QuestionResults.evaluate("Q5", List.of(judged, infeasible, neither)).path("groups").get(0);
+
+            assertAll(
+                    () -> assertEquals(1, group.path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals(2, group.path("ended_with_judgment_or_infeasible").asInt()),
+                    () -> assertEquals(1, group.path("lost_tasks").asInt()));
+        }
+
+        @Test
+        @DisplayName("R1 fails a run without an ask")
+        void r1WithoutAsk() throws Exception {
+            var silent = run("R1", Map.of("duration_s", 300, "canary", "canary-1"), List.of());
+
+            var result = QuestionResults.evaluate("R1", List.of(silent));
+
+            assertAll(
+                    () -> assertEquals(0, result.path("groups").get(0).path(QuestionResults.PASSING_RUNS).asInt()),
+                    () -> assertEquals("none", result.path(QuestionResults.DESCENT)
+                            .path("claude claude-haiku-4-5 fresh").path("next").asText()));
+        }
+
+        @Test
+        @DisplayName("Q4 reports the runs whose continuing task ran on another host")
+        void q4CrossHost() throws Exception {
+            var cross = q4Run(REFERENCE);
+            cross.put("continue_host", "opencode");
+
+            var group = QuestionResults.evaluate("Q4", List.of(cross, q4Run(REFERENCE))).path("groups").get(0);
+
+            var node = group.path(QuestionResults.CROSS_HOST_RUNS);
+            assertAll(
+                    () -> assertEquals(1, node.path("runs").asInt()),
+                    () -> assertEquals("opencode", node.path("continue_hosts").get(0).asText()),
+                    () -> assertEquals(1, node.path(RunReadings.ASKED).asInt()));
+        }
+    }
+
+    @Nested
+    @DisplayName("the connections and open time of Q7")
+    class Connections {
+
+        @Test
+        @DisplayName("a connection ends at its disconnect, its exit or the stub's stop, else stays open")
+        void connections() {
+            var events = List.<JsonNode>of(
+                    event(QuestionDriver.CONNECTED, "w-1", 1, 1),
+                    event(QuestionDriver.CONNECTED, "w-2", 1, 2),
+                    event(QuestionDriver.CONNECTED, "w-2", 1, 3),
+                    event("disconnected", "w-1", 1, 5),
+                    event(RunReadings.WORKER_EXITED, "w-3", 1, 6),
+                    event("pm_state", "", 0, 7),
+                    event("stub_stopped", "", 0, 10),
+                    event(QuestionDriver.CONNECTED, "w-4", 2, 11));
+
+            var links = QuestionResults.connections(events);
+
+            assertEquals(List.of(new QuestionResults.Link("w-1", 1, 1, 5), new QuestionResults.Link("w-2", 1, 2, 10),
+                    new QuestionResults.Link("w-4", 2, 11, Long.MAX_VALUE)), links);
+        }
+
+        @Test
+        @DisplayName("an open time needs an ask, an answer and a start before the answer")
+        void openTime() {
+            var run = QuestionStub.JSON.createObjectNode();
+            var asked = event(RunReadings.ASKED, WORKER, 1, 10);
+            var started = event(QuestionDriver.OPEN_TIME_STARTED, "", 0, 15);
+            var lateStart = event(QuestionDriver.OPEN_TIME_STARTED, "", 0, 50);
+            var answered = event("answer_recorded", "", 0, 40);
+
+            assertAll(
+                    () -> assertEquals(Optional.of(new QuestionResults.OpenTime(15, 40)), QuestionResults.openTime(
+                            new RunView(run, List.of(asked, started, answered), List.of(), List.of()))),
+                    () -> assertEquals(Optional.empty(), QuestionResults.openTime(
+                            new RunView(run, List.of(asked, lateStart, answered), List.of(), List.of()))),
+                    () -> assertEquals(Optional.empty(), QuestionResults.openTime(
+                            new RunView(run, List.of(started, answered), List.of(), List.of()))),
+                    () -> assertEquals(Optional.empty(), QuestionResults.openTime(
+                            new RunView(run, List.of(asked, answered), List.of(), List.of()))));
+        }
+    }
+
+    @Nested
+    @DisplayName("the target of a result")
+    class Target {
+
+        @Test
+        @DisplayName("the system properties name the suffix, the invocations and the missing-evidence override")
+        void fromProperties() {
+            System.setProperty(QuestionResults.ResultTarget.SUFFIX, " part ");
+            System.setProperty(QuestionResults.ResultTarget.INVOCATIONS, "inv-2, ,inv-1");
+            System.setProperty(QuestionResults.ResultTarget.ALLOW_MISSING_EVIDENCE, "true");
+            try {
+                var target = QuestionResults.ResultTarget.fromProperties();
+
+                assertAll(
+                        () -> assertEquals("part", target.suffix()),
+                        () -> assertEquals(Set.of("inv-1", "inv-2"), target.invocations()),
+                        () -> assertTrue(target.allowMissingEvidence()),
+                        () -> assertEquals("Q4-part.json", target.file("Q4").getFileName().toString()));
+            } finally {
+                System.clearProperty(QuestionResults.ResultTarget.SUFFIX);
+                System.clearProperty(QuestionResults.ResultTarget.INVOCATIONS);
+                System.clearProperty(QuestionResults.ResultTarget.ALLOW_MISSING_EVIDENCE);
+            }
+        }
+
+        @Test
+        @DisplayName("without properties the target is the item's file over all invocations")
+        void defaults() {
+            var target = QuestionResults.ResultTarget.fromProperties();
+
+            assertAll(
+                    () -> assertEquals("Q4.json", target.file("Q4").getFileName().toString()),
+                    () -> assertTrue(target.invocations().isEmpty()),
+                    () -> assertFalse(target.allowMissingEvidence()));
+        }
+
+        @Test
+        @DisplayName("a bad suffix, invocations without a suffix and an invocation without records are refused")
+        void refusals() {
+            var record = QuestionStub.JSON.createObjectNode().put("invocation", "inv-1");
+            var target = new QuestionResults.ResultTarget(directory, "part", Set.of("inv-1", "inv-9"), false);
+
+            assertAll(
+                    () -> assertThrows(IllegalArgumentException.class,
+                            () -> new QuestionResults.ResultTarget(directory, "-bad", Set.of(), false)),
+                    () -> assertThrows(IllegalArgumentException.class,
+                            () -> new QuestionResults.ResultTarget(directory, null, Set.of("inv-1"), false)),
+                    () -> assertThrows(IllegalArgumentException.class, () -> target.select(List.of(record))),
+                    () -> assertEquals(1, new QuestionResults.ResultTarget(directory, "part", Set.of("inv-1"), false)
+                            .select(List.of(record, QuestionStub.JSON.createObjectNode().put("invocation",
+                                    "inv-2"))).size()));
         }
     }
 

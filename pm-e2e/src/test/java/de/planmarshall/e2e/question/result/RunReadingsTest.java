@@ -15,6 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -23,11 +26,14 @@ import java.util.Optional;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import de.planmarshall.e2e.question.driver.Host;
+import de.planmarshall.e2e.question.driver.QuestionDriver;
 import de.planmarshall.e2e.question.fixture.QuestionFixtures;
+import de.planmarshall.e2e.question.result.RunReadings.ContinuationExit;
 import de.planmarshall.e2e.question.stub.QuestionStub;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -300,6 +306,133 @@ class RunReadingsTest {
             assertAll(() -> assertEquals(Optional.of(30L), RunReadings.reWaitAfterCut(run, cut)),
                     () -> assertTrue(RunReadings.cutSurvived(run, cut)),
                     () -> assertTrue(RunReadings.hostCut(view("{}")).isEmpty()));
+        }
+    }
+
+    @Nested
+    @DisplayName("generations, harness output and sessions")
+    class Generations {
+
+        private static final String ASKED = "{\"event\":\"asked\",\"worker\":\"w1\",\"generation\":1}";
+        private static final String STARTED = "{\"event\":\"worker_started\",\"worker\":\"w1\",\"generation\":2}";
+        private static final String CONNECTED = "{\"event\":\"connected\",\"worker\":\"w1\",\"generation\":2}";
+
+        @TempDir
+        Path directory;
+
+        private static String exited(int exit) {
+            return "{\"event\":\"worker_exited\",\"worker\":\"w1\",\"generation\":2,\"exit\":" + exit + "}";
+        }
+
+        @Test
+        @DisplayName("a later generation of an asker that exits by itself without a call is a continuation exit")
+        void continuationExit() {
+            var call = "{\"event\":\"call\",\"worker\":\"w1\",\"generation\":2}";
+
+            assertAll(
+                    () -> assertEquals(ContinuationExit.EXITED, RunReadings.continuationExit(
+                            view("{}", ASKED, STARTED, CONNECTED, exited(0)))),
+                    () -> assertEquals(ContinuationExit.NONE, RunReadings.continuationExit(
+                            view("{}", ASKED, STARTED, CONNECTED, exited(143)))),
+                    () -> assertEquals(ContinuationExit.NONE, RunReadings.continuationExit(
+                            view("{}", ASKED, STARTED, CONNECTED, call, exited(0)))),
+                    () -> assertEquals(ContinuationExit.NONE, RunReadings.continuationExit(
+                            view("{}", STARTED, CONNECTED, exited(0)))),
+                    () -> assertEquals(ContinuationExit.NONE, RunReadings.continuationExit(
+                            view("{\"negative\":true}", ASKED, STARTED, CONNECTED, exited(0)))),
+                    () -> assertEquals(ContinuationExit.EXITED, RunReadings.continuationExit(
+                            view("{\"continuation_early_exit\":true}"))));
+        }
+
+        @Test
+        @DisplayName("a silent generation of a worker that did not ask ended early, a voter's as a voter early exit")
+        void silentExits() {
+            var voter = "vote-set-1-reviewer";
+            var voterRun = view("{}", "{\"event\":\"connected\",\"worker\":\"" + voter + "\",\"generation\":1}",
+                    "{\"event\":\"worker_exited\",\"worker\":\"" + voter + "\",\"generation\":1}");
+            var superseded = view("{}", "{\"event\":\"worker_started\",\"worker\":\"w2\",\"generation\":2}",
+                    "{\"event\":\"connected\",\"worker\":\"w2\",\"generation\":1}",
+                    "{\"event\":\"worker_exited\",\"worker\":\"w2\",\"generation\":1}");
+
+            assertAll(
+                    () -> assertTrue(RunReadings.earlyExit(view("{}", STARTED, CONNECTED, exited(0)))),
+                    () -> assertFalse(RunReadings.voterEarlyExit(view("{}", STARTED, CONNECTED, exited(0)))),
+                    () -> assertTrue(RunReadings.voterEarlyExit(voterRun)),
+                    () -> assertFalse(RunReadings.earlyExit(voterRun)),
+                    () -> assertFalse(RunReadings.earlyExit(superseded)),
+                    () -> assertTrue(RunReadings.earlyExit(view("{\"early_exit\":true}"))));
+        }
+
+        @Test
+        @DisplayName("the final text is Claude Code's result, OpenCode's last text part or Antigravity's response")
+        void finalText() {
+            assertAll(
+                    () -> assertEquals("Done?", RunReadings.finalText(List.of(stamped(1, "not json"),
+                            stamped(2, "{\"type\":\"text\",\"part\":{\"text\":\"Done?\"}}")))),
+                    () -> assertEquals("Fine.", RunReadings.finalText(List.of(
+                            stamped(1, "{\"conversation_id\":\"c-1\",\"response\":\"Fine.\"}")))),
+                    () -> assertEquals("", RunReadings.finalText(List.of(stamped(1, "{\"type\":\"result\"}")))),
+                    () -> assertTrue(RunReadings.proseQuestion(List.of(
+                            stamped(1, "{\"type\":\"result\",\"result\":\"Which one? \"}")))));
+        }
+
+        @Test
+        @DisplayName("the tokens of Antigravity's usage are its total, else the sum of its token fields")
+        void usageTokens() {
+            assertAll(
+                    () -> assertEquals(7, RunReadings.usageTokens(json("{\"totalTokenCount\":7,\"inputTokens\":3}"))),
+                    () -> assertEquals(5, RunReadings.usageTokens(json(
+                            "{\"inputTokens\":3,\"outputTokens\":2,\"model\":\"m\",\"latency\":9}"))),
+                    () -> assertEquals(12, RunReadings.tokens(List.of(stamped(1,
+                            "{\"conversation_id\":\"c-1\",\"usage\":{\"total_tokens\":12}}")))));
+        }
+
+        @Test
+        @DisplayName("a quota error is read from the record's rule or from the stderr of its workers")
+        void quotaError() throws Exception {
+            var named = Files.writeString(directory.resolve("named.log"), "error: quota reached\n",
+                    StandardCharsets.UTF_8);
+            Files.writeString(QuestionDriver.stderrFile(directory, "w1", 2), "error: QUOTA exhausted\n",
+                    StandardCharsets.UTF_8);
+            var byStderr = view("{\"workers\":[{\"stderr\":\"" + named + "\"}]}");
+            var byOutput = view("{\"workers\":[{\"worker\":\"w1\",\"generation\":2,\"output\":\""
+                    + directory.resolve("out.jsonl") + "\"}]}");
+            var none = view("{\"workers\":[{\"worker\":\"w1\"},{\"output\":\"out.jsonl\"}]}");
+            var byRule = view("{\"quota_error\":true,\"quota_rule\":\"" + QuestionDriver.HARNESS_ERROR_OUTPUT + "\"}");
+
+            assertAll(
+                    () -> assertTrue(RunReadings.quotaError(byStderr)),
+                    () -> assertTrue(RunReadings.quotaError(byOutput)),
+                    () -> assertFalse(RunReadings.quotaError(none)),
+                    () -> assertTrue(RunReadings.quotaError(byRule)),
+                    () -> assertFalse(RunReadings.quotaError(view("{\"quota_error\":true}"))));
+        }
+
+        @Test
+        @DisplayName("a resume of a missing session started a new one when warned, on another id, or on OpenCode")
+        void startedNewSession() {
+            assertAll(
+                    () -> assertTrue(RunReadings.startedNewSession(Host.CLAUDE, "s-1", "", true)),
+                    () -> assertFalse(RunReadings.startedNewSession(Host.CLAUDE, "s-1", null, false)),
+                    () -> assertFalse(RunReadings.startedNewSession(Host.CLAUDE, "s-1", "", false)),
+                    () -> assertTrue(RunReadings.startedNewSession(Host.CLAUDE, "s-1", "s-2", false)),
+                    () -> assertFalse(RunReadings.startedNewSession(Host.CLAUDE, "s-1", "s-1", false)),
+                    () -> assertTrue(RunReadings.startedNewSession(Host.OPENCODE, "s-1", "s-1", false)),
+                    () -> assertTrue(RunReadings.warnsMissingSession("conversation \"s-1\" not found", "s-1")));
+        }
+
+        @Test
+        @DisplayName("a negative resume is a new session, failed at once, hung or exited without failure")
+        void negativeOutcome() {
+            assertAll(
+                    () -> assertEquals(RunReadings.NEGATIVE_NEW_SESSION, RunReadings.negativeOutcome(true, true, 5, 0)),
+                    () -> assertEquals(RunReadings.HUNG, RunReadings.negativeOutcome(true, false, -1, -1)),
+                    () -> assertEquals(RunReadings.HUNG, RunReadings.negativeOutcome(false, true, -1, -1)),
+                    () -> assertEquals(RunReadings.HUNG,
+                            RunReadings.negativeOutcome(false, true, RunReadings.HUNG_RESUME_MS + 1, 1)),
+                    () -> assertEquals(RunReadings.EXITED_WITHOUT_FAILURE,
+                            RunReadings.negativeOutcome(false, true, 5, 0)),
+                    () -> assertEquals(RunReadings.FAILED_AT_ONCE, RunReadings.negativeOutcome(false, true, 5, 2)));
         }
     }
 }

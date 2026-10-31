@@ -161,4 +161,66 @@ class ResultLimitsTest {
         assertDoesNotThrow(() -> ResultLimits.addAll(result, item, runs, Map.of("i1", global), 3));
         assertTrue(limits(result).stream().anyMatch(text -> text.contains("global data home")));
     }
+
+    @Test
+    @DisplayName("names failed setups with their reasons and the runs their invocations did not start")
+    void setupFailures() {
+        var failed = run("claude", "i1");
+        failed.put(RunView.SETUP_FAILED, true);
+        failed.put("fixture", "f-1");
+        failed.put(RunView.SETUP_FAILED_REASON, "fatal: bad ref");
+        var stopped = invocation("PT20M");
+        stopped.put(QuestionResults.INVOCATION, "i2");
+        stopped.put(QuestionResults.SETUP_STOPPED_RUNS, 2);
+        var none = result();
+        var onlyFailed = result();
+        var onlyStopped = result();
+
+        ResultLimits.limitOfSetupFailures(none, List.of(run("claude", "i1")), List.of(invocation("PT20M")));
+        ResultLimits.limitOfSetupFailures(onlyFailed, List.of(failed), List.of());
+        ResultLimits.limitOfSetupFailures(onlyStopped, List.of(), List.of(stopped));
+
+        assertAll(() -> assertEquals(List.of(), limits(none)),
+                () -> assertTrue(limits(onlyFailed).getFirst().contains("i1 (f-1: fatal: bad ref)")),
+                () -> assertTrue(limits(onlyFailed).getFirst().endsWith("of that scenario.")),
+                () -> assertTrue(limits(onlyStopped).getFirst().contains("i2 2")));
+    }
+
+    @Test
+    @DisplayName("names continuations without a worker and warm askers that exited, each on its own")
+    void continuationGaps() {
+        var gap = run("claude", "i1");
+        gap.put(QuestionDriver.CONTINUATION_GAP, QuestionDriver.HELD_BY_ENDED_GENERATION);
+        var exited = run("opencode", "i2");
+        exited.put(QuestionDriver.WARM_ASKER_EXITED, true);
+        var none = result();
+        var gaps = result();
+        var exits = result();
+
+        ResultLimits.limitOfContinuationGaps(none, List.of(run("claude", "i3")));
+        ResultLimits.limitOfContinuationGaps(gaps, List.of(gap));
+        ResultLimits.limitOfContinuationGaps(exits, List.of(exited));
+
+        assertAll(() -> assertEquals(List.of(), limits(none)),
+                () -> assertTrue(limits(gaps).getFirst().contains(QuestionDriver.HELD_BY_ENDED_GENERATION)),
+                () -> assertFalse(limits(gaps).getFirst().contains("Warm asker exited, continuation")),
+                () -> assertTrue(limits(exits).getFirst().contains("Warm asker exited, continuation")),
+                () -> assertFalse(limits(exits).getFirst().contains("Continuation without a worker")));
+    }
+
+    @Test
+    @DisplayName("counts the composed answers and says when none fell back")
+    void answerFallbacks() {
+        var composed = run("claude", "i1");
+        composed.putArray(AnswerAudit.ANSWER_COMPOSITIONS);
+        var none = result();
+        var noFallback = result();
+
+        ResultLimits.limitOfAnswerFallbacks(none, List.of(run("claude", "i1")));
+        ResultLimits.limitOfAnswerFallbacks(noFallback, List.of(composed, run("claude", "i2")));
+
+        assertAll(() -> assertEquals(List.of(), limits(none)),
+                () -> assertTrue(limits(noFallback).getFirst().contains("1 of 2 records")),
+                () -> assertTrue(limits(noFallback).getFirst().endsWith("no answer fell back.")));
+    }
 }

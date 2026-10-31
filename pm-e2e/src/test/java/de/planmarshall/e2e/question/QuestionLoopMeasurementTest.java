@@ -438,4 +438,53 @@ class QuestionLoopMeasurementTest {
             }
         }
     }
+
+    @Nested
+    @DisplayName("configuration from the system properties")
+    class LoadedConfiguration {
+
+        private static final Map<String, String> PROPERTIES = Map.ofEntries(
+                Map.entry("pm.experiment.telemetry", "/srv/telemetry"),
+                Map.entry("pm.experiment.clones", "/srv/clones"),
+                Map.entry("pm.experiment.exec", "/opt/pm-exec"),
+                Map.entry("pm.experiment.hosts", "claude,opencode"),
+                Map.entry("pm.experiment.model.claude", "claude-opus"),
+                Map.entry(OpenCodeDataHome.PROPERTY, "worker"),
+                Map.entry("pm.experiment.runs", "2"),
+                Map.entry("pm.experiment.workspace", "/srv/workspace"),
+                Map.entry("pm.experiment.run-timeout", "PT5M"),
+                Map.entry(Warmth.PROPERTY, "fresh"));
+
+        @Test
+        @DisplayName("reads hosts, models, counts, paths, the run limit, the warmth and the data home")
+        void load() throws Exception {
+            PROPERTIES.forEach(System::setProperty);
+            try {
+                var config = Config.load();
+
+                assertAll(() -> assertEquals(List.of(Host.CLAUDE, Host.OPENCODE), config.hosts()),
+                        () -> assertEquals("claude-opus", config.model(Host.CLAUDE)),
+                        () -> assertNull(config.model(Host.OPENCODE)),
+                        () -> assertEquals(2, config.runs()),
+                        () -> assertEquals(Path.of("/srv/telemetry"), config.telemetry()),
+                        () -> assertEquals(Path.of("/srv/clones"), config.clones()),
+                        () -> assertEquals(Path.of("/srv/workspace"), config.workspace()),
+                        () -> assertEquals(List.of("/opt/pm-exec"), config.exec()),
+                        () -> assertEquals(Duration.ofMinutes(5), config.runTimeout()),
+                        () -> assertEquals(Warmth.FRESH, config.warmth()),
+                        () -> assertEquals(OpenCodeDataHome.WORKER, config.openCodeDataHome()),
+                        () -> assertTrue(config.evidence().getFileName().toString().startsWith("pm-qlv-")));
+            } finally {
+                PROPERTIES.keySet().forEach(System::clearProperty);
+            }
+        }
+
+        @Test
+        @DisplayName("plans R2 by the item name, without fixtures")
+        void plansR2() throws Exception {
+            var plans = QuestionLoopMeasurement.plans("R2", config());
+
+            assertFalse(plans.isEmpty());
+        }
+    }
 }
