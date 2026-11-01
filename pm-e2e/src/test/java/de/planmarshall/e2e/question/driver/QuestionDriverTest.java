@@ -982,6 +982,27 @@ class QuestionDriverTest {
         }
 
         @Test
+        @DisplayName("the worktree digest leaves out only the data directory, not a file whose name starts with data")
+        void worktreeDigestDataPrefix() throws Exception {
+            run(driver -> {
+                var worker = worker(Host.CLAUDE, exited());
+                Files.createDirectories(worker.directory());
+                Files.writeString(worker.directory().resolve("data_utils.py"), "a", StandardCharsets.UTF_8);
+                Files.writeString(worker.directory().resolve("data"), "a", StandardCharsets.UTF_8);
+
+                var first = driver.worktreeDigest(worker);
+                Files.writeString(worker.directory().resolve("data_utils.py"), "b", StandardCharsets.UTF_8);
+                var afterPrefixed = driver.worktreeDigest(worker);
+                Files.writeString(worker.directory().resolve("data"), "b", StandardCharsets.UTF_8);
+                var afterDataFile = driver.worktreeDigest(worker);
+
+                assertAll(
+                        () -> assertNotEquals(first, afterPrefixed),
+                        () -> assertNotEquals(afterPrefixed, afterDataFile));
+            });
+        }
+
+        @Test
         @DisplayName("a held call without a cut by the deadline is logged as not cut, with its hold")
         void callNotCut() throws Exception {
             run(driver -> {
@@ -1358,6 +1379,17 @@ class QuestionDriverTest {
                     () -> assertEquals(RecoveryStep.WAIT, step(lostTask, "task.queued", _ -> true)),
                     () -> assertEquals(RecoveryStep.WAIT, step(List.of(), "task.offered", _ -> true)),
                     () -> assertEquals(RecoveryStep.WAIT, step(lostHolder, "task.offered", _ -> true)));
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(QuestionStub.AnswerResult.class)
+        @DisplayName("an operator answer counts as answered only when the stub recorded it, never when it refused it")
+        void answeredOnlyWhenRecorded(QuestionStub.AnswerResult result) {
+            var expected = result == QuestionStub.AnswerResult.ANSWERED ? Optional.of("D-1") : Optional.<String>empty();
+
+            var answered = QuestionDriver.answeredDecision("D-1", result);
+
+            assertEquals(expected, answered);
         }
 
         private RecoveryStep step(List<JsonNode> events, String state, Predicate<String> ended) {

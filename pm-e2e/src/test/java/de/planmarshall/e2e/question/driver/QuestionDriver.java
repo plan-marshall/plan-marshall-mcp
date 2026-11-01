@@ -1429,8 +1429,9 @@ public final class QuestionDriver implements AutoCloseable {
      * @param timeout    how long to wait for the answer
      * @param hold       how long the operator takes to answer
      * @param reply      the operator's answer per part, from the decision's snapshot
-     * @return the decision answered (the one delivered to the operator, or the asked one decided by its quorum), or
-     *         empty when none was answered in time or the run ended
+     * @return the decision answered (the one delivered to the operator whose answer the stub recorded, or the asked
+     *         one decided by its quorum), or empty when none was answered in time or the run ended; an answer the stub
+     *         refused answers nothing ({@link #answeredDecision})
      * @throws IOException          if the event log or a worker's output cannot be read
      * @throws InterruptedException if interrupted
      */
@@ -1736,7 +1737,8 @@ public final class QuestionDriver implements AutoCloseable {
      * @param timeout how long to wait for a decision
      * @param hold    how long the operator takes to answer
      * @param reply   the answer per part, from the decision's snapshot
-     * @return the decision answered, or empty when none arrived in time
+     * @return the decision answered, or empty when none arrived in time or the stub refused the answer
+     *         ({@link #answeredDecision})
      * @throws InterruptedException if interrupted
      */
     Optional<String> answerNext(Duration timeout, Duration hold, Function<ObjectNode, List<PartAnswer>> reply)
@@ -1750,7 +1752,21 @@ public final class QuestionDriver implements AutoCloseable {
         var decision = stub.decision(id).orElseThrow();
         var result = stub.answer(id, decision.path("revision").asInt(), reply.apply(decision));
         stub.event("answer_sent", Map.of("decision", id, "result", result.name()));
-        return Optional.of(id);
+        return answeredDecision(id, result);
+    }
+
+    /**
+     * The rule of {@link #answerNext}: a decision counts as answered only when the stub recorded the answer
+     * ({@link QuestionStub.AnswerResult#ANSWERED}); a refused answer ({@code INVALID_ANSWER}, {@code CONFLICT},
+     * {@code ALREADY_ANSWERED}) leaves it unanswered, so {@link #awaitAnswer} goes on waiting and ends empty at its
+     * deadline unless the decision was answered otherwise.
+     *
+     * @param decisionId the decision the operator answered
+     * @param result     the stub's outcome of that answer
+     * @return the decision when the stub recorded the answer, else empty
+     */
+    static Optional<String> answeredDecision(String decisionId, QuestionStub.AnswerResult result) {
+        return result == QuestionStub.AnswerResult.ANSWERED ? Optional.of(decisionId) : Optional.empty();
     }
 
     /**
@@ -1853,8 +1869,10 @@ public final class QuestionDriver implements AutoCloseable {
         try (Stream<Path> walk = Files.walk(worker.directory())) {
             var digest = MessageDigest.getInstance("SHA-256");
             for (var path : walk.filter(Files::isRegularFile).sorted().toList()) {
-                var relative = worker.directory().relativize(path).toString();
-                if (relative.startsWith("data") || relative.startsWith(".") || relative.endsWith("mcp-config.json")
+                var relativePath = worker.directory().relativize(path);
+                var relative = relativePath.toString();
+                if (relativePath.getNameCount() > 1 && "data".equals(relativePath.getName(0).toString())
+                        || relative.startsWith(".") || relative.endsWith("mcp-config.json")
                         || "opencode.json".equals(relative)) {
                     continue;
                 }

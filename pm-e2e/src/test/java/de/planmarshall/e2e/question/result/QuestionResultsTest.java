@@ -496,6 +496,67 @@ class QuestionResultsTest {
                     () -> assertEquals(1, group.path(QuestionResults.NOT_FOLLOWING_REFERENCE_RUNS).size()));
         }
 
+        @Test
+        @DisplayName("Q6: a vote run without a vote and a consult run that never consulted do not pass")
+        void q6NotExercised() throws Exception {
+            var consulting = run("Q6", Map.of("reference", "B", "kind", "consult"), List.of(
+                    event("consulted", WORKER, 1, 10, "question", "Which?"),
+                    event("consultation_answered", WORKER, 1, 11),
+                    event("consultation_delivered", WORKER, 1, 12),
+                    submitted("B", 20)));
+            var neverConsulted = run("Q6", Map.of("reference", "B", "kind", "consult"),
+                    List.of(submitted("B", 20)));
+            var noVote = run("Q6", Map.of("reference", "B", "kind", "vote"), List.of(
+                    event("adjudicated", WORKER, 1, 13, "outcome", "kind_ask"),
+                    submitted("B", 20)));
+
+            var groups = QuestionResults.evaluate("Q6", List.of(consulting, neverConsulted, noVote)).path("groups");
+
+            assertAll(
+                    () -> assertEquals(1, sum(groups, QuestionResults.PASSING_RUNS)),
+                    () -> assertEquals(3, sum(groups, "runs")),
+                    () -> assertEquals(0, sum(groups, "votes")),
+                    () -> assertEquals(0, sum(groups, "consultation_question_mixups")),
+                    () -> assertTrue(QuestionResults.q6Exercised(new RunView(consulting, List.of(
+                            event("consulted", WORKER, 1, 10)), List.of(), List.of()), 0)),
+                    () -> assertFalse(QuestionResults.q6Exercised(new RunView(neverConsulted, List.of(), List.of(),
+                            List.of()), 0)),
+                    () -> assertFalse(QuestionResults.q6Exercised(new RunView(noVote, List.of(), List.of(),
+                            List.of()), 0)),
+                    () -> assertTrue(QuestionResults.q6Exercised(new RunView(noVote, List.of(), List.of(),
+                            List.of()), 2)));
+        }
+
+        private int sum(JsonNode groups, String field) {
+            var total = 0;
+            for (var group : groups) {
+                total += group.path(field).asInt();
+            }
+            return total;
+        }
+
+        @Test
+        @DisplayName("R1: a duration whose only run the usage limit refused runs again instead of descending")
+        void r1NotRunRepeats() throws Exception {
+            var refused = Map.<String, Object>of("duration_s", 3600, "canary", "canary-1", QuestionDriver.QUOTA_ERROR,
+                    true, QuestionDriver.QUOTA_RULE, QuestionDriver.RATE_LIMIT_EVENT, RunView.NOT_RUN, true);
+            var notRun = run("R1", refused, List.of());
+            var failed = run("R1", Map.of("duration_s", 3600, "canary", "canary-1"), List.of());
+            var notRunShorter = run("R1", Map.of("duration_s", 1800, "canary", "canary-1", QuestionDriver.QUOTA_ERROR,
+                    true, QuestionDriver.QUOTA_RULE, QuestionDriver.RATE_LIMIT_EVENT, RunView.NOT_RUN, true), List.of());
+
+            var longest = QuestionResults.evaluate("R1", List.of(notRun));
+            var afterFailure = QuestionResults.evaluate("R1", List.of(failed, notRunShorter));
+
+            var key = "claude claude-haiku-4-5 fresh";
+            assertAll(
+                    () -> assertEquals("none", longest.path(QuestionResults.DESCENT).path(key)
+                            .path("shortest_verdict").asText()),
+                    () -> assertEquals(3600, longest.path(QuestionResults.DESCENT).path(key).path("next").asLong()),
+                    () -> assertEquals(1800, afterFailure.path(QuestionResults.DESCENT).path(key).path("next")
+                            .asLong()));
+        }
+
         private ObjectNode asked(String question, long at) {
             var asked = event(RunReadings.ASKED, WORKER, 1, at);
             asked.putArray("question_texts").add(question);

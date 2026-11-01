@@ -962,6 +962,12 @@ public final class QuestionResults {
         return passes;
     }
 
+    /**
+     * Q6: a run passes when its part of Q6 took place, every vote is valid within the re-offer budget, its last
+     * submission follows the reference, and consultation and question were not mixed up. A run whose part never took
+     * place ({@link #q6Exercised}) demonstrates nothing and is judged a failing run (it counts in {@code runs} and not
+     * in {@value #PASSING_RUNS}, so the group fails or is extended as for any failing run).
+     */
     private static List<Boolean> q6(List<RunView> views, ObjectNode group) {
         var votes = 0;
         var validVotes = 0;
@@ -992,7 +998,7 @@ public final class QuestionResults {
             validVotes += runValid;
             applied += appliedHere ? 1 : 0;
             mixups += mixupsHere;
-            passes.add(runValid == runVotes && appliedHere && mixupsHere == 0);
+            passes.add(q6Exercised(view, runVotes) && runValid == runVotes && appliedHere && mixupsHere == 0);
         }
         group.put("votes", votes);
         group.put("valid_votes", validVotes);
@@ -1000,6 +1006,22 @@ public final class QuestionResults {
         group.put("applied_share", share(applied, views.size()));
         group.put("consultation_question_mixups", mixups);
         return passes;
+    }
+
+    /**
+     * Whether a Q6 run's part took place: a {@code vote} run had at least one vote task, a {@code consult} run
+     * consulted at least once ({@code consulted} in its stub log). A run of another or no kind is not held to either.
+     *
+     * @param view  a Q6 run
+     * @param votes its vote tasks
+     * @return whether its part of Q6 took place
+     */
+    static boolean q6Exercised(RunView view, int votes) {
+        return switch (view.run().path("kind").asText("")) {
+            case "vote" -> votes > 0;
+            case "consult" -> !view.named("consulted").isEmpty();
+            default -> true;
+        };
     }
 
     /**
@@ -1555,7 +1577,9 @@ public final class QuestionResults {
     /**
      * The state of the longest-first descent of R1 or R2 per host, model and form: the durations run, the verdict of
      * the shortest of them, and the next duration to run ({@link Scale#nextDuration}): none after a pass or after the
-     * shortest, {@code extend to 10} where the shortest one's runs disagree.
+     * shortest, {@code extend to 10} where the shortest one's runs disagree. The descent goes to a shorter duration
+     * only after a measured failure: a shortest duration without a judged run (verdict {@code none}, as a usage-limit
+     * refusal leaves it) is no failure and is run again, so its own duration is the next.
      *
      * @param groups    the groups of R1 or R2
      * @param parameter {@code duration_s} or {@code age_s}
@@ -1582,6 +1606,8 @@ public final class QuestionResults {
             node.put("shortest_verdict", verdict.text());
             if (verdict == Verdict.EXTEND) {
                 node.put("next", verdict.text());
+            } else if (verdict == Verdict.NONE) {
+                node.put("next", shortest);
             } else if (Scale.R1_R2_DURATIONS.contains(shortest)) {
                 var next = Scale.nextDuration(shortest, verdict == Verdict.PASS);
                 if (next.isPresent()) {
