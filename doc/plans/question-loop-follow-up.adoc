@@ -50,6 +50,56 @@ The operator's decisions that bind the runs, recorded before the first measured 
 2026-10-29:: *Host split*: the parts of <<parts>>; this package is not closed by the Claude Code part.
 2026-10-30:: *Run budget*: a cap of 60 USD of harness invocations for the Claude Code groups (estimate 33 to 42 USD for the base runs with the parallel-limit runs, 44 to 55 USD with Q5's further bounds and groups extended to 10); R4 large work runs last and stops at the cap, and what it did not reach is recorded as not run; the Sonnet repeats of task 11 are outside the cap and each needs the operator's word. *Parallel limit*: the step of task 5a is added before the run plan. *Q6 quorum*: the quorum of the two vote links moves to PLAN-04; the consultation part of Q6 runs here, on Claude Code.
 2026-10-31:: *Coverage bar*: the extracted code stays in `pm-e2e/src/test/java` (no change to the module structure), and its coverage is read from a JaCoCo report over the test classes of `de.planmarshall.e2e.question`, added to the `coverage` profile of `pm-e2e` (task 1). *R4 forcing and scenarios*: the ask of large work is forced with the `FORCE_ASK` text as for the loop tasks, the scenarios `q-api-vacuity-read-exceeds-dispatch` and `q-pm-detector-residue-caller-root` are kept, and hold, resume and fallback are measured for small and for large work (tasks 2 and 10). *Q7 host scope*: Q7 stays Claude Code only in the Claude Code part, because the hosts outside Claude Code are PLAN-04's; whether Q7 becomes host-generic is handed to PLAN-04 (task 2). *Run budget replaced*: the cap of 60 USD for the Claude Code groups is replaced by a cap of 45 USD; the 9.47 USD of the parallel-limit runs counts against it, the reserves and R4 large work shrink to what is left, and R4 large work stops at the cap with what it did not reach recorded as not run (task 6). *Quota*: if the account runs out of quota, the operator changes the contract or the account; quota pressure is no reason to stop or shrink the runs, and the measured groups start without waiting for the weekly reset of the usage window.
+2026-11-01:: *Sonnet repeats (task 11)*: the operator named the fresh groups of Q5 at the bounds 3 and 4, the only Claude Code groups that failed on `claude-haiku-4-5`, for a repeat on `claude-sonnet-5-5` at 3 runs per group, outside the cap; no other group failed, so no other repeat was to be decided. *R4 large work*: recorded as not run, because one invocation was estimated at 1.8 to 15 USD and a running invocation cannot be stopped by its cost.
+
+[#claude-code-results]
+== The Claude Code Part: Settled Values and Hand-Off
+
+The Claude Code part measured its groups on 31 October and 1 November 2026, on Claude Code 2.1.316 with `claude-haiku-4-5` at the parallel limit of 12, the repeat of Q5 with `claude-sonnet-5-5`. The verdicts, the invocations and the limits are in link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#question-loop-follow-up-result[Evaluation Reference, Follow-Up Result]; every invocation is in the evidence store, under `question-loop-follow-up/store/<invocation>` of the branch `question-loop-follow-up` of `cuioss/plan-marshall-telemetry`. Cost: 41.89 USD on Haiku against the cap of 45 USD (including the 9.47 USD of the parallel limit), 1.76 USD on Sonnet outside it; no run met a refusal.
+
+[#settled-values]
+=== Settled Values for Claude Code
+
+Each value is Claude Code's, measured on 2.1.316 with `claude-haiku-4-5`, and named for `pm-mcp-core` / `client-profile-measured-values` to write into its owning specification; nothing is written into `doc/specification/` of `pm-mcp-core` or into a profile by this package.
+
+[horizontal]
+`headless.resumability.hold`:: candidate `max_hold_seconds` 3,600: the hold of 3,600 s continued in the same generation in 6 of 6 runs (3 per form), longest first, so no shorter hold was run (R1, link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/R1-2026-10-31T203100760085Z-1a5b960b[`R1-2026-10-31T203100760085Z-1a5b960b`]).
+`headless.resumability.resume`:: candidate `max_age_seconds` 3,600: the resume after 3,600 s continued from the session in 6 of 6 runs and after 300 s with a stub restart in 6 of 6, median acknowledgement 5.4 to 6.2 s; a resume of a missing session failed at once in 6 of 6; 24 hours was not run (task 2) (R2, link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/R2-2026-10-31T213237581119Z-eceb36ad[`R2-2026-10-31T213237581119Z-eceb36ad`]).
+`questions` values of the shipped roles:: deliberately open. Small work has figures (R4, 18 runs, link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/R4-2026-10-31T191624667845Z-20b3a306[`R4-2026-10-31T191624667845Z-20b3a306`]: median tokens and worker time, fresh and warm, hold 340,436 / 380,467 and 100 s / 100 s, resume 376,581 / 409,258 and 44 s / 41 s, fallback 232,081 / 376,050 and 382 s / 98 s); large work was not run (decision of 2026-11-01), so `questions.hold_seconds` and `resume_within_seconds` stay as shipped (open) until large work has figures.
+Question bound:: `3` stays, unsettled by the measurement. The rule of task 9 takes the smallest candidate at which no run reached the bound; both candidates run were reached: without the bound form 10 of 26 Haiku runs reached it at `3` and 5 of 26 at `4` (Sonnet 3 of 6 and 1 of 6). `5` was not run (cap). Q5 itself fails on Haiku at both bounds (92 of 104 runs; 6 of 8 fresh groups fail at 10 runs) and passes on Sonnet (24 of 24, fresh groups, 3 runs each) (link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T184121103951Z-1205273f[`Q5-2026-10-31T184121103951Z-1205273f`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T223934215397Z-c1d17842[`…c1d17842`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T230720166509Z-3b5d9362[`…3b5d9362`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T232838636032Z-cb2390d0[`…cb2390d0`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-11-01T082926400134Z-3780fc3c[`…3780fc3c`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-11-01T083640584861Z-62d43227[`…62d43227`]).
+Unmeasured roles and hosts:: stay as shipped: the `resumability` forms of OpenCode and Antigravity `false` and `null`, the `questions` values of every role open, Codex not measured.
+
+[#task-decisions]
+=== Decisions of Tasks 11 and 12 for Claude Code
+
+* *Task 11, per group*: the fresh groups of Q5 at the bounds 3 and 4 (`he-12-2ac` and `he-134-2ac`, with and without the bound form) were repeated on `claude-sonnet-5-5` at 3 runs each and passed (decision of 2026-11-01). Every other Claude Code group passed on `claude-haiku-4-5` (Q1 to Q4, the warm groups of Q5, Q6's consultation, Q7, R1, R2, R3) or has no criterion (R4), so no repeat was to be decided for it.
+* *Task 12*: the Claude Code values are settled from this package's own driver runs, longest first, on the probe (<<settled-values>>), not from a stage built elsewhere; the stage `resumability` repeats them once `question-continuation` builds it. Of the four schema findings, the one that applies to Claude Code is the held call the host cuts and the worker survives (R3, 12 of 12); it stays in the Evaluation Reference, and whether the schema gets a member for it is open, with the other three, for the owning package.
+
+[#open-points]
+=== Open for the Operator
+
+Stated, not decided:
+
+* Q4 keys its groups by the reply kind, so its 24 runs form 12 groups of 2 runs, where the run plan counted groups of 3 runs with the reply rotating inside a group; every run passed.
+* Q6's consultation part passed in 12 runs, but its figures carry no count of consultations, so how many consultations were exercised is not visible in the analysis.
+* What the failure of Q5's fresh groups on `claude-haiku-4-5` means for the shipped settings.
+* Whether the Q1 runs of the parallel limit count against Q1: 2 of their 96 runs failed (one warm run at level 1, one at level 6), while the measured Q1 invocation passed 24 of 24.
+* Whether Q3's fresh askers that called `pm_wait` and were ended by the driver at the silence limit (10 of 12) pass, as the evaluation reads them, or fail the criterion's end of turn, as the smoke reading counted them.
+
+[#plan-04-hand-off]
+=== Handed to PLAN-04
+
+Each item below is PLAN-04's, by name; none is dropped.
+
+* Task 3, OpenCode, whole: the question loop's findings and their owner, the session id pointer, the tool-catalog refusal of R2, the inline settings and their control, the data home, the model choice per role.
+* Task 4, Antigravity, whole: what it cannot show, the cut call, the invalid votes of Q6, the MCP configuration path, Q2's question tool.
+* The OpenCode and Antigravity groups of task 6 (their run plan and budget) and of tasks 7 to 11: Q1 to Q6, R1 to R4 on OpenCode, and on Antigravity as far as task 4 allows.
+* Task 9: the Q2 observation on Antigravity, the OpenCode (and Antigravity) groups of Q5, and whether one question bound spans the hosts.
+* Q6: the vote quorum of the two vote links.
+* Q7: whether it becomes host-generic.
+* Task 10: the large and small work of R4 on OpenCode and Antigravity.
+* Task 12: the OpenCode and Antigravity values, the decision on the stage's expectation for a missing session, and the OpenCode tool-catalog finding.
+* Task 13: the results of the part of PLAN-04 and the closing of this package.
 
 == Tasks
 
