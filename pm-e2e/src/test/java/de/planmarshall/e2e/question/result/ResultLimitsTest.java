@@ -16,15 +16,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import de.planmarshall.e2e.question.driver.Fault;
 import de.planmarshall.e2e.question.driver.QuestionDriver;
 import de.planmarshall.e2e.question.stub.QuestionStub;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -253,5 +257,98 @@ class ResultLimitsTest {
         assertAll(() -> assertEquals(List.of(), limits(none)),
                 () -> assertTrue(limits(noFallback).getFirst().contains("1 of 2 records")),
                 () -> assertTrue(limits(noFallback).getFirst().endsWith("no answer fell back.")));
+    }
+
+    @Nested
+    @DisplayName("the limits of R3 and of continuation early exits")
+    class R3AndContinuations {
+
+        private ObjectNode faultRun(Fault fault) {
+            var run = run("claude", "i1");
+            run.put("fault", fault.name());
+            return run;
+        }
+
+        private ObjectNode selection(String id, Fault... faults) {
+            var invocation = invocation("PT20M");
+            invocation.put(QuestionResults.INVOCATION, id);
+            var array = invocation.putArray(QuestionResults.R3_FAULTS);
+            for (var fault : faults) {
+                array.add(fault.name());
+            }
+            return invocation;
+        }
+
+        @Test
+        @DisplayName("names a fault selection, the faults without a group, and nothing for a full selection")
+        void faultSelection() {
+            var partial = result();
+            var covered = result();
+            var full = result();
+            var allRuns = Arrays.stream(Fault.values()).map(fault -> (JsonNode) faultRun(fault)).toList();
+
+            ResultLimits.limitOfR3FaultSelection(partial, List.of(faultRun(Fault.CALL_CUT)),
+                    List.of(selection("i1", Fault.CALL_CUT)));
+            ResultLimits.limitOfR3FaultSelection(covered, allRuns, List.of(selection("i1", Fault.CALL_CUT)));
+            ResultLimits.limitOfR3FaultSelection(full, allRuns, List.of(selection("i2", Fault.values()),
+                    invocation("PT20M")));
+
+            assertAll(() -> assertTrue(limits(partial).getFirst().contains("only the faults CALL_CUT were measured "
+                            + "by invocation i1")),
+                    () -> assertTrue(limits(partial).getFirst().contains("a verdict over the faults CALL_CUT only")),
+                    () -> assertTrue(limits(covered).getFirst().endsWith("every fault has a group from the "
+                            + "aggregated invocations.")),
+                    () -> assertEquals(List.of(), limits(full)));
+        }
+
+        @Test
+        @DisplayName("counts the stops while holding, the cuts per host, the stub's first losses and its exit handling")
+        void r3() {
+            var stopped = faultRun(Fault.STOP_BEFORE_ANSWER);
+            stopped.put("fault_held", true);
+            var cut = faultRun(Fault.CALL_CUT);
+            cut.put(QuestionResults.CALL_CUT_FIELD, true);
+            cut.put("loss_by", "driver");
+            cut.put("loss_first_by", "stub");
+            cut.put(QuestionResults.STUB_LOSE_ON_EXIT, false);
+            var uncut = faultRun(Fault.CALL_CUT);
+            var result = result();
+            var none = result();
+
+            ResultLimits.limitsOfR3(result, List.of(stopped, cut, uncut));
+            ResultLimits.limitsOfR3(none, List.of());
+
+            var texts = limits(result);
+            assertAll(() -> assertTrue(texts.get(0).endsWith("Stopped while holding: 1 of 1 runs.")),
+                    () -> assertTrue(texts.get(1).contains("Cut: claude 1 of 2.")),
+                    () -> assertTrue(texts.get(2).startsWith(ResultLimits.CUT_SURVIVED_LIMIT)),
+                    () -> assertTrue(texts.get(3).startsWith("In 1 of 1 runs")),
+                    () -> assertTrue(texts.get(4).endsWith("Runs with this stub: 1 of 3.")),
+                    () -> assertTrue(limits(none).get(1).contains("Cut: no run.")),
+                    () -> assertEquals(4, limits(none).size()));
+        }
+
+        @Test
+        @DisplayName("names the runs whose continuation exited early, with the groups whose verdict differs")
+        void continuationEarlyExits() throws Exception {
+            var exited = run("claude", "i1");
+            exited.put(QuestionDriver.CONTINUATION_EARLY_EXIT, true);
+            var differing = result();
+            differing.putArray(QuestionResults.GROUPS).addObject().put(QuestionResults.GROUP, "g-1")
+                    .put(QuestionResults.VERDICT_WITHOUT_CONTINUATION_EARLY_EXIT, "pass");
+            ((ArrayNode) differing.path(QuestionResults.GROUPS)).addObject().put(QuestionResults.GROUP, "g-2");
+            var same = result();
+            var none = result();
+
+            ResultLimits.limitOfContinuationEarlyExits(differing, List.of(exited, run("claude", "i2")));
+            ResultLimits.limitOfContinuationEarlyExits(same, List.of(exited));
+            ResultLimits.limitOfContinuationEarlyExits(none, List.of(run("claude", "i2")));
+
+            assertAll(() -> assertTrue(limits(differing).getFirst().contains("claude 1")),
+                    () -> assertTrue(limits(differing).getFirst().endsWith("where it reads differently: g-1.")),
+                    () -> assertTrue(limits(same).getFirst().endsWith("no group's verdict reads differently without "
+                            + "them.")),
+                    () -> assertEquals(List.of(), limits(none)));
+        }
     }
 }

@@ -29,6 +29,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntConsumer;
 
 /**
  * The worker's MCP server as its harness starts it, standing in for {@code pm-mcp serve --job}: forwards
@@ -101,7 +102,21 @@ public final class StubRelay {
      * @throws IOException if the socket cannot be reached or the log not written
      */
     public static void main(String[] args) throws IOException {
-        var environment = System.getenv();
+        run(System.getenv(), System.in, new FileOutputStream(FileDescriptor.out), Runtime.getRuntime()::halt);
+    }
+
+    /**
+     * Connects to the stub, writes the identity line, then forwards lines both ways until a side closes: the host
+     * closing ends the relay with {@code 0}, the stub closing with {@code 3}.
+     *
+     * @param environment the relay's environment
+     * @param fromHost    the harness side read
+     * @param toHost      the harness side written
+     * @param halt        ends the relay with a status, without returning when it is the process's own halt
+     * @throws IOException if the socket cannot be reached or the log not opened
+     */
+    static void run(Map<String, String> environment, InputStream fromHost, OutputStream toHost, IntConsumer halt)
+            throws IOException {
         var socket = Path.of(environment.get(SOCKET));
         var log = Files.newBufferedWriter(Path.of(environment.get(RELAY_LOG)), StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
@@ -112,16 +127,15 @@ public final class StubRelay {
         toStub.write(hello.getBytes(StandardCharsets.UTF_8));
         toStub.flush();
         logLine(log, "connect", hello.strip());
-        var toHost = new FileOutputStream(FileDescriptor.out);
         Thread.ofPlatform().start(() -> {
             pump(Channels.newInputStream(channel), toHost, log, "to_host");
             logLine(log, "stub_closed", "");
-            Runtime.getRuntime().halt(3);
+            halt.accept(3);
         });
-        pump(System.in, toStub, log, "from_host");
+        pump(fromHost, toStub, log, "from_host");
         logLine(log, "host_closed", "");
         channel.close();
-        Runtime.getRuntime().halt(0);
+        halt.accept(0);
     }
 
     /**

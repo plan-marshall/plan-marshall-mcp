@@ -285,4 +285,17 @@ class QuestionEvidenceTest {
                             .asText()));
         }
     }
+
+    @Nested
+    @DisplayName("what a relocation counts per invocation")
+    class MovedCounts {
+
+        @Test
+        @DisplayName("counts a copy from the recorded directory, a copy from a fallback and a record left as it was")
+        void counts() {
+            var moved = new QuestionEvidence.Moved(0, 0, 0, 0).add(false).add(true).add(true).kept();
+
+            assertEquals(new QuestionEvidence.Moved(3, 1, 2, 1), moved);
+        }
+    }
 }

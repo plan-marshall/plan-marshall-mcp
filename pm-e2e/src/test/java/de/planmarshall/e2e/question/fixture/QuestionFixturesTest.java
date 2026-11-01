@@ -12,6 +12,7 @@ package de.planmarshall.e2e.question.fixture;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -357,6 +358,222 @@ class QuestionFixturesTest {
         public List<String> names(String directory) {
             return files.keySet().stream().filter(path -> path.startsWith(directory + "/"))
                     .map(path -> path.substring(path.lastIndexOf('/') + 1)).sorted().toList();
+        }
+    }
+
+    @Nested
+    @DisplayName("refusals of the corpus cache and the scenario recipes")
+    class Refusals {
+
+        private Map<String, String> recipe(String corpusItem, String ownWords) {
+            var id = QuestionFixtures.LARGE_SCENARIOS.getFirst();
+            var files = new HashMap<String, String>();
+            files.put(QuestionFixtures.SCENARIOS + "/" + id + ".json", """
+                    {"id":"%s","repository":"https://github.com/o/repo","plan_month":"2026-10","plan":"p-1",
+                     "asking_task":"TASK-001","item":"decision/x/%s","start_commit":"abc",
+                     "answer_to_deliver":{"branch_key":"cache","text":"Use the cache."}}
+                    """.formatted(id, id));
+            files.put("projects/repo/archived-plans/2026-10/p-1/tasks/TASK-001.json",
+                    "{\"title\":\"Add the cache\",\"description\":\"Add a cache.\"}");
+            files.put(QuestionFixtures.CORPUS + "/decision/x/" + id + ".json", corpusItem);
+            if (ownWords != null) {
+                files.put(QuestionFixtures.CORPUS + "/decision/own-words/" + id + ".json", ownWords);
+            }
+            return files;
+        }
+
+        private Fixture scenario(Map<String, String> files) throws IOException {
+            return QuestionFixtures.scenario(new MapSource(files), QuestionFixtures.LARGE_SCENARIOS.getFirst(),
+                    directory.resolve("clones"));
+        }
+
+        @Test
+        @DisplayName("an answer the operator gave as a new option is added as a choice once its own-words item says so")
+        void newOption() throws Exception {
+            var fixture = scenario(recipe("""
+                    {"input":{"question":"Which?","choices":["a","b"]},"target":{"answer":"c"}}""",
+                    "{\"target\":{\"answer\":\"new_option: cache\"}}"));
+
+            assertAll(() -> assertEquals(List.of("a", "b", "cache"), fixture.check().choices()),
+                    () -> assertEquals("cache", fixture.check().reference()),
+                    () -> assertEquals(directory.resolve("clones").resolve("repo"),
+                            fixture.checkout().localClone()));
+        }
+
+        @Test
+        @DisplayName("a recipe or corpus item that does not say what the fixture needs is refused, not completed")
+        void refusals() {
+            var otherId = recipe("{}", null);
+            otherId.put(QuestionFixtures.SCENARIOS + "/" + QuestionFixtures.LARGE_SCENARIOS.getFirst() + ".json",
+                    "{\"id\":\"other\"}");
+
+            assertAll(
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(otherId)),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
+                            {"input":{"question":"Which?"},"target":{"answer":"cache"}}""", null))),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
+                            {"input":{"question":"Which?","choices":["cache","none"]},"target":{"answer":"none"}}""",
+                            null))),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
+                            {"input":{"question":"Which?","choices":["cache","none"]},"target":{"answer":"other"}}""",
+                            null))),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
+                            {"input":{"question":"Which?","choices":["a","b"]},"target":{"answer":"c"}}""",
+                            "{\"target\":{\"answer\":\"a\"}}"))),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
+                            {"input":{"question":" ","choices":["cache"]},"target":{"answer":"cache"}}""", null))));
+        }
+
+        @Test
+        @DisplayName("a cache without the topic, or an apply-answer item without the operator's answer, is refused")
+        void cacheRefusals() throws Exception {
+            var apply = Files.createDirectories(directory.resolve("items/question/apply-answer"));
+            Files.writeString(apply.resolve("he-2.json"), """
+                    {"id":"question/apply-answer/he-2","input":{"facts":"def f(): pass"}}""", StandardCharsets.UTF_8);
+
+            assertAll(
+                    () -> assertThrows(IllegalStateException.class,
+                            () -> QuestionFixtures.applyAnswer(directory.resolve("nothing"))),
+                    () -> assertThrows(IllegalStateException.class, () -> QuestionFixtures.applyAnswer(directory)));
+        }
+
+        @Test
+        @DisplayName("a title without a variant counts as unknown, a two-flaw item without a tag by its id")
+        void categoriesWithoutMarks() throws Exception {
+            var apply = Files.createDirectories(directory.resolve("items/question/apply-answer"));
+            var ask = Files.createDirectories(directory.resolve("items/question/ask-or-proceed"));
+            Files.writeString(apply.resolve("he-3.json"), """
+                    {"id":"question/apply-answer/he-3","group":"g-3","title":"he-3",
+                     "input":{"facts":"def f(): pass\\n\\nOperator's answer:\\nAscending.","question":"%sWhat?"}}
+                    """.formatted(QuestionFixtures.ANSWERED_FRAMING), StandardCharsets.UTF_8);
+            Files.writeString(ask.resolve("he-3-2CP.json"), """
+                    {"id":"question/ask-or-proceed/he-3-2CP","group":"g-3","input":{"facts":"def g(): pass"}}
+                    """, StandardCharsets.UTF_8);
+            Files.writeString(ask.resolve("he-3-original.json"), """
+                    {"id":"question/ask-or-proceed/he-3-original","group":"g-other","input":{"facts":"x"}}
+                    """, StandardCharsets.UTF_8);
+            Files.writeString(ask.resolve("notes.txt"), "not an item", StandardCharsets.UTF_8);
+
+            var applyAnswer = QuestionFixtures.applyAnswer(directory);
+            var twoFlaws = QuestionFixtures.twoFlaws(directory);
+            var controls = QuestionFixtures.controls(directory);
+
+            assertAll(() -> assertEquals("unknown", applyAnswer.getFirst().category()),
+                    () -> assertEquals("2cp", twoFlaws.getFirst().category()),
+                    () -> assertTrue(controls.isEmpty()));
+        }
+    }
+
+    @Nested
+    @DisplayName("the tasks of a fixture and the question ids of a decision without items")
+    class Tasks {
+
+        @Test
+        @DisplayName("an entity and a consulting task carry the fixture's task and check in their facts")
+        void entityAndConsulting() {
+            var entity = QuestionFixtures.entityTask(fixture(HINTED), "T-1", "worker", Form.HOLD);
+            var consulting = QuestionFixtures.consultingTask(fixture(HINTED), "T-2", "worker", Form.HOLD,
+                    List.of("reviewer"));
+            var unchecked = QuestionFixtures.entityTask(new Fixture("x", "2ac", "t", "", null, false, null), "T-3",
+                    "worker", Form.HOLD);
+
+            assertAll(() -> assertEquals("task", entity.facts().path("task").asText()),
+                    () -> assertEquals("q", consulting.facts().path("check_question").asText()),
+                    () -> assertFalse(unchecked.facts().has("check_question")));
+        }
+
+        @Test
+        @DisplayName("numbers the parts from the decision's id when it lists no items")
+        void questionIdsFromDecisionId() {
+            var decision = twoPartDecision();
+            decision.put("id", "Q-005");
+            decision.remove("items");
+
+            var parts = QuestionFixtures.answer(fixture(UNHINTED), decision, Reply.OPTION);
+
+            assertEquals(List.of("Q-005", "Q-006"), parts.stream().map(QuestionStub.PartAnswer::questionId).toList());
+        }
+    }
+
+    @Nested
+    @DisplayName("git: the telemetry branch, the sibling repositories and the scenario checkout")
+    class Git {
+
+        private Path repository() throws IOException {
+            var repository = Files.createDirectories(directory.resolve("repo"));
+            QuestionFixtures.git(null, "init", "--quiet", repository.toString());
+            var recipes = Files.createDirectories(repository.resolve(QuestionFixtures.SCENARIOS));
+            Files.writeString(recipes.resolve("q-a.json"), "{\"id\":\"q-a\"}", StandardCharsets.UTF_8);
+            QuestionFixtures.git(repository, "add", ".");
+            QuestionFixtures.git(repository, "-c", "user.name=test", "-c", "user.email=test@example.org", "-c",
+                    "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "recipes");
+            return repository;
+        }
+
+        @Test
+        @DisplayName("reads files and directory entries of a ref, and no entry of a directory the ref lacks")
+        void telemetry() throws Exception {
+            var source = QuestionFixtures.telemetry(repository(), "HEAD");
+
+            assertAll(() -> assertEquals("{\"id\":\"q-a\"}", source.read(QuestionFixtures.SCENARIOS + "/q-a.json")),
+                    () -> assertEquals(List.of("q-a.json"), source.names(QuestionFixtures.SCENARIOS)),
+                    () -> assertEquals(List.of(), source.names("no/such/directory")),
+                    () -> assertEquals(List.of("q-a"), QuestionFixtures.unusedScenarios(source)));
+        }
+
+        @Test
+        @DisplayName("a failing git command reports its first line of output, a silent one an empty line")
+        void gitFailure() {
+            var failure = assertThrows(QuestionFixtures.GitFailure.class,
+                    () -> QuestionFixtures.git(directory, "rev-parse", "--verify", "no-such-ref"));
+
+            assertAll(() -> assertFalse(failure.firstLine().isEmpty()),
+                    () -> assertEquals("", new QuestionFixtures.GitFailure("git x", "").firstLine()));
+        }
+
+        @Test
+        @DisplayName("the sibling repositories are the parent of the main checkout")
+        void siblingRepositories() throws Exception {
+            var repository = repository();
+
+            assertEquals(repository.toRealPath().getParent(),
+                    QuestionFixtures.siblingRepositories(repository).toRealPath());
+        }
+
+        @Test
+        @DisplayName("checks a scenario out from the clone's objects and writes a canary beside it")
+        void checkout() throws Exception {
+            var clone = repository();
+            var commit = QuestionFixtures.git(clone, "rev-parse", "HEAD").strip();
+            var fixture = new Fixture("s", QuestionFixtures.LARGE, "t", "r", null, false,
+                    new QuestionFixtures.Checkout(clone, commit));
+            var worker = directory.resolve("worker");
+
+            var canary = QuestionFixtures.prepare(fixture, worker);
+
+            assertAll(() -> assertTrue(canary.startsWith("canary-")),
+                    () -> assertTrue(Files.isRegularFile(worker.resolve(QuestionFixtures.SCENARIOS).resolve(
+                            "q-a.json"))),
+                    () -> assertEquals(commit, QuestionFixtures.git(worker, "rev-parse", "HEAD").strip()));
+        }
+
+        @Test
+        @DisplayName("a missing clone or a start commit no object store holds fails the setup with its reason")
+        void setupFailures() throws Exception {
+            var clone = repository();
+            var missing = new Fixture("s", QuestionFixtures.LARGE, "t", "r", null, false,
+                    new QuestionFixtures.Checkout(directory.resolve("absent"), "abc"));
+            var unknownCommit = new Fixture("s", QuestionFixtures.LARGE, "t", "r", null, false,
+                    new QuestionFixtures.Checkout(clone, "0123456789abcdef0123456789abcdef01234567"));
+
+            var noClone = assertThrows(QuestionFixtures.SetupFailure.class,
+                    () -> QuestionFixtures.prepare(missing, directory.resolve("w1")));
+            var noCommit = assertThrows(QuestionFixtures.SetupFailure.class,
+                    () -> QuestionFixtures.prepare(unknownCommit, directory.resolve("w2")));
+
+            assertAll(() -> assertTrue(noClone.reason().startsWith("no local clone at ")),
+                    () -> assertFalse(noCommit.reason().isEmpty()),
+                    () -> assertInstanceOf(QuestionFixtures.GitFailure.class, noCommit.getCause()));
         }
     }
 

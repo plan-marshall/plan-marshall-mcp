@@ -10,6 +10,7 @@
 package de.planmarshall.e2e.question.driver;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -31,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -47,6 +49,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -1238,6 +1241,290 @@ class QuestionDriverTest {
                         () -> assertFalse(worker.process().isAlive()),
                         () -> assertEquals(Optional.empty(), driver.signalledPids(worker)));
             });
+        }
+    }
+
+    @Nested
+    @DisplayName("the readings of recorded logs: cuts, held continuations, recoveries, files being written, errors")
+    class LogReadings {
+
+        private static final String LOST = WORKER + "#1";
+
+        private JsonNode relay(long at, String dir, String line) {
+            return QuestionStub.JSON.createObjectNode().put("at", at).put("dir", dir).put("line", line);
+        }
+
+        private JsonNode withField(JsonNode event, String name, String value) {
+            return ((ObjectNode) event).put(name, value);
+        }
+
+        private JsonNode delivered(String task, String worker, int generation) {
+            return withField(event("answer_delivered", worker, generation, 5), "task", task);
+        }
+
+        @Test
+        @DisplayName("a cut is the earliest sign after the held call's start: the host's cancel, else a stub event")
+        void callCuts() {
+            var waits = List.of(event("wait_started", "w-2", 1, 200), event("wait_started", WORKER, 2, 200),
+                    event("wait_started", WORKER, 1, 50), event("wait_started", WORKER, 1, 200));
+            var events = new ArrayList<>(waits);
+            events.add(withField(event("wait_again", WORKER, 1, 250), "reason", "again"));
+            events.add(withField(event("reply_failed", WORKER, 1, 260), "tool", "pm_ask"));
+            events.add(event("progress", WORKER, 1, 270));
+            events.add(event("disconnected", "w-2", 1, 280));
+            events.add(event("disconnected", WORKER, 1, 450));
+            var call = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"pm_wait\"}}";
+            var cancel = "{\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":%d}}";
+            var relay = List.of(relay(300, "to_host", call), relay(50, "from_host", call),
+                    relay(300, "from_host", "not json"), relay(300, "from_host", "[1]"), relay(210, "from_host", call),
+                    relay(210, "from_host", "{\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"pm_ask\"}}"),
+                    relay(300, "from_host", cancel.formatted(9)), relay(150, "from_host", cancel.formatted(7)),
+                    relay(400, "from_host", cancel.formatted(7)), relay(500, "from_host", cancel.formatted(7)));
+            var superseded = new ArrayList<>(waits);
+            superseded.add(withField(event("reply_failed", WORKER, 1, 250), "tool", "pm_wait"));
+            superseded.add(withField(event("wait_again", WORKER, 1, 300), "reason", QuestionDriver.CUT_SUPERSEDED));
+            var again = new ArrayList<>(waits);
+            again.add(withField(event("wait_again", WORKER, 1, 300), "reason", QuestionDriver.CUT_SUPERSEDED));
+
+            var cancelled = QuestionDriver.callCut(events, relay, WORKER, 1, 100).orElseThrow();
+            var failed = QuestionDriver.callCut(superseded, List.of(), WORKER, 1, 100).orElseThrow();
+            var newer = QuestionDriver.callCut(again, List.of(), WORKER, 1, 100).orElseThrow();
+
+            assertAll(() -> assertEquals(QuestionDriver.CUT_CANCELLED, cancelled.evidence()),
+                    () -> assertEquals(200, cancelled.afterMs()),
+                    () -> assertEquals("reply_failed", failed.evidence()),
+                    () -> assertEquals(QuestionDriver.CUT_SUPERSEDED, newer.evidence()),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.callCut(waits, List.of(), WORKER, 1, 100)),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.callCut(List.of(), List.of(), WORKER, 1, 0)));
+        }
+
+        @Test
+        @DisplayName("a held continuation needs the ask, the continuation, its close and its offer over the wait")
+        void heldContinuations() {
+            var events = List.of(asked("D-0", WORKER, 2, 1), asked("D-1", WORKER, 2, 10),
+                    continued("D-0", "T-0", 11), continued("D-1", "T-2", 12),
+                    closed("T-9", WORKER, 2, 20), closed("T-2", "w-2", 3, 20), closed("T-2", WORKER, 1, 20),
+                    closed("T-2", WORKER, 3, 30),
+                    offered("T-9", WORKER, 3, 15), offered("T-2", "w-2", 3, 15), offered("T-2", WORKER, 2, 15),
+                    ((ObjectNode) offered("T-2", WORKER, 3, 15)).put("at_spawn", true), offered("T-2", WORKER, 3, 16),
+                    withField(event("submitted", WORKER, 3, 25), "task", "T-9"),
+                    withField(event("submitted", "w-2", 3, 25), "task", "T-2"),
+                    withField(event("submitted", WORKER, 2, 25), "task", "T-2"),
+                    withField(event("submitted", WORKER, 3, 27), "task", "T-2"),
+                    withField(withField(event("answer_recorded", WORKER, 3, 13), "decision", "D-0"), "channel", "x"),
+                    withField(withField(event("answer_recorded", WORKER, 3, 14), "decision", "D-1"), "channel",
+                            "quorum"));
+            var withoutSubmission = List.of(asked("D-1", WORKER, 2, 10), continued("D-1", "T-2", 12),
+                    closed("T-2", WORKER, 2, 30), offered("T-2", WORKER, 2, 16));
+
+            var held = QuestionDriver.heldContinuation(events, "D-1").orElseThrow();
+            var bare = QuestionDriver.heldContinuation(withoutSubmission, "D-1").orElseThrow();
+
+            assertAll(() -> assertEquals(new QuestionDriver.HeldContinuation("D-1", "T-2", WORKER, 3, "submitted", 30,
+                            27, "quorum"), held),
+                    () -> assertEquals(-1, bare.submittedAt()),
+                    () -> assertEquals("", bare.channel()),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.heldContinuation(List.of(), "D-1")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.heldContinuation(
+                            List.of(asked("D-1", WORKER, 2, 10)), "D-1")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.heldContinuation(
+                            List.of(asked("D-1", WORKER, 2, 10), continued("D-1", "T-2", 12)), "D-1")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.heldContinuation(
+                            List.of(asked("D-1", WORKER, 2, 10), continued("D-1", "T-2", 12),
+                                    closed("T-2", WORKER, 2, 30)), "D-1")));
+        }
+
+        @Test
+        @DisplayName("the recovery follows the continuation's state and holder, else the lost task's")
+        void recoveries() {
+            var continuation = List.of(continued("D-0", "T-0", 1), continued("D-1", "T-2", 2));
+            var heldByOther = new ArrayList<>(continuation);
+            heldByOther.add(offered("T-2", "w-2", 1, 3));
+            var lostTask = List.of(continued("D-0", "T-0", 1), offered("T-1", "w-2", 1, 2),
+                    withField(event("offered", WORKER, 1, 3), "task", "T-9"),
+                    QuestionStub.JSON.createObjectNode().put("event", "offered").put("task", "T-1"));
+            var lostHolder = List.<JsonNode>of(delivered("T-1", WORKER, 1));
+
+            assertAll(
+                    () -> assertEquals(RecoveryStep.TAKEN, step(continuation, "task.offered", _ -> true)),
+                    () -> assertEquals(RecoveryStep.TAKEN, step(heldByOther, "task.completed", _ -> true)),
+                    () -> assertEquals(RecoveryStep.TAKEN, step(heldByOther, "task.lost", _ -> true)),
+                    () -> assertEquals(RecoveryStep.TAKEN, step(heldByOther, "task.offered", _ -> false)),
+                    () -> assertEquals(RecoveryStep.CONTINUE, step(heldByOther, "task.offered", _ -> true)),
+                    () -> assertEquals(RecoveryStep.GAP, step(heldByOther, "task.suspended", _ -> true)),
+                    () -> assertEquals(RecoveryStep.RESUME, step(lostTask, "task.resumable", _ -> true)),
+                    () -> assertEquals(RecoveryStep.TAKEN, step(lostTask, "task.offered", _ -> true)),
+                    () -> assertEquals(RecoveryStep.WAIT, step(lostTask, "", _ -> true)),
+                    () -> assertEquals(RecoveryStep.WAIT, step(lostTask, "task.queued", _ -> true)),
+                    () -> assertEquals(RecoveryStep.WAIT, step(List.of(), "task.offered", _ -> true)),
+                    () -> assertEquals(RecoveryStep.WAIT, step(lostHolder, "task.offered", _ -> true)));
+        }
+
+        private RecoveryStep step(List<JsonNode> events, String state, Predicate<String> ended) {
+            return QuestionDriver.recovery(events, "D-1", "T-1", LOST, ended, _ -> Optional.of(state)).step();
+        }
+
+        @Test
+        @DisplayName("a file being written ends its complete lines at a line feed or a carriage return")
+        void writtenLines() throws Exception {
+            var carriage = Files.writeString(directory.resolve("cr.txt"), "a\r", StandardCharsets.UTF_8);
+            var trailingBlank = Files.writeString(directory.resolve("blank.txt"), "a\n \t", StandardCharsets.UTF_8);
+            var blankLines = Files.writeString(directory.resolve("lines.jsonl"), "{\"a\":1}\n\n{\"b\":2}\n",
+                    StandardCharsets.UTF_8);
+            var corrupt = Files.writeString(directory.resolve("corrupt.jsonl"), "{\"a\":1}\nnot json\n{\"b\"",
+                    StandardCharsets.UTF_8);
+
+            assertAll(
+                    () -> assertEquals(new QuestionDriver.WrittenLines(List.of("a"), false),
+                            QuestionDriver.writtenLines(carriage)),
+                    () -> assertEquals(new QuestionDriver.WrittenLines(List.of("a"), false),
+                            QuestionDriver.writtenLines(trailingBlank)),
+                    () -> assertEquals(2, QuestionDriver.readJsonLinesSoFar(blankLines).nodes().size()),
+                    () -> assertThrows(IOException.class, () -> QuestionDriver.readJsonLinesSoFar(corrupt)));
+        }
+
+        @Test
+        @DisplayName("the error text of a harness's error line, and nothing for any other line")
+        void harnessErrorTexts() {
+            assertAll(
+                    () -> assertEquals(Optional.empty(), QuestionDriver.harnessErrorText("not json")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.harnessErrorText("[1]")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.harnessErrorText("")),
+                    () -> assertEquals(Optional.of("{\"code\":1}\nquota hit\nr"), QuestionDriver.harnessErrorText(
+                            "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"errors\":[{\"code\":1},"
+                                    + "\"quota hit\"],\"result\":\"r\",\"error\":5}")),
+                    () -> assertEquals(Optional.of(""), QuestionDriver.harnessErrorText(
+                            "{\"type\":\"result\",\"is_error\":true}")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.harnessErrorText(
+                            "{\"type\":\"result\",\"subtype\":\"success\"}")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.harnessErrorText("{\"type\":\"error\"}")),
+                    () -> assertEquals(Optional.of("{\"message\":\"m\"}"), QuestionDriver.harnessErrorText(
+                            "{\"type\":\"error\",\"error\":{\"message\":\"m\"}}")),
+                    () -> assertEquals(Optional.of("text"), QuestionDriver.harnessErrorText(
+                            "{\"type\":\"error\",\"error\":\"text\"}")),
+                    () -> assertEquals(Optional.of("e"), QuestionDriver.harnessErrorText(
+                            "{\"conversation_id\":\"c\",\"error\":\"e\"}")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.harnessErrorText(
+                            "{\"conversation_id\":\"c\",\"error\":{}}")),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.harnessErrorText(
+                            "{\"conversation_id\":1,\"error\":\"e\"}")));
+        }
+
+        @Test
+        @DisplayName("the first rate limit event with a refusing status is the refusal")
+        void rateLimitRefusals() {
+            var outputs = List.of(stamped("not json"), stamped(""), stamped("[1]"),
+                    stamped("{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\"}}"),
+                    stamped("{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":1}}"),
+                    stamped("{\"type\":\"rate_limit_event\",\"rate_limit_info\":{}}"),
+                    stamped("{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\","
+                            + "\"rateLimitType\":\"five_hour\",\"resetsAt\":1700000000}}"));
+
+            var refusal = QuestionDriver.rateLimitRefusal(outputs).orElseThrow();
+
+            assertAll(() -> assertEquals("2023-11-14T22:13:20Z", refusal.resetsAt()),
+                    () -> assertEquals(Optional.empty(), QuestionDriver.rateLimitRefusal(outputs.subList(0, 6))));
+        }
+
+        @Test
+        @DisplayName("pm-exec's own lines are told apart from the harness's, and blank stderr lines are no cause")
+        void pmExecLines() {
+            assertAll(() -> assertFalse(QuestionDriver.pmExecLine("{\"pm_exec\":1}")),
+                    () -> assertFalse(QuestionDriver.pmExecLine("")),
+                    () -> assertFalse(QuestionDriver.pmExecLine("[1]")),
+                    () -> assertEquals("cause", QuestionDriver.launchFailure(WORKER, 1, 1, " \ncause\n").stderr()));
+        }
+
+        @Test
+        @DisplayName("an opencode.json carries the tool timeout of a launch that has one, and only PM_Q_ variables")
+        void opencodeConfig() throws Exception {
+            var timed = new Launch(WORKER, 1, "worker", "p", false, Duration.ofSeconds(90), List.of("bash"), null);
+            var untimed = new Launch(WORKER, 1, "worker", "p", false, null, List.of(), null);
+            var environment = Map.of("PM_Q_SOCKET", "/s", "HOME", "/h");
+
+            var withTimeout = json(QuestionDriver.opencodeConfig(List.of("java", "-cp", "x"), timed, environment));
+            var withoutTimeout = json(QuestionDriver.opencodeConfig(List.of("java"), untimed, environment));
+
+            var server = withTimeout.path("mcp").path(QuestionStub.SERVER);
+            assertAll(() -> assertEquals(90_000, server.path("timeout").asLong()),
+                    () -> assertEquals(1, server.path("environment").size()),
+                    () -> assertTrue(server.path("environment").has("PM_Q_SOCKET")),
+                    () -> assertFalse(withoutTimeout.path("mcp").path(QuestionStub.SERVER).has("timeout")));
+        }
+
+        @Test
+        @DisplayName("a worker's OpenCode data home gets the operator's login once, and none without a login")
+        void opencodeDataHome() throws Exception {
+            var home = Files.createDirectories(directory.resolve("home"));
+            var login = Files.createDirectories(home.resolve(".local/share/opencode")).resolve("auth.json");
+            Files.writeString(login, "{\"token\":\"t\"}", StandardCharsets.UTF_8);
+            var previous = System.getProperty("user.home");
+            try {
+                System.setProperty("user.home", home.toString());
+                var dataHome = QuestionDriver.opencodeDataHome(directory.resolve("w1"));
+                Files.writeString(dataHome.resolve("opencode/auth.json"), "kept", StandardCharsets.UTF_8);
+                QuestionDriver.opencodeDataHome(directory.resolve("w1"));
+                System.setProperty("user.home", directory.resolve("empty").toString());
+                var without = QuestionDriver.opencodeDataHome(directory.resolve("w2"));
+
+                assertAll(() -> assertEquals("kept", Files.readString(dataHome.resolve("opencode/auth.json"),
+                                StandardCharsets.UTF_8)),
+                        () -> assertFalse(Files.exists(without.resolve("opencode/auth.json"))));
+            } finally {
+                System.setProperty("user.home", previous);
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("launches through a stand-in pm-exec that runs no harness")
+    class Launches {
+
+        @ParameterizedTest
+        @EnumSource(Host.class)
+        @DisplayName("a newer generation ends the older one, and the recovery reads the driver's ended generations")
+        void launchesAndEndsOlderGeneration(Host host) throws Exception {
+            var exec = executable(directory.resolve("bin"), "pm-exec");
+            Files.writeString(exec, "#!/bin/sh\necho '{\"type\":\"system\"}'\nexec sleep 30\n", StandardCharsets.UTF_8);
+            var harness = executable(directory.resolve("bin"), host.executable());
+            var property = Host.EXECUTABLE_PROPERTY + host.executable();
+            var bytes = new byte[4];
+            new SecureRandom().nextBytes(bytes);
+            var socket = Path.of("/tmp", "pmq-lch-" + HexFormat.of().formatHex(bytes) + ".sock");
+            var settings = new Settings(host, "m", directory.resolve("workspace"), directory.resolve("run"),
+                    List.of(exec.toString()), QuestionDriver.OpenCodeDataHome.GLOBAL, 1);
+            System.setProperty(property, harness.toString());
+            try (var driver = QuestionDriver.start(QuestionStub.Settings.of(directory.resolve("stub"), socket),
+                         settings)) {
+                var first = driver.startWarm(new Launch(WORKER, 1, "implementer", "p", false,
+                        Duration.ofSeconds(90), List.of("Read"), null));
+                var second = driver.startWarm(new Launch(WORKER, 2, "implementer", "p", false, null, List.of(),
+                        "session-1"));
+                driver.stub().event("continued", Map.of("decision", "D-1", "task", "T-2", "entity", "T-2"));
+                driver.stub().event("offered", Map.of("task", "T-2", "worker", WORKER, "generation", 2));
+                var whileRunning = driver.recovery(first, "D-1", "T-1");
+                driver.terminate(second);
+                var afterEnd = driver.recovery(first, "D-1", "T-1");
+                driver.sibling(Host.CLAUDE, null);
+
+                var superseded = QuestionDriver.jsonLinesSoFar(driver.stub().events()).stream()
+                        .filter(event -> QuestionDriver.SUPERSEDED_ENDED.equals(event.path("event").asText()))
+                        .toList();
+                assertAll(() -> assertFalse(first.process().isAlive()),
+                        () -> assertFalse(second.process().isAlive()),
+                        () -> assertEquals(2, driver.workers().size()),
+                        () -> assertEquals(2, superseded.getFirst().path("by").asInt()),
+                        () -> assertTrue(Files.isRegularFile(host.mcpConfig(first.directory()))),
+                        () -> assertEquals(RecoveryStep.TAKEN, whileRunning.step()),
+                        () -> assertEquals(RecoveryStep.GAP, afterEnd.step()),
+                        () -> assertDoesNotThrow(() -> driver.earlyExit()),
+                        () -> assertDoesNotThrow(() -> driver.voterEarlyExits()),
+                        () -> assertDoesNotThrow(() -> driver.quotaError()),
+                        () -> assertDoesNotThrow(() -> driver.launchFailure()));
+            } finally {
+                System.clearProperty(property);
+                Files.deleteIfExists(socket);
+            }
         }
     }
 
