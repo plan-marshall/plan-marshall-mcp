@@ -405,13 +405,14 @@ class QuestionDriverTest {
         @DisplayName("the override names the executable by its absolute path, and must be an executable file")
         void override() throws Exception {
             var executable = executable(directory.resolve("bin"), "claude");
-            var plain = Files.writeString(directory.resolve("plain"), "", StandardCharsets.UTF_8);
+            var plain = Files.writeString(directory.resolve("plain"), "", StandardCharsets.UTF_8).toString();
+            List<Path> noLocations = List.of();
 
             assertAll(
                     () -> assertEquals(executable.toString(),
-                            Host.CLAUDE.resolveExecutable(executable.toString(), "", List.of())),
+                            Host.CLAUDE.resolveExecutable(executable.toString(), "", noLocations)),
                     () -> assertThrows(IllegalStateException.class,
-                            () -> Host.CLAUDE.resolveExecutable(plain.toString(), "", List.of())));
+                            () -> Host.CLAUDE.resolveExecutable(plain, "", noLocations)));
         }
 
         @Test
@@ -431,8 +432,11 @@ class QuestionDriverTest {
         @Test
         @DisplayName("an executable found nowhere names the property to set")
         void notFound() {
+            var searchPath = directory.toString();
+            List<Path> noLocations = List.of();
+
             var failure = assertThrows(IllegalStateException.class,
-                    () -> Host.ANTIGRAVITY.resolveExecutable(null, directory.toString(), List.of()));
+                    () -> Host.ANTIGRAVITY.resolveExecutable(null, searchPath, noLocations));
 
             assertTrue(failure.getMessage().contains("-D" + Host.EXECUTABLE_PROPERTY + "agy"), failure.getMessage());
         }
@@ -1549,10 +1553,10 @@ class QuestionDriverTest {
                         () -> assertTrue(Files.isRegularFile(host.mcpConfig(first.directory()))),
                         () -> assertEquals(RecoveryStep.TAKEN, whileRunning.step()),
                         () -> assertEquals(RecoveryStep.GAP, afterEnd.step()),
-                        () -> assertDoesNotThrow(() -> driver.earlyExit()),
-                        () -> assertDoesNotThrow(() -> driver.voterEarlyExits()),
-                        () -> assertDoesNotThrow(() -> driver.quotaError()),
-                        () -> assertDoesNotThrow(() -> driver.launchFailure()));
+                        () -> assertDoesNotThrow(() -> driver.earlyExit()), // NOSONAR java:S1612 - a reference is ambiguous
+                        () -> assertDoesNotThrow(driver::voterEarlyExits),
+                        () -> assertDoesNotThrow(() -> driver.quotaError()), // NOSONAR java:S1612 - a reference is ambiguous
+                        () -> assertDoesNotThrow(() -> driver.launchFailure())); // NOSONAR java:S1612 - a reference is ambiguous
             } finally {
                 System.clearProperty(property);
                 Files.deleteIfExists(socket);

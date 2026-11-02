@@ -123,12 +123,14 @@ class QuestionEvidenceTest {
             var named = new ResultTarget(directory, "s", Set.of("inv-9"), false);
             var records = List.<JsonNode>of(QuestionStub.JSON.createObjectNode()
                     .put("invocation", INVOCATION));
+            Set<String> none = Set.of();
+            var invocations = Set.of(INVOCATION);
 
             assertAll(
                     () -> assertThrows(IllegalArgumentException.class,
-                            () -> new ResultTarget(directory, "../x", Set.of(), false)),
+                            () -> new ResultTarget(directory, "../x", none, false)),
                     () -> assertThrows(IllegalArgumentException.class,
-                            () -> new ResultTarget(directory, null, Set.of(INVOCATION), false)),
+                            () -> new ResultTarget(directory, null, invocations, false)),
                     () -> assertThrows(IllegalArgumentException.class, () -> named.select(records)),
                     () -> assertEquals(records, new ResultTarget(directory, null, Set.of(), false).select(records)));
         }
@@ -229,19 +231,23 @@ class QuestionEvidenceTest {
         void noSource() throws Exception {
             var results = results(run("r-1", INVOCATION, false));
 
-            assertThrows(IOException.class, () -> QuestionEvidence.relocate(results.resolve(
-                    QuestionEvidence.RUNS_FILE), List.of(INVOCATION), directory.resolve("work"), List.of()));
+            var runsFile = results.resolve(QuestionEvidence.RUNS_FILE);
+            var invocations = List.of(INVOCATION);
+            var work = directory.resolve("work");
+            List<Path> noFallbacks = List.of();
+
+            assertThrows(IOException.class, () -> QuestionEvidence.relocate(runsFile, invocations, work, noFallbacks));
         }
 
         @Test
         @DisplayName("a line that names its stub directory twice is refused")
         void twice() throws Exception {
-            var record = run("r-1", INVOCATION, true);
-            record.put("copy", record.path(RunView.STUB_DIR).asText());
-            var line = QuestionStub.JSON.writeValueAsString(record).replace("\"copy\"", "\"" + RunView.STUB_DIR
+            var runRecord = run("r-1", INVOCATION, true);
+            runRecord.put("copy", runRecord.path(RunView.STUB_DIR).asText());
+            var line = QuestionStub.JSON.writeValueAsString(runRecord).replace("\"copy\"", "\"" + RunView.STUB_DIR
                     + "\"");
 
-            assertThrows(IOException.class, () -> QuestionEvidence.withStubDir(line, record, directory));
+            assertThrows(IOException.class, () -> QuestionEvidence.withStubDir(line, runRecord, directory));
         }
     }
 

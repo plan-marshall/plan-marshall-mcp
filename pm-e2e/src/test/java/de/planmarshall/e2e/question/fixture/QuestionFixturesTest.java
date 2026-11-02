@@ -406,22 +406,25 @@ class QuestionFixturesTest {
             var otherId = recipe("{}", null);
             otherId.put(QuestionFixtures.SCENARIOS + "/" + QuestionFixtures.LARGE_SCENARIOS.getFirst() + ".json",
                     "{\"id\":\"other\"}");
+            var noChoices = recipe("""
+                    {"input":{"question":"Which?"},"target":{"answer":"cache"}}""", null);
+            var answerNone = recipe("""
+                    {"input":{"question":"Which?","choices":["cache","none"]},"target":{"answer":"none"}}""", null);
+            var answerNotAChoice = recipe("""
+                    {"input":{"question":"Which?","choices":["cache","none"]},"target":{"answer":"other"}}""", null);
+            var contradictingAnswer = recipe("""
+                    {"input":{"question":"Which?","choices":["a","b"]},"target":{"answer":"c"}}""",
+                    "{\"target\":{\"answer\":\"a\"}}");
+            var blankQuestion = recipe("""
+                    {"input":{"question":" ","choices":["cache"]},"target":{"answer":"cache"}}""", null);
 
             assertAll(
                     () -> assertThrows(IllegalStateException.class, () -> scenario(otherId)),
-                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
-                            {"input":{"question":"Which?"},"target":{"answer":"cache"}}""", null))),
-                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
-                            {"input":{"question":"Which?","choices":["cache","none"]},"target":{"answer":"none"}}""",
-                            null))),
-                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
-                            {"input":{"question":"Which?","choices":["cache","none"]},"target":{"answer":"other"}}""",
-                            null))),
-                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
-                            {"input":{"question":"Which?","choices":["a","b"]},"target":{"answer":"c"}}""",
-                            "{\"target\":{\"answer\":\"a\"}}"))),
-                    () -> assertThrows(IllegalStateException.class, () -> scenario(recipe("""
-                            {"input":{"question":" ","choices":["cache"]},"target":{"answer":"cache"}}""", null))));
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(noChoices)),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(answerNone)),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(answerNotAChoice)),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(contradictingAnswer)),
+                    () -> assertThrows(IllegalStateException.class, () -> scenario(blankQuestion)));
         }
 
         @Test
@@ -430,10 +433,10 @@ class QuestionFixturesTest {
             var apply = Files.createDirectories(directory.resolve("items/question/apply-answer"));
             Files.writeString(apply.resolve("he-2.json"), """
                     {"id":"question/apply-answer/he-2","input":{"facts":"def f(): pass"}}""", StandardCharsets.UTF_8);
+            var nothing = directory.resolve("nothing");
 
             assertAll(
-                    () -> assertThrows(IllegalStateException.class,
-                            () -> QuestionFixtures.applyAnswer(directory.resolve("nothing"))),
+                    () -> assertThrows(IllegalStateException.class, () -> QuestionFixtures.applyAnswer(nothing)),
                     () -> assertThrows(IllegalStateException.class, () -> QuestionFixtures.applyAnswer(directory)));
         }
 

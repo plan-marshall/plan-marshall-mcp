@@ -369,10 +369,10 @@ class QuestionResultsTest {
         @Test
         @DisplayName("R4 has no verdict but reports its figures")
         void r4() throws Exception {
-            var record = run("R4", Map.of("size", "large", "reference", "cache"),
+            var runRecord = run("R4", Map.of("size", "large", "reference", "cache"),
                     List.of(event(RunReadings.ASKED, WORKER, 1, 10), submitted("cache", 20)));
 
-            var result = QuestionResults.evaluate("R4", List.of(record));
+            var result = QuestionResults.evaluate("R4", List.of(runRecord));
 
             assertAll(
                     () -> assertEquals("none", result.path("verdict").asText()),
@@ -911,17 +911,20 @@ class QuestionResultsTest {
         @Test
         @DisplayName("a bad suffix, invocations without a suffix and an invocation without records are refused")
         void refusals() {
-            var record = QuestionStub.JSON.createObjectNode().put("invocation", "inv-1");
+            var runRecord = QuestionStub.JSON.createObjectNode().put("invocation", "inv-1");
             var target = new QuestionResults.ResultTarget(directory, "part", Set.of("inv-1", "inv-9"), false);
+            Set<String> none = Set.of();
+            var oneInvocation = Set.of("inv-1");
+            List<JsonNode> selected = List.of(runRecord);
 
             assertAll(
                     () -> assertThrows(IllegalArgumentException.class,
-                            () -> new QuestionResults.ResultTarget(directory, "-bad", Set.of(), false)),
+                            () -> new QuestionResults.ResultTarget(directory, "-bad", none, false)),
                     () -> assertThrows(IllegalArgumentException.class,
-                            () -> new QuestionResults.ResultTarget(directory, null, Set.of("inv-1"), false)),
-                    () -> assertThrows(IllegalArgumentException.class, () -> target.select(List.of(record))),
-                    () -> assertEquals(1, new QuestionResults.ResultTarget(directory, "part", Set.of("inv-1"), false)
-                            .select(List.of(record, QuestionStub.JSON.createObjectNode().put("invocation",
+                            () -> new QuestionResults.ResultTarget(directory, null, oneInvocation, false)),
+                    () -> assertThrows(IllegalArgumentException.class, () -> target.select(selected)),
+                    () -> assertEquals(1, new QuestionResults.ResultTarget(directory, "part", oneInvocation, false)
+                            .select(List.of(runRecord, QuestionStub.JSON.createObjectNode().put("invocation",
                                     "inv-2"))).size()));
         }
     }
@@ -989,13 +992,13 @@ class QuestionResultsTest {
         @Test
         @DisplayName("an invocation with fewer records than planned is flagged incomplete with a limit")
         void incomplete() throws Exception {
-            var record = q4Run(REFERENCE);
+            var runRecord = q4Run(REFERENCE);
             var invocation = QuestionStub.JSON.createObjectNode();
             invocation.put("invocation", "inv-1");
             invocation.put("item", "Q4");
             invocation.put(QuestionResults.PLANNED_RUNS, 3);
 
-            var result = QuestionResults.result("Q4", List.of(record), List.of(invocation), () -> 0);
+            var result = QuestionResults.result("Q4", List.of(runRecord), List.of(invocation), () -> 0);
 
             assertAll(
                     () -> assertTrue(result.path("invocations").get(0).path("incomplete").asBoolean()),
@@ -1007,12 +1010,12 @@ class QuestionResultsTest {
         @Test
         @DisplayName("run and invocation records are appended and read back per item")
         void records() throws Exception {
-            var record = q4Run(REFERENCE);
+            var runRecord = q4Run(REFERENCE);
             var invocation = QuestionStub.JSON.createObjectNode();
             invocation.put("invocation", "inv-1");
             invocation.put("item", "Q4");
 
-            QuestionResults.recordRun(directory, record);
+            QuestionResults.recordRun(directory, runRecord);
             QuestionResults.recordInvocation(directory, invocation);
             QuestionResults.recordInvocation(directory, invocation.deepCopy().put("planned_runs", 3));
 

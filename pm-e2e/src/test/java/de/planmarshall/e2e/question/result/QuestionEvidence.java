@@ -340,12 +340,12 @@ public final class QuestionEvidence {
             if (line.isBlank()) {
                 continue;
             }
-            var record = QuestionStub.JSON.readTree(line);
-            var invocation = record.path(QuestionResults.INVOCATION).asText();
+            var runRecord = QuestionStub.JSON.readTree(line);
+            var invocation = runRecord.path(QuestionResults.INVOCATION).asText();
             if (!moved.containsKey(invocation)) {
                 continue;
             }
-            var old = Path.of(record.path(RunView.STUB_DIR).asText());
+            var old = Path.of(runRecord.path(RunView.STUB_DIR).asText());
             var runDirectory = old.getParent();
             if (runDirectory == null || runDirectory.getParent() == null) {
                 throw new IOException("no stub directory <workspace>/<run id>/stub in " + old);
@@ -361,7 +361,7 @@ public final class QuestionEvidence {
                     .orElseThrow(() -> new IOException("no stub log of " + runId + " at " + old + " or in "
                             + fallbacks));
             copyTree(source, target);
-            lines[index] = withStubDir(line, record, target);
+            lines[index] = withStubDir(line, runRecord, target);
             moved.put(invocation, moved.get(invocation).add(!source.equals(old)));
             changed = true;
         }
@@ -400,23 +400,23 @@ public final class QuestionEvidence {
     }
 
     /**
-     * @param line   a record's line of {@code runs.jsonl}
-     * @param record the record it holds
-     * @param target the new stub directory
+     * @param line      a record's line of {@code runs.jsonl}
+     * @param runRecord the record it holds
+     * @param target    the new stub directory
      * @return the line with the new {@code stub_dir} in place of the old and nothing else changed
      * @throws IOException if the line names its stub directory other than once, or the new line differs from the
      *                     record in anything but {@code stub_dir}
      */
-    public static String withStubDir(String line, JsonNode record, Path target) throws IOException {
+    public static String withStubDir(String line, JsonNode runRecord, Path target) throws IOException {
         var field = "\"" + RunView.STUB_DIR + "\":";
-        var old = field + QuestionStub.JSON.writeValueAsString(record.path(RunView.STUB_DIR).asText());
+        var old = field + QuestionStub.JSON.writeValueAsString(runRecord.path(RunView.STUB_DIR).asText());
         var first = line.indexOf(old);
         if (first < 0 || line.indexOf(old, first + 1) >= 0) {
             throw new IOException("the record does not name its stub directory exactly once: " + line);
         }
         var replaced = line.substring(0, first) + field + QuestionStub.JSON.writeValueAsString(target.toString())
                 + line.substring(first + old.length());
-        var expected = ((ObjectNode) record.deepCopy()).put(RunView.STUB_DIR, target.toString());
+        var expected = ((ObjectNode) runRecord.deepCopy()).put(RunView.STUB_DIR, target.toString());
         if (!expected.equals(QuestionStub.JSON.readTree(replaced))) {
             throw new IOException("the relocated record differs beyond stub_dir: " + replaced);
         }

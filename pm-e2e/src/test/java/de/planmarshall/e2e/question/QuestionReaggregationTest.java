@@ -76,19 +76,21 @@ class QuestionReaggregationTest {
     @DisplayName("refuses an item without a run record")
     void refusesEmptyItem() throws Exception {
         var results = results();
+        var target = target();
 
         assertThrows(IllegalArgumentException.class,
-                () -> QuestionReaggregation.reaggregate("Q1", results, target(), () -> 0));
+                () -> QuestionReaggregation.reaggregate("Q1", results, target, () -> 0));
     }
 
     @Test
     @DisplayName("writes the answer audit of every run record and refuses a directory without one")
     void audits() throws Exception {
         var file = QuestionReaggregation.auditAnswers(results(), directory.resolve("audit"));
+        var empty = directory.resolve("empty");
 
         assertAll(() -> assertTrue(Files.isRegularFile(file)),
                 () -> assertThrows(IllegalArgumentException.class,
-                        () -> QuestionReaggregation.auditAnswers(directory.resolve("empty"), directory)));
+                        () -> QuestionReaggregation.auditAnswers(empty, directory)));
     }
 
     @Test

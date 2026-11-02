@@ -21,10 +21,15 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 
@@ -85,13 +90,17 @@ class QuestionLoopMeasurementTest {
         @Test
         @DisplayName("refuses negative run counts and a parallel level below one")
         void refusesInvalidCounts() {
+            var claude = List.of(Host.CLAUDE);
+            List<Host> noHosts = List.of();
+            Map<Host, String> noModels = Map.of();
+            List<String> noExec = List.of();
+
             assertAll(() -> assertThrows(IllegalArgumentException.class,
-                            () -> config(List.of(Host.CLAUDE), -1, 0, Warmth.BOTH, OpenCodeDataHome.GLOBAL, List.of())),
+                            () -> config(claude, -1, 0, Warmth.BOTH, OpenCodeDataHome.GLOBAL, noExec)),
                     () -> assertThrows(IllegalArgumentException.class,
-                            () -> config(List.of(Host.CLAUDE), 1, -1, Warmth.BOTH, OpenCodeDataHome.GLOBAL,
-                                    List.of())),
-                    () -> assertThrows(IllegalArgumentException.class, () -> new Config(List.of(), Map.of(), 1, 1, 0,
-                            directory, directory, "", directory, 0, directory, directory, directory, List.of(),
+                            () -> config(claude, 1, -1, Warmth.BOTH, OpenCodeDataHome.GLOBAL, noExec)),
+                    () -> assertThrows(IllegalArgumentException.class, () -> new Config(noHosts, noModels, 1, 1, 0,
+                            directory, directory, "", directory, 0, directory, directory, directory, noExec,
                             Duration.ZERO, Warmth.BOTH, OpenCodeDataHome.GLOBAL, 3)));
         }
 
@@ -267,12 +276,13 @@ class QuestionLoopMeasurementTest {
         @Test
         @DisplayName("plans R1 by the item name and refuses an unknown item")
         void plansByItem() throws Exception {
-            var plans = QuestionLoopMeasurement.plans("R1", config());
+            var config = config();
+            var plans = QuestionLoopMeasurement.plans("R1", config);
 
             assertAll(() -> assertEquals(8, plans.size()),
                     () -> assertTrue(plans.stream().allMatch(plan -> plan.hold().equals(Duration.ofHours(1)))),
                     () -> assertThrows(IllegalArgumentException.class,
-                            () -> QuestionLoopMeasurement.plans("Q9", config())));
+                            () -> QuestionLoopMeasurement.plans("Q9", config)));
         }
 
         @Test
@@ -345,16 +355,16 @@ class QuestionLoopMeasurementTest {
         @Test
         @DisplayName("records the plan, the parallel level and the question bound of a Q5 run")
         void runRecord() {
-            var record = QuestionLoopMeasurement.runRecord(plan("Q5", Host.CLAUDE).bounded()
+            var runRecord = QuestionLoopMeasurement.runRecord(plan("Q5", Host.CLAUDE).bounded()
                     .with(Reply.RESTATE_OPTIONS), config(), directory);
             var r3 = QuestionLoopMeasurement.runRecord(plan("R3", Host.CLAUDE).faulting(Fault.KILL)
                     .continuingOn(Host.OPENCODE).resumingSession("s"), config(), directory);
 
-            assertAll(() -> assertEquals(1, record.path(QuestionResults.PARALLEL).asInt()),
-                    () -> assertEquals(Scale.Q5_FIRST_BOUND, record.path(QuestionResults.QUESTION_BOUND).asInt()),
-                    () -> assertEquals(RunView.HARNESS_DEFAULT, record.path("model").asText()),
-                    () -> assertEquals("restate_options", record.path("reply").asText()),
-                    () -> assertTrue(record.path("bound").asBoolean()),
+            assertAll(() -> assertEquals(1, runRecord.path(QuestionResults.PARALLEL).asInt()),
+                    () -> assertEquals(Scale.Q5_FIRST_BOUND, runRecord.path(QuestionResults.QUESTION_BOUND).asInt()),
+                    () -> assertEquals(RunView.HARNESS_DEFAULT, runRecord.path("model").asText()),
+                    () -> assertEquals("restate_options", runRecord.path("reply").asText()),
+                    () -> assertTrue(runRecord.path("bound").asBoolean()),
                     () -> assertFalse(r3.has(QuestionResults.QUESTION_BOUND)),
                     () -> assertEquals("KILL", r3.path("fault").asText()),
                     () -> assertEquals("opencode", r3.path("continue_host").asText()),
@@ -388,21 +398,21 @@ class QuestionLoopMeasurementTest {
                     directory, directory, directory, List.of(), Duration.ofSeconds(1), Warmth.FRESH,
                     OpenCodeDataHome.WORKER, 3);
 
-            var record = QuestionLoopMeasurement.invocation("R1", limited, List.of(plan("R1", Host.CLAUDE)));
+            var invocationRecord = QuestionLoopMeasurement.invocation("R1", limited, List.of(plan("R1", Host.CLAUDE)));
 
-            assertAll(() -> assertEquals(2, record.path("fixtures_limit").asInt()),
-                    () -> assertFalse(record.path("opencode_serial").asBoolean()));
+            assertAll(() -> assertEquals(2, invocationRecord.path("fixtures_limit").asInt()),
+                    () -> assertFalse(invocationRecord.path("opencode_serial").asBoolean()));
         }
 
         @Test
         @DisplayName("stops the remaining runs of a scenario whose setup failed and records the counts")
         void setupStops() {
             var stops = new SetupStops();
-            var record = QuestionStub.JSON.createObjectNode();
+            var runRecord = QuestionStub.JSON.createObjectNode();
 
             var before = stops.stop("s1");
             stops.failed("s1");
-            QuestionLoopMeasurement.recordSetupFailure(record, new QuestionFixtures.SetupFailure("no clone",
+            QuestionLoopMeasurement.recordSetupFailure(runRecord, new QuestionFixtures.SetupFailure("no clone",
                     "the clone is missing", null));
             var after = stops.stop("s1");
             var invocation = stops.applyTo(QuestionStub.JSON.createObjectNode());
@@ -411,8 +421,8 @@ class QuestionLoopMeasurementTest {
                     () -> assertEquals(1, invocation.path(RunView.SETUP_FAILED).asInt()),
                     () -> assertEquals(1, invocation.path(QuestionResults.SETUP_STOPPED_RUNS).asInt()),
                     () -> assertTrue(invocation.path("setup_stop_message").asText().contains("s1")),
-                    () -> assertTrue(record.path(RunView.SETUP_FAILED).asBoolean()),
-                    () -> assertEquals("no clone", record.path(RunView.SETUP_FAILED_REASON).asText()));
+                    () -> assertTrue(runRecord.path(RunView.SETUP_FAILED).asBoolean()),
+                    () -> assertEquals("no clone", runRecord.path(RunView.SETUP_FAILED_REASON).asText()));
         }
 
         @Test
@@ -420,12 +430,12 @@ class QuestionLoopMeasurementTest {
         void usageLimitStops() {
             var stops = new SetupStops();
             var refusal = new QuestionDriver.RateLimitRefusal("rejected", "seven_day", "2026-11-01T08:00:00Z", "{}");
-            var record = QuestionStub.JSON.createObjectNode();
+            var runRecord = QuestionStub.JSON.createObjectNode();
 
             var before = stops.stop("s1");
-            QuestionLoopMeasurement.recordQuotaError(record, new QuestionDriver.QuotaError("w1", 1, "{}",
+            QuestionLoopMeasurement.recordQuotaError(runRecord, new QuestionDriver.QuotaError("w1", 1, "{}",
                     QuestionDriver.RATE_LIMIT_EVENT, refusal));
-            stops.refused(record.path(QuestionDriver.RESETS_AT).asText());
+            stops.refused(runRecord.path(QuestionDriver.RESETS_AT).asText());
             stops.refused("");
             var other = stops.stop("s2");
             var same = stops.stop("s1");
@@ -438,29 +448,92 @@ class QuestionLoopMeasurementTest {
                     () -> assertEquals("[\"2026-11-01T08:00:00Z\"]",
                             invocation.path("usage_limit_resets_at").toString()),
                     () -> assertFalse(invocation.has(RunView.SETUP_FAILED)),
-                    () -> assertTrue(RunView.notRun(record)),
-                    () -> assertEquals(RunView.USAGE_LIMIT, record.path(RunView.NOT_RUN_REASON).asText()),
+                    () -> assertTrue(RunView.notRun(runRecord)),
+                    () -> assertEquals(RunView.USAGE_LIMIT, runRecord.path(RunView.NOT_RUN_REASON).asText()),
                     () -> assertEquals(QuestionDriver.RATE_LIMIT_EVENT,
-                            record.path(QuestionDriver.QUOTA_RULE).asText()),
-                    () -> assertEquals("seven_day", record.path(QuestionDriver.RATE_LIMIT_TYPE).asText()),
-                    () -> assertEquals("rejected", record.path(QuestionDriver.RATE_LIMIT_STATUS).asText()),
-                    () -> assertTrue(record.path(QuestionDriver.QUOTA_ERROR).asBoolean()));
+                            runRecord.path(QuestionDriver.QUOTA_RULE).asText()),
+                    () -> assertEquals("seven_day", runRecord.path(QuestionDriver.RATE_LIMIT_TYPE).asText()),
+                    () -> assertEquals("rejected", runRecord.path(QuestionDriver.RATE_LIMIT_STATUS).asText()),
+                    () -> assertTrue(runRecord.path(QuestionDriver.QUOTA_ERROR).asBoolean()));
+        }
+
+        @Test
+        @DisplayName("does not start a serial run that waited for the lock once the run holding it was refused")
+        void queuedSerialRunStopsAfterRefusal() throws Exception {
+            var stops = new SetupStops();
+            var lock = new ReentrantLock();
+            var started = new AtomicInteger();
+            var plan = plan("Q1", Host.OPENCODE);
+
+            lock.lock();
+            try (var executor = Executors.newSingleThreadExecutor()) {
+                var waiting = executor.submit(() -> {
+                    QuestionLoopMeasurement.startUnlessStopped(plan, lock, stops, started::incrementAndGet);
+                    return null;
+                });
+                try {
+                    awaitQueued(lock);
+                    stops.refused("2026-11-01T08:00:00Z");
+                } finally {
+                    lock.unlock();
+                }
+                waiting.get(10, TimeUnit.SECONDS);
+            }
+            var invocation = stops.applyTo(QuestionStub.JSON.createObjectNode());
+
+            assertAll(() -> assertEquals(0, started.get()),
+                    () -> assertEquals(1, stops.limitStopped()),
+                    () -> assertEquals(1, invocation.path(QuestionResults.USAGE_LIMIT_STOPPED_RUNS).asInt()),
+                    () -> assertFalse(lock.isLocked()));
+        }
+
+        @Test
+        @DisplayName("starts a run with and without the lock, and a stopped run without taking the lock")
+        void startsUnlessStopped() throws Exception {
+            var stops = new SetupStops();
+            var lock = new ReentrantLock();
+            var started = new AtomicInteger();
+            var plan = plan("Q1", Host.OPENCODE);
+
+            QuestionLoopMeasurement.startUnlessStopped(plan, lock, stops, started::incrementAndGet);
+            QuestionLoopMeasurement.startUnlessStopped(plan, null, stops, started::incrementAndGet);
+            var heldDuringStart = new AtomicInteger();
+            QuestionLoopMeasurement.startUnlessStopped(plan, lock, stops,
+                    () -> heldDuringStart.set(lock.getHoldCount()));
+            stops.failed(plan.fixture().id());
+            QuestionLoopMeasurement.startUnlessStopped(plan, lock, stops,
+                    () -> heldDuringStart.set(-1));
+
+            assertAll(() -> assertEquals(2, started.get()),
+                    () -> assertEquals(1, heldDuringStart.get()),
+                    () -> assertEquals(1, stops.stopped()),
+                    () -> assertFalse(lock.isLocked()));
+        }
+
+        private static void awaitQueued(ReentrantLock lock) {
+            var deadline = Instant.now().plusSeconds(10);
+            while (!lock.hasQueuedThreads()) {
+                if (Instant.now().isAfter(deadline)) {
+                    throw new IllegalStateException("the run never waited for the lock");
+                }
+                Thread.onSpinWait();
+            }
         }
 
         @Test
         @DisplayName("records a quota error of the harness's own output as a run, not as not run")
         void harnessQuotaError() {
             var stops = new SetupStops();
-            var record = QuestionStub.JSON.createObjectNode();
+            var runRecord = QuestionStub.JSON.createObjectNode();
 
-            QuestionLoopMeasurement.recordQuotaError(record, new QuestionDriver.QuotaError("w1", 2,
+            QuestionLoopMeasurement.recordQuotaError(runRecord, new QuestionDriver.QuotaError("w1", 2,
                     "error: quota reached", QuestionDriver.HARNESS_ERROR_OUTPUT, null));
 
-            assertAll(() -> assertFalse(RunView.notRun(record)),
+            assertAll(() -> assertFalse(RunView.notRun(runRecord)),
                     () -> assertEquals(QuestionDriver.HARNESS_ERROR_OUTPUT,
-                            record.path(QuestionDriver.QUOTA_RULE).asText()),
-                    () -> assertEquals(2, record.path("quota_error_generation").asInt()),
-                    () -> assertFalse(record.has(QuestionDriver.RESETS_AT)),
+                            runRecord.path(QuestionDriver.QUOTA_RULE).asText()),
+                    () -> assertEquals(2, runRecord.path("quota_error_generation").asInt()),
+                    () -> assertFalse(runRecord.has(QuestionDriver.RESETS_AT)),
                     () -> assertFalse(stops.any()),
                     () -> assertFalse(stops.stop("s1")));
         }

@@ -394,44 +394,44 @@ class QuestionLoopMeasurement {
      * @return the invocation record
      */
     static ObjectNode invocation(String item, Config config, List<RunPlan> plans) {
-        var record = QuestionStub.JSON.createObjectNode();
-        record.put(QuestionResults.INVOCATION, item + "-" + Instant.now().toString().replace(":", "")
+        var invocationRecord = QuestionStub.JSON.createObjectNode();
+        invocationRecord.put(QuestionResults.INVOCATION, item + "-" + Instant.now().toString().replace(":", "")
                 .replace(".", "") + "-" + randomHex());
-        record.put("item", item);
-        record.put("started_at", Instant.now().toString());
-        record.put("runs", config.runs());
-        record.put("large_runs", config.largeRuns());
+        invocationRecord.put("item", item);
+        invocationRecord.put("started_at", Instant.now().toString());
+        invocationRecord.put("runs", config.runs());
+        invocationRecord.put("large_runs", config.largeRuns());
         if (config.fixtures() == Integer.MAX_VALUE) {
-            record.putNull("fixtures_limit");
+            invocationRecord.putNull("fixtures_limit");
         } else {
-            record.put("fixtures_limit", config.fixtures());
+            invocationRecord.put("fixtures_limit", config.fixtures());
         }
-        record.put("fixtures", plans.stream().map(plan -> plan.fixture().id()).distinct().count());
-        var hosts = record.putArray("hosts");
+        invocationRecord.put("fixtures", plans.stream().map(plan -> plan.fixture().id()).distinct().count());
+        var hosts = invocationRecord.putArray("hosts");
         config.hosts().forEach(host -> hosts.add(host.executable()));
-        record.put("warmth", config.warmth().name().toLowerCase(Locale.ROOT));
-        record.put(QuestionResults.PARALLEL, config.parallel());
-        record.put("opencode_data_home", config.openCodeDataHome().name().toLowerCase(Locale.ROOT));
-        record.put("opencode_serial", serialOpenCode(config)
+        invocationRecord.put("warmth", config.warmth().name().toLowerCase(Locale.ROOT));
+        invocationRecord.put(QuestionResults.PARALLEL, config.parallel());
+        invocationRecord.put("opencode_data_home", config.openCodeDataHome().name().toLowerCase(Locale.ROOT));
+        invocationRecord.put("opencode_serial", serialOpenCode(config)
                 && plans.stream().anyMatch(QuestionLoopMeasurement::usesOpenCode));
-        var models = record.putArray("opencode_models");
+        var models = invocationRecord.putArray("opencode_models");
         openCodeModels(plans, config).stream().sorted(Comparator.nullsFirst(Comparator.naturalOrder()))
                 .forEach(models::add);
-        var ages = record.putArray("r2_ages_s");
+        var ages = invocationRecord.putArray("r2_ages_s");
         durations(R2_AGES, LONGEST).forEach(age -> ages.add(age.toSeconds()));
-        record.put(QuestionResults.RUN_TIMEOUT, config.runTimeout().toString());
-        var holds = record.putArray("holds_s");
+        invocationRecord.put(QuestionResults.RUN_TIMEOUT, config.runTimeout().toString());
+        var holds = invocationRecord.putArray("holds_s");
         plans.stream().map(plan -> plan.hold().toSeconds()).distinct().sorted().forEach(holds::add);
-        record.put(QuestionResults.PLANNED_RUNS, plans.size());
+        invocationRecord.put(QuestionResults.PLANNED_RUNS, plans.size());
         if ("Q5".equals(item)) {
-            record.put(QuestionResults.QUESTION_BOUND, config.questionBound());
+            invocationRecord.put(QuestionResults.QUESTION_BOUND, config.questionBound());
         }
         if ("R3".equals(item)) {
-            var faults = record.putArray(QuestionResults.R3_FAULTS);
+            var faults = invocationRecord.putArray(QuestionResults.R3_FAULTS);
             plans.stream().map(RunPlan::fault).filter(Objects::nonNull).distinct().sorted()
                     .forEach(fault -> faults.add(fault.name()));
         }
-        return record;
+        return invocationRecord;
     }
 
     /**
@@ -1086,27 +1086,58 @@ class QuestionLoopMeasurement {
         try (var executor = Executors.newFixedThreadPool(config.parallel())) {
             var futures = new ArrayList<Future<?>>();
             for (var plan : plans) {
-                var serial = serialOpenCode(config) && usesOpenCode(plan);
+                var lock = serialOpenCode(config) && usesOpenCode(plan) ? OPENCODE_SERIAL : null;
                 futures.add(executor.submit(() -> {
-                    if (stops.stop(plan.fixture().id())) {
-                        return null;
-                    }
-                    if (serial) {
-                        OPENCODE_SERIAL.lock();
-                    }
-                    try {
-                        runOne(plan, config, invocation, stops);
-                    } finally {
-                        if (serial) {
-                            OPENCODE_SERIAL.unlock();
-                        }
-                    }
+                    startUnlessStopped(plan, lock, stops, () -> runOne(plan, config, invocation, stops));
                     return null;
                 }));
             }
             for (var future : futures) {
                 future.get();
             }
+        }
+    }
+
+    /** The start of one planned run. */
+    @FunctionalInterface
+    interface RunStart {
+        /**
+         * Starts the run and appends its record.
+         *
+         * @throws IOException if the record cannot be appended
+         */
+        void start() throws IOException;
+    }
+
+    /**
+     * Starts one planned run unless the invocation stops it ({@link SetupStops#stop(String)}). A run that holds a lock
+     * while it runs asks again once it has the lock: the run that held the lock before may have been refused by the
+     * usage limit or have failed the setup of its scenario while this one waited, and then this one is not started
+     * and is counted as stopped.
+     *
+     * @param plan  the planned run
+     * @param lock  the lock the run holds while it runs ({@link #OPENCODE_SERIAL}), {@code null} for none
+     * @param stops the stops of the invocation
+     * @param start the start of the run
+     * @throws IOException if the run's record cannot be appended
+     */
+    static void startUnlessStopped(RunPlan plan, ReentrantLock lock, SetupStops stops, RunStart start)
+            throws IOException {
+        var fixture = plan.fixture().id();
+        if (stops.stop(fixture)) {
+            return;
+        }
+        if (lock == null) {
+            start.start();
+            return;
+        }
+        lock.lock();
+        try {
+            if (!stops.stop(fixture)) {
+                start.start();
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -1126,28 +1157,28 @@ class QuestionLoopMeasurement {
         var base = config.workspace().resolve(id);
         var stubDir = stubDirectory(config, id);
         var stubSettings = stubSettings(plan, config, stubDir, Path.of("/tmp", "pmq-" + suffix + ".sock"));
-        var record = runRecord(plan, config, stubDir);
-        record.put(QuestionResults.INVOCATION, invocation);
+        var runRecord = runRecord(plan, config, stubDir);
+        runRecord.put(QuestionResults.INVOCATION, invocation);
         if (!stubSettings.loseOnExit()) {
-            record.put(QuestionResults.STUB_LOSE_ON_EXIT, false);
+            runRecord.put(QuestionResults.STUB_LOSE_ON_EXIT, false);
         }
         try (var driver = QuestionDriver.start(stubSettings, new QuestionDriver.Settings(plan.host(), plan.model(),
                      base.resolve("workers"), config.results().resolve("runs").resolve(id), config.exec(),
                      config.openCodeDataHome(), config.parallel()))) {
-            new Session(driver, plan, config, record, stubSettings.questionBound()).run();
+            new Session(driver, plan, config, runRecord, stubSettings.questionBound()).run();
         } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
-            record.put("error", "interrupted");
+            runRecord.put("error", "interrupted");
         } catch (QuestionFixtures.SetupFailure e) {
-            recordSetupFailure(record, e);
+            recordSetupFailure(runRecord, e);
             stops.failed(plan.fixture().id());
         } catch (IOException | IllegalStateException e) {
-            record.put("error", String.valueOf(e.getMessage()));
+            runRecord.put("error", String.valueOf(e.getMessage()));
         }
-        if (RunView.notRun(record)) {
-            stops.refused(record.path(QuestionDriver.RESETS_AT).asText(""));
+        if (RunView.notRun(runRecord)) {
+            stops.refused(runRecord.path(QuestionDriver.RESETS_AT).asText(""));
         }
-        QuestionResults.recordRun(config.results(), record);
+        QuestionResults.recordRun(config.results(), runRecord);
     }
 
     /**
@@ -1156,21 +1187,21 @@ class QuestionLoopMeasurement {
      * records the event's status, {@code rateLimitType} and {@code resetsAt} and marks the run as not run
      * ({@value RunView#NOT_RUN}, reason {@value RunView#USAGE_LIMIT}): it is never a failed run.
      *
-     * @param record the run record
+     * @param runRecordthe run record
      * @param quota  the quota error
      */
-    static void recordQuotaError(ObjectNode record, QuestionDriver.QuotaError quota) {
-        record.put(QuestionDriver.QUOTA_ERROR, true);
-        record.put(QuestionDriver.QUOTA_RULE, quota.rule());
-        record.put("quota_error_worker", quota.worker());
-        record.put("quota_error_generation", quota.generation());
-        record.put("quota_error_detail", quota.detail());
+    static void recordQuotaError(ObjectNode runRecord, QuestionDriver.QuotaError quota) {
+        runRecord.put(QuestionDriver.QUOTA_ERROR, true);
+        runRecord.put(QuestionDriver.QUOTA_RULE, quota.rule());
+        runRecord.put("quota_error_worker", quota.worker());
+        runRecord.put("quota_error_generation", quota.generation());
+        runRecord.put("quota_error_detail", quota.detail());
         if (quota.usageLimit()) {
-            record.put(QuestionDriver.RATE_LIMIT_STATUS, quota.refusal().status());
-            record.put(QuestionDriver.RATE_LIMIT_TYPE, quota.refusal().rateLimitType());
-            record.put(QuestionDriver.RESETS_AT, quota.refusal().resetsAt());
-            record.put(RunView.NOT_RUN, true);
-            record.put(RunView.NOT_RUN_REASON, RunView.USAGE_LIMIT);
+            runRecord.put(QuestionDriver.RATE_LIMIT_STATUS, quota.refusal().status());
+            runRecord.put(QuestionDriver.RATE_LIMIT_TYPE, quota.refusal().rateLimitType());
+            runRecord.put(QuestionDriver.RESETS_AT, quota.refusal().resetsAt());
+            runRecord.put(RunView.NOT_RUN, true);
+            runRecord.put(RunView.NOT_RUN_REASON, RunView.USAGE_LIMIT);
         }
     }
 
@@ -1187,13 +1218,13 @@ class QuestionLoopMeasurement {
      * Records a run whose fixture or workspace setup failed before any worker launched: {@value RunView#SETUP_FAILED},
      * its reason and the full message.
      *
-     * @param record  the run record
+     * @param runRecord the run record
      * @param failure the setup failure
      */
-    static void recordSetupFailure(ObjectNode record, QuestionFixtures.SetupFailure failure) {
-        record.put(RunView.SETUP_FAILED, true);
-        record.put(RunView.SETUP_FAILED_REASON, failure.reason());
-        record.put("error", String.valueOf(failure.getMessage()));
+    static void recordSetupFailure(ObjectNode runRecord, QuestionFixtures.SetupFailure failure) {
+        runRecord.put(RunView.SETUP_FAILED, true);
+        runRecord.put(RunView.SETUP_FAILED_REASON, failure.reason());
+        runRecord.put("error", String.valueOf(failure.getMessage()));
     }
 
     /**
@@ -1204,34 +1235,34 @@ class QuestionLoopMeasurement {
      *         Q5, the question bound ({@value QuestionResults#QUESTION_BOUND})
      */
     static ObjectNode runRecord(RunPlan plan, Config config, Path stubDir) {
-        var record = QuestionStub.JSON.createObjectNode();
-        record.put("item", plan.item());
-        record.put("run", plan.index());
-        record.put("host", plan.host().executable());
-        record.put("model", plan.model() == null ? RunView.HARNESS_DEFAULT : plan.model());
-        record.put("form", plan.warm() ? "warm" : "fresh");
-        record.put("continuation", plan.form().name().toLowerCase(Locale.ROOT));
-        record.put("fixture", plan.fixture().id());
-        record.put("category", plan.fixture().category());
-        record.put("control", plan.fixture().control());
-        record.put("kind", plan.kind());
-        record.put("reply", plan.reply().name().toLowerCase(Locale.ROOT));
-        record.put("reference", plan.fixture().check() == null ? "" : plan.fixture().check().reference());
-        record.put("duration_s", plan.hold().toSeconds());
-        record.put("age_s", plan.hold().toSeconds());
-        record.put("fault", plan.fault() == null ? "" : plan.fault().name());
-        record.put("size", plan.fixture().size());
-        record.put("bound", plan.bound());
-        record.put("negative", plan.negative() != null);
-        record.put("restart", plan.restart());
-        record.put("continue_host", plan.continueHost() == null ? "" : plan.continueHost().executable());
-        record.put("task_id", TASK_ID);
-        record.put("stub_dir", stubDir.toString());
-        record.put(QuestionResults.PARALLEL, config.parallel());
+        var runRecord = QuestionStub.JSON.createObjectNode();
+        runRecord.put("item", plan.item());
+        runRecord.put("run", plan.index());
+        runRecord.put("host", plan.host().executable());
+        runRecord.put("model", plan.model() == null ? RunView.HARNESS_DEFAULT : plan.model());
+        runRecord.put("form", plan.warm() ? "warm" : "fresh");
+        runRecord.put("continuation", plan.form().name().toLowerCase(Locale.ROOT));
+        runRecord.put("fixture", plan.fixture().id());
+        runRecord.put("category", plan.fixture().category());
+        runRecord.put("control", plan.fixture().control());
+        runRecord.put("kind", plan.kind());
+        runRecord.put("reply", plan.reply().name().toLowerCase(Locale.ROOT));
+        runRecord.put("reference", plan.fixture().check() == null ? "" : plan.fixture().check().reference());
+        runRecord.put("duration_s", plan.hold().toSeconds());
+        runRecord.put("age_s", plan.hold().toSeconds());
+        runRecord.put("fault", plan.fault() == null ? "" : plan.fault().name());
+        runRecord.put("size", plan.fixture().size());
+        runRecord.put("bound", plan.bound());
+        runRecord.put("negative", plan.negative() != null);
+        runRecord.put("restart", plan.restart());
+        runRecord.put("continue_host", plan.continueHost() == null ? "" : plan.continueHost().executable());
+        runRecord.put("task_id", TASK_ID);
+        runRecord.put("stub_dir", stubDir.toString());
+        runRecord.put(QuestionResults.PARALLEL, config.parallel());
         if ("Q5".equals(plan.item())) {
-            record.put(QuestionResults.QUESTION_BOUND, config.questionBound());
+            runRecord.put(QuestionResults.QUESTION_BOUND, config.questionBound());
         }
-        return record;
+        return runRecord;
     }
 
     /** One run: the asking task, its questions, their answers, and its continuation until the entry is done. */
@@ -1240,7 +1271,7 @@ class QuestionLoopMeasurement {
         private final QuestionDriver driver;
         private final RunPlan plan;
         private final Config config;
-        private final ObjectNode record;
+        private final ObjectNode runRecord;
         private final int questionBound;
         private final List<QuestionDriver> siblings = new ArrayList<>();
         private final Set<String> seenDecisions = new HashSet<>();
@@ -1248,18 +1279,18 @@ class QuestionLoopMeasurement {
         private int generation = 1;
         private boolean ended;
 
-        Session(QuestionDriver driver, RunPlan plan, Config config, ObjectNode record, int questionBound) {
+        Session(QuestionDriver driver, RunPlan plan, Config config, ObjectNode runRecord, int questionBound) {
             this.driver = driver;
             this.plan = plan;
             this.config = config;
-            this.record = record;
+            this.runRecord = runRecord;
             this.questionBound = questionBound;
         }
 
         void run() throws IOException, InterruptedException {
             var fixture = plan.fixture();
             var canary = QuestionFixtures.prepare(fixture, driver.settings().workspace().resolve("w1"));
-            record.put("canary", canary);
+            runRecord.put("canary", canary);
             var spec = spec(fixture);
             var helpers = startHelpers();
             try {
@@ -1283,7 +1314,7 @@ class QuestionLoopMeasurement {
                     }
                 }
                 awaitEntry(deadline);
-                record.put(QuestionResults.TIMED_OUT, !ended && !entryDone());
+                runRecord.put(QuestionResults.TIMED_OUT, !ended && !entryDone());
             } finally {
                 running.set(false);
                 for (var helper : helpers) {
@@ -1292,7 +1323,7 @@ class QuestionLoopMeasurement {
                 recordVoterEarlyExits();
                 recordClientVersion();
                 endWarm();
-                record.set("workers", workers());
+                runRecord.set("workers", workers());
                 for (var sibling : siblings) {
                     sibling.close();
                 }
@@ -1355,16 +1386,16 @@ class QuestionLoopMeasurement {
         private void stopWhileHolding(Worker asker, JsonNode asked) throws IOException, InterruptedException {
             var askedAt = asked.path("at").asLong();
             var held = driver.stopWhileHolding(asker, askedAt, plan.host().silenceLimit());
-            record.put(FAULT_INJECTED_FIELD, held.isPresent());
+            runRecord.put(FAULT_INJECTED_FIELD, held.isPresent());
             if (held.isPresent()) {
-                record.put(FAULT_INJECTED_FIELD + "_at", System.currentTimeMillis());
-                record.put("fault_held", true);
-                record.put("fault_hold_started_at", held.get().start());
-                record.put("fault_after_ask_ms", System.currentTimeMillis() - askedAt);
+                runRecord.put(FAULT_INJECTED_FIELD + "_at", System.currentTimeMillis());
+                runRecord.put("fault_held", true);
+                runRecord.put("fault_hold_started_at", held.get().start());
+                runRecord.put("fault_after_ask_ms", System.currentTimeMillis() - askedAt);
                 recordSignalled(asker);
             } else {
-                record.put("fault_held", false);
-                record.put("fault_not_injected_reason", "no_hold");
+                runRecord.put("fault_held", false);
+                runRecord.put("fault_not_injected_reason", "no_hold");
             }
         }
 
@@ -1378,20 +1409,20 @@ class QuestionLoopMeasurement {
             var setting = plan.host().cutSetting();
             var askedAt = asked.path("at").asLong();
             var due = askedAt + plan.hold().toMillis();
-            record.put("call_cut_means", setting.means());
-            record.put("call_cut_tool_timeout_ms", setting.toolTimeout() == null ? -1
+            runRecord.put("call_cut_means", setting.means());
+            runRecord.put("call_cut_tool_timeout_ms", setting.toolTimeout() == null ? -1
                     : setting.toolTimeout().toMillis());
-            record.put("call_cut_host_cut_ms", setting.hostCut().toMillis());
-            record.put("call_cut_window_s", setting.window(plan.host()).toSeconds());
-            record.put("call_cut_progress", false);
+            runRecord.put("call_cut_host_cut_ms", setting.hostCut().toMillis());
+            runRecord.put("call_cut_window_s", setting.window(plan.host()).toSeconds());
+            runRecord.put("call_cut_progress", false);
             var cut = driver.awaitCallCut(asker, askedAt, due, setting);
-            record.put(QuestionResults.CALL_CUT_FIELD, cut.isPresent());
-            record.put(FAULT_INJECTED_FIELD, cut.isPresent());
+            runRecord.put(QuestionResults.CALL_CUT_FIELD, cut.isPresent());
+            runRecord.put(FAULT_INJECTED_FIELD, cut.isPresent());
             cut.ifPresent(value -> {
-                record.put(FAULT_INJECTED_FIELD + "_at", value.cutAt());
-                record.put("call_cut_evidence", value.evidence());
-                record.put("call_cut_at", value.cutAt());
-                record.put("call_cut_after_ms", value.afterMs());
+                runRecord.put(FAULT_INJECTED_FIELD + "_at", value.cutAt());
+                runRecord.put("call_cut_evidence", value.evidence());
+                runRecord.put("call_cut_at", value.cutAt());
+                runRecord.put("call_cut_after_ms", value.afterMs());
             });
             return Duration.ofMillis(Math.max(0, due - System.currentTimeMillis()));
         }
@@ -1412,7 +1443,7 @@ class QuestionLoopMeasurement {
             var answered = driver.awaitAnswer(asked.path(DECISION).asText(), ANSWER_WAIT, hold, decision -> {
                 var composition = QuestionFixtures.composeAnswer(plan.fixture(), decision, plan.reply());
                 var decisionId = decision.path("id").asText();
-                AnswerAudit.recordComposition(record, decisionId, plan.reply(), composition);
+                AnswerAudit.recordComposition(runRecord, decisionId, plan.reply(), composition);
                 for (var note : composition.notes()) {
                     driver.stub().event(ANSWER_COMPOSED, AnswerAudit.compositionFields(decisionId, plan.reply(),
                             note));
@@ -1459,7 +1490,7 @@ class QuestionLoopMeasurement {
             driver.awaitExit(current, plan.host().silenceLimit());
             var session = driver.sessionId(current);
             if (session.isEmpty()) {
-                record.put("no_session", true);
+                runRecord.put("no_session", true);
                 return current;
             }
             var resumed = driver.resume(current, task, session.get(), ++generation);
@@ -1486,13 +1517,13 @@ class QuestionLoopMeasurement {
         /** Injects a fault and records it and its time. */
         private void injected(Worker worker, Fault fault) {
             driver.inject(worker, fault);
-            record.put(FAULT_INJECTED_FIELD, true);
-            record.put(FAULT_INJECTED_FIELD + "_at", System.currentTimeMillis());
+            runRecord.put(FAULT_INJECTED_FIELD, true);
+            runRecord.put(FAULT_INJECTED_FIELD + "_at", System.currentTimeMillis());
             recordSignalled(worker);
         }
 
         private void recordSignalled(Worker worker) {
-            driver.signalledPids(worker).ifPresent(count -> record.put(FAULT_SIGNALLED_PIDS_FIELD, count));
+            driver.signalledPids(worker).ifPresent(count -> runRecord.put(FAULT_SIGNALLED_PIDS_FIELD, count));
         }
 
         /**
@@ -1512,18 +1543,18 @@ class QuestionLoopMeasurement {
             if (detected.isEmpty()) {
                 return false;
             }
-            if (!record.has("loss_by")) {
+            if (!runRecord.has("loss_by")) {
                 var event = detected.get();
-                record.put("loss_by", event.path("by").asText());
-                record.put("loss_after_ms", event.path("after_ms").asLong());
-                record.put("loss_first_by", event.path("first_by").asText());
-                record.put("loss_stub_reason", event.path("stub_reason").asText(""));
-                record.put("loss_stub_after_ms", event.path("stub_after_ms").asLong(-1));
+                runRecord.put("loss_by", event.path("by").asText());
+                runRecord.put("loss_after_ms", event.path("after_ms").asLong());
+                runRecord.put("loss_first_by", event.path("first_by").asText());
+                runRecord.put("loss_stub_reason", event.path("stub_reason").asText(""));
+                runRecord.put("loss_stub_after_ms", event.path("stub_after_ms").asLong(-1));
                 if (plan.fault() != null) {
                     var observation = RunReadings.exitObservation(events, worker.id(), worker.generation());
-                    record.put("loss_detected_at", event.path("at").asLong());
-                    record.set("loss_exit_observed_at", QuestionStub.JSON.valueToTree(observation.exitAt()));
-                    record.set("loss_exit_observed_after_ms",
+                    runRecord.put("loss_detected_at", event.path("at").asLong());
+                    runRecord.set("loss_exit_observed_at", QuestionStub.JSON.valueToTree(observation.exitAt()));
+                    runRecord.set("loss_exit_observed_after_ms",
                             QuestionStub.JSON.valueToTree(observation.exitAfterDeliveryMs()));
                 }
             }
@@ -1533,16 +1564,16 @@ class QuestionLoopMeasurement {
         /** Reads what the stub made of the lost task and records the step. */
         private QuestionDriver.Recovery recover(Worker lost, String decision, String task) throws IOException {
             var recovery = driver.recovery(lost, decision, task);
-            if (!record.has("recovery_step")) {
-                record.put("recovery_step", recovery.step().name().toLowerCase(Locale.ROOT));
-                record.put("recovery_task", recovery.task());
-                record.put("recovery_holder", recovery.holder());
+            if (!runRecord.has("recovery_step")) {
+                runRecord.put("recovery_step", recovery.step().name().toLowerCase(Locale.ROOT));
+                runRecord.put("recovery_task", recovery.task());
+                runRecord.put("recovery_holder", recovery.holder());
                 if (recovery.holderEnded()) {
-                    record.put("recovery_holder_ended", true);
+                    runRecord.put("recovery_holder_ended", true);
                 }
             }
-            if (recovery.step() == RecoveryStep.GAP && !record.has(QuestionDriver.CONTINUATION_GAP)) {
-                record.put(QuestionDriver.CONTINUATION_GAP, QuestionDriver.HELD_BY_ENDED_GENERATION);
+            if (recovery.step() == RecoveryStep.GAP && !runRecord.has(QuestionDriver.CONTINUATION_GAP)) {
+                runRecord.put(QuestionDriver.CONTINUATION_GAP, QuestionDriver.HELD_BY_ENDED_GENERATION);
             }
             return recovery;
         }
@@ -1560,14 +1591,14 @@ class QuestionLoopMeasurement {
                     case TAKEN, PENDING -> current;
                     case ASKER_EXITED -> {
                         var next = continuation(decision, current);
-                        record.put(QuestionDriver.WARM_ASKER_EXITED, true);
-                        record.put(QuestionDriver.WARM_CONTINUATION, step);
-                        record.put(QuestionDriver.WARM_CONTINUATION + "_generation", next.generation());
+                        runRecord.put(QuestionDriver.WARM_ASKER_EXITED, true);
+                        runRecord.put(QuestionDriver.WARM_CONTINUATION, step);
+                        runRecord.put(QuestionDriver.WARM_CONTINUATION + "_generation", next.generation());
                         yield next;
                     }
                     case NOT_TAKEN, NOT_CONTINUED -> {
-                        record.put(QuestionDriver.WARM_CONTINUATION, step);
-                        record.put(QuestionDriver.CONTINUATION_GAP, step);
+                        runRecord.put(QuestionDriver.WARM_CONTINUATION, step);
+                        runRecord.put(QuestionDriver.CONTINUATION_GAP, step);
                         yield current;
                     }
                 };
@@ -1588,7 +1619,7 @@ class QuestionLoopMeasurement {
                     && decision.equals(event.path(DECISION).asText()), System.currentTimeMillis()
                     + ANSWER_WAIT.toMillis());
             if (continued.isEmpty()) {
-                record.put(QuestionDriver.CONTINUATION_GAP, "not_continued");
+                runRecord.put(QuestionDriver.CONTINUATION_GAP, "not_continued");
                 return current;
             }
             var held = driver.continuedByHold(decision);
@@ -1604,18 +1635,18 @@ class QuestionLoopMeasurement {
 
         private void recordContinuedByHold(QuestionDriver.HeldContinuation held) {
             var field = QuestionDriver.CONTINUED_BY_HOLD;
-            if (record.has(field)) {
+            if (runRecord.has(field)) {
                 return;
             }
-            record.put(field, true);
-            record.put(field + "_decision", held.decision());
-            record.put(field + "_task", held.task());
-            record.put(field + "_worker", held.worker());
-            record.put(field + "_generation", held.generation());
-            record.put(field + "_outcome", held.outcome());
-            record.put(field + "_closed_at", held.closedAt());
-            record.put(field + "_submitted_at", held.submittedAt());
-            record.put(field + "_channel", held.channel());
+            runRecord.put(field, true);
+            runRecord.put(field + "_decision", held.decision());
+            runRecord.put(field + "_task", held.task());
+            runRecord.put(field + "_worker", held.worker());
+            runRecord.put(field + "_generation", held.generation());
+            runRecord.put(field + "_outcome", held.outcome());
+            runRecord.put(field + "_closed_at", held.closedAt());
+            runRecord.put(field + "_submitted_at", held.submittedAt());
+            runRecord.put(field + "_channel", held.channel());
         }
 
         /**
@@ -1634,12 +1665,12 @@ class QuestionLoopMeasurement {
             if (exit.isEmpty()) {
                 driver.terminate(resumed);
             }
-            record.put("negative_exit", exit.map(String::valueOf).orElse("none"));
+            runRecord.put("negative_exit", exit.map(String::valueOf).orElse("none"));
             var reported = driver.sessionId(resumed);
-            record.put("negative_session", reported.orElse(""));
+            runRecord.put("negative_session", reported.orElse(""));
             var warned = RunReadings.warnsMissingSession(driver.stderr(resumed), plan.negative());
-            record.put("negative_not_found_warning", warned);
-            record.put(RunReadings.NEGATIVE_NEW_SESSION, RunReadings.startedNewSession(plan.host(), plan.negative(),
+            runRecord.put("negative_not_found_warning", warned);
+            runRecord.put(RunReadings.NEGATIVE_NEW_SESSION, RunReadings.startedNewSession(plan.host(), plan.negative(),
                     reported.orElse(""), warned));
         }
 
@@ -1666,20 +1697,20 @@ class QuestionLoopMeasurement {
             if (!ended) {
                 driver.quotaError().ifPresent(value -> {
                     ended = true;
-                    recordQuotaError(record, value);
+                    recordQuotaError(runRecord, value);
                 });
             }
             if (!ended) {
                 driver.launchFailure().ifPresent(value -> {
                     ended = true;
-                    record.put(QuestionDriver.LAUNCH_FAILED, true);
-                    record.put("launch_worker", value.worker());
-                    record.put("launch_generation", value.generation());
-                    record.put("launch_exit", value.exit());
-                    record.put("launch_stderr", value.stderr());
-                    var tail = record.putArray("launch_stderr_tail");
+                    runRecord.put(QuestionDriver.LAUNCH_FAILED, true);
+                    runRecord.put("launch_worker", value.worker());
+                    runRecord.put("launch_generation", value.generation());
+                    runRecord.put("launch_exit", value.exit());
+                    runRecord.put("launch_stderr", value.stderr());
+                    var tail = runRecord.putArray("launch_stderr_tail");
                     value.tail().forEach(tail::add);
-                    record.put("error", "launch_failed: exit " + value.exit() + ": " + value.stderr());
+                    runRecord.put("error", "launch_failed: exit " + value.exit() + ": " + value.stderr());
                 });
             }
             if (!ended) {
@@ -1687,11 +1718,11 @@ class QuestionLoopMeasurement {
                     ended = true;
                     var field = value.continuation() ? QuestionDriver.CONTINUATION_EARLY_EXIT
                             : QuestionDriver.EARLY_EXIT;
-                    record.put(field, true);
-                    record.put(field + "_worker", value.worker());
-                    record.put(field + "_generation", value.generation());
-                    record.put(field + "_code", value.exit());
-                    record.put(field + "_detail", value.detail());
+                    runRecord.put(field, true);
+                    runRecord.put(field + "_worker", value.worker());
+                    runRecord.put(field + "_generation", value.generation());
+                    runRecord.put(field + "_code", value.exit());
+                    runRecord.put(field + "_detail", value.detail());
                 });
             }
             return ended;
@@ -1706,15 +1737,15 @@ class QuestionLoopMeasurement {
             var at = asked.path("at").asLong();
             if (plan.warm()) {
                 if (driver.awaitWarmStop(asker, at, plan.host().silenceLimit()) == QuestionDriver.WarmStop.EXITED) {
-                    record.put(QuestionDriver.WARM_ASKER_EXITED, true);
-                    record.put(QuestionDriver.WARM_ASKER_EXITED + "_after_ask_ms", System.currentTimeMillis() - at);
+                    runRecord.put(QuestionDriver.WARM_ASKER_EXITED, true);
+                    runRecord.put(QuestionDriver.WARM_ASKER_EXITED + "_after_ask_ms", System.currentTimeMillis() - at);
                 }
             } else if (endsAskerBeforeOpenTime(plan)) {
                 var end = driver.endAsker(asker, at, plan.host().silenceLimit());
                 var field = QuestionDriver.ASKER_ENDED_BY_DRIVER;
-                record.put(field, end.endedByDriver());
-                record.put(field + "_after_ask_ms", end.afterAskMs());
-                record.put(field + "_holding_wait", end.holdingWait());
+                runRecord.put(field, end.endedByDriver());
+                runRecord.put(field + "_after_ask_ms", end.afterAskMs());
+                runRecord.put(field + "_holding_wait", end.holdingWait());
             } else {
                 driver.awaitExit(asker, plan.host().silenceLimit());
             }
@@ -1770,7 +1801,7 @@ class QuestionLoopMeasurement {
                     Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub state, no event to await
                 }
             } catch (IOException e) {
-                record.put("vote_error", String.valueOf(e.getMessage()));
+                runRecord.put("vote_error", String.valueOf(e.getMessage()));
             } catch (InterruptedException _) {
                 Thread.currentThread().interrupt();
             }
@@ -1787,12 +1818,12 @@ class QuestionLoopMeasurement {
             }
             var first = exits.getFirst();
             var field = QuestionDriver.VOTER_EARLY_EXIT;
-            record.put(field, true);
-            record.put(field + "_worker", first.worker());
-            record.put(field + "_generation", first.generation());
-            record.put(field + "_code", first.exit());
-            record.put(field + "_detail", first.detail());
-            var all = record.putArray(field + "s");
+            runRecord.put(field, true);
+            runRecord.put(field + "_worker", first.worker());
+            runRecord.put(field + "_generation", first.generation());
+            runRecord.put(field + "_code", first.exit());
+            runRecord.put(field + "_detail", first.detail());
+            var all = runRecord.putArray(field + "s");
             for (var exit : exits) {
                 var node = all.addObject();
                 node.put("worker", exit.worker());
@@ -1809,7 +1840,7 @@ class QuestionLoopMeasurement {
         private void recordClientVersion() throws IOException {
             var workers = driver.workers();
             if (!workers.isEmpty()) {
-                record.put(QuestionResults.CLIENT_VERSION, driver.clientVersion(workers.getFirst()));
+                runRecord.put(QuestionResults.CLIENT_VERSION, driver.clientVersion(workers.getFirst()));
             }
         }
 
@@ -1837,7 +1868,7 @@ class QuestionLoopMeasurement {
                     Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
                 }
             } catch (IOException e) {
-                record.put("consult_error", String.valueOf(e.getMessage()));
+                runRecord.put("consult_error", String.valueOf(e.getMessage()));
             } catch (InterruptedException _) {
                 Thread.currentThread().interrupt();
             }
@@ -1847,7 +1878,7 @@ class QuestionLoopMeasurement {
         private void idleWarmWorker() {
             try {
                 var warm = driver.startWarm(launch("w-warm", 1, plan.host(), null));
-                record.put("warm_worker", warm.id());
+                runRecord.put("warm_worker", warm.id());
                 while (running.get() && warm.process().isAlive()) {
                     var idle = QuestionDriver.jsonLinesSoFar(driver.stub().events()).stream()
                             .filter(event -> "wait_again".equals(event.path(EVENT).asText())
@@ -1860,7 +1891,7 @@ class QuestionLoopMeasurement {
                     Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
                 }
             } catch (IOException e) {
-                record.put("warm_error", String.valueOf(e.getMessage()));
+                runRecord.put("warm_error", String.valueOf(e.getMessage()));
             } catch (InterruptedException _) {
                 Thread.currentThread().interrupt();
             }
