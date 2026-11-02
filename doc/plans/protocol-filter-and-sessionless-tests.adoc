@@ -18,7 +18,7 @@ Status, milestone and dependencies:: in the link:README.adoc#packages[index], th
 The starting set of the trace matrix of the project skill `traced-implementation` (link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Planning the Work]); requirements, specification sections and watch documents are only referenced here.
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-3[PM-ARCH-3], link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-2[PM-ARCH-2], link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-4[PM-SEC-4]
-* Specification: link:../../../plan-marshall-documentation/doc/specification/runtime-model/03-relay.adoc#_host_protocol_forms[Runtime Model § Host Protocol Forms]
+* Specification: link:../../../plan-marshall-documentation/doc/specification/runtime-model/03-relay.adoc#_harness_protocol_forms[Runtime Model § Harness Protocol Forms]
 * Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/runtime-model.adoc#PM-WATCH-RUN-16[PM-WATCH-RUN-16]
 
 == Done When
