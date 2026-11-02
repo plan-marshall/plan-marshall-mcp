@@ -50,6 +50,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * its report beside the logs.
  */
 @DisplayName("Question loop re-aggregation: one item's result from its records with -Dpm.experiment.reaggregate=<item>")
+@SuppressWarnings("java:S3577") // not named *Test on purpose: the default surefire run must not select it
 class QuestionReaggregation {
 
     /** The property that names the item to re-aggregate. */

@@ -768,7 +768,7 @@ public final class QuestionDriver implements AutoCloseable {
             kill.waitFor(5, TimeUnit.SECONDS);
         } catch (IOException e) {
             throw new IllegalStateException("kill -" + signal + " failed", e);
-        } catch (InterruptedException e) {
+        } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
         }
     }
@@ -876,7 +876,7 @@ public final class QuestionDriver implements AutoCloseable {
             if (held.isPresent() || !worker.process().isAlive() || System.currentTimeMillis() >= untilMillis) {
                 return held.filter(_ -> worker.process().isAlive());
             }
-            Thread.sleep(POLL);
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls a worker process and the stub log, no event to await
         }
     }
 
@@ -965,7 +965,7 @@ public final class QuestionDriver implements AutoCloseable {
                 }
                 return cut;
             }
-            Thread.sleep(POLL);
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
         }
     }
 
@@ -1625,7 +1625,7 @@ public final class QuestionDriver implements AutoCloseable {
             if (System.currentTimeMillis() >= until) {
                 return WarmStop.NONE;
             }
-            Thread.sleep(POLL);
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls a worker process and the stub log, no event to await
         }
     }
 
@@ -1679,7 +1679,7 @@ public final class QuestionDriver implements AutoCloseable {
             var continuation = warmContinuation(jsonLinesSoFar(stub.events()), decisionId, stub::state,
                     alive);
             if (continuation.step() == WarmStep.PENDING && System.currentTimeMillis() < until) {
-                Thread.sleep(POLL);
+                Thread.sleep(POLL); // NOSONAR java:S2925 - polls a worker process and the stub log, no event to await
                 continue;
             }
             if (continuation.step() == WarmStep.PENDING) {
@@ -1748,7 +1748,7 @@ public final class QuestionDriver implements AutoCloseable {
             return Optional.empty();
         }
         stub.event("decision_seen", Map.of("decision", id, "hold_ms", hold.toMillis()));
-        Thread.sleep(hold);
+        Thread.sleep(hold); // NOSONAR java:S2925 - the sleep is the simulated operator's hold
         var decision = stub.decision(id).orElseThrow();
         var result = stub.answer(id, decision.path("revision").asInt(), reply.apply(decision));
         stub.event("answer_sent", Map.of("decision", id, "result", result.name()));
@@ -1914,7 +1914,7 @@ public final class QuestionDriver implements AutoCloseable {
             if (System.currentTimeMillis() >= untilMillis) {
                 return Optional.empty();
             }
-            Thread.sleep(POLL);
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
         }
     }
 
@@ -1937,7 +1937,7 @@ public final class QuestionDriver implements AutoCloseable {
                     || earlyExit().isPresent() || System.currentTimeMillis() >= untilMillis) {
                 return found;
             }
-            Thread.sleep(POLL);
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log and the workers, no event to await
         }
     }
 
@@ -2427,7 +2427,7 @@ public final class QuestionDriver implements AutoCloseable {
         for (var worker : workers) {
             try {
                 terminate(worker);
-            } catch (InterruptedException e) {
+            } catch (InterruptedException _) {
                 Thread.currentThread().interrupt();
             } catch (IllegalStateException e) {
                 failure = failure == null ? e : failure;
@@ -2473,7 +2473,7 @@ public final class QuestionDriver implements AutoCloseable {
                 stub.event(SUPERSEDED_ENDED, fields);
                 try {
                     terminate(older);
-                } catch (InterruptedException e) {
+                } catch (InterruptedException _) {
                     Thread.currentThread().interrupt();
                     throw new InterruptedIOException("interrupted while ending " + older.id() + " generation "
                             + older.generation());
@@ -2783,7 +2783,7 @@ public final class QuestionDriver implements AutoCloseable {
             process.waitFor(5, TimeUnit.SECONDS);
         } catch (IOException e) {
             throw new IllegalStateException("kill -" + signal + " failed", e);
-        } catch (InterruptedException e) {
+        } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
         }
     }
@@ -2813,7 +2813,7 @@ public final class QuestionDriver implements AutoCloseable {
             if (now - start >= limit.toMillis() && lastCall > start) {
                 return false;
             }
-            Thread.sleep(POLL);
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
         }
         return true;
     }

@@ -49,7 +49,7 @@ public final class RunReadings {
     /** The exit codes of a process the driver ended ({@code SIGTERM}, {@code SIGKILL}): no exit of its own. */
     public static final Set<Integer> TERMINATED_EXITS = Set.of(143, 137);
     /** The tools of the stub: a call of one of them is no read of a file of the worktree (R1). */
-    public static final Set<String> STUB_TOOLS = Set.of("pm_state", "pm_wait", "pm_do");
+    public static final Set<String> STUB_TOOLS = Set.copyOf(QuestionStub.TOOLS);
     /** How long a resume of a missing or over-age session may take before it counts as hung (R2). */
     public static final long HUNG_RESUME_MS = 60_000;
     /** A negative resume (R2) that started a new session instead of failing. */

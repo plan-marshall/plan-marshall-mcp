@@ -121,7 +121,7 @@ class QuestionStubTest {
                 return;
             }
             last = size;
-            Thread.sleep(200);
+            Thread.sleep(200); // NOSONAR java:S2925 - polls the size of a log until it stops growing
         }
     }
 
@@ -743,7 +743,7 @@ class QuestionStubTest {
                     throw new IllegalStateException(e);
                 }
             });
-            Thread.sleep(100);
+            Thread.sleep(100); // NOSONAR java:S2925 - lets the first wait reach the stub, the test checks the outcome
             second.call("pm_wait", QuestionStub.JSON.createObjectNode());
             first.join(5000);
 
@@ -759,11 +759,11 @@ class QuestionStubTest {
             var waiter = Thread.ofVirtual().start(() -> {
                 try {
                     answer[0] = client.call("pm_wait", QuestionStub.JSON.createObjectNode());
-                } catch (IOException e) {
+                } catch (IOException _) {
                     answer[0] = "closed";
                 }
             });
-            Thread.sleep(200);
+            Thread.sleep(200); // NOSONAR java:S2925 - lets the wait reach the stub, the test checks the outcome
 
             stub.close();
             waiter.join(5000);

@@ -835,7 +835,7 @@ public final class QuestionStub implements AutoCloseable {
     private void serve(SocketChannel channel) {
         var connection = new Connection(channel);
         connections.add(connection);
-        try {
+        try { // NOSONAR java:S2093 - the channel closes after the "disconnected" event, and a failed close is logged
             var reader = new BufferedReader(new InputStreamReader(Channels.newInputStream(channel),
                     StandardCharsets.UTF_8));
             var hello = reader.readLine();
@@ -1046,7 +1046,7 @@ public final class QuestionStub implements AutoCloseable {
                 var until = token == null ? deadline : Math.min(deadline, nextProgress);
                 changed.awaitNanos(until - now);
             }
-        } catch (InterruptedException e) {
+        } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
             return Outcome.of(WAIT_AGAIN);
         } finally {
@@ -1394,7 +1394,7 @@ public final class QuestionStub implements AutoCloseable {
 
     private Decision createDecision(Task task, String planTaskId, ObjectNode envelope) {
         var ids = new ArrayList<String>();
-        for (var ignored : envelope.get("parts")) {
+        for (var _ : envelope.get("parts")) {
             ids.add("Q-%03d".formatted(++nextQuestion));
         }
         var spec = task.spec.continuing(task.spec.taskId(), task.spec.entity(), task.cursor);

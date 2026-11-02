@@ -129,6 +129,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  */
 @DisplayName("Question loop measurement: one item with -Dpm.experiment.question=<item>")
 @EnabledIfSystemProperty(named = QuestionLoopMeasurement.ITEM_PROPERTY, matches = ".+")
+@SuppressWarnings("java:S3577") // not named *Test on purpose: the default surefire run must not select a measurement
 class QuestionLoopMeasurement {
 
     /** The property that names the item and enables the measurement. */
@@ -1134,7 +1135,7 @@ class QuestionLoopMeasurement {
                      base.resolve("workers"), config.results().resolve("runs").resolve(id), config.exec(),
                      config.openCodeDataHome(), config.parallel()))) {
             new Session(driver, plan, config, record, stubSettings.questionBound()).run();
-        } catch (InterruptedException e) {
+        } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
             record.put("error", "interrupted");
         } catch (QuestionFixtures.SetupFailure e) {
@@ -1404,7 +1405,7 @@ class QuestionLoopMeasurement {
         private boolean answer(JsonNode asked, Duration operatorHold) throws InterruptedException, IOException {
             var hold = operatorHold;
             if (plan.restart()) {
-                Thread.sleep(hold.dividedBy(2));
+                Thread.sleep(hold.dividedBy(2)); // NOSONAR java:S2925 - the sleep is the simulated operator's hold
                 driver.restartStub();
                 hold = hold.dividedBy(2);
             }
@@ -1721,7 +1722,7 @@ class QuestionLoopMeasurement {
 
         private void awaitEntry(long deadline) throws IOException, InterruptedException {
             while (!entryDone() && System.currentTimeMillis() < deadline && !ended()) {
-                Thread.sleep(POLL);
+                Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub state, no event to await
             }
         }
 
@@ -1766,7 +1767,7 @@ class QuestionLoopMeasurement {
                             voter.startLeased(id, id, voterLaunch(id, role));
                         }
                     }
-                    Thread.sleep(POLL);
+                    Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub state, no event to await
                 }
             } catch (IOException e) {
                 record.put("vote_error", String.valueOf(e.getMessage()));
@@ -1833,7 +1834,7 @@ class QuestionLoopMeasurement {
                                     + "operator's decision.");
                         }
                     }
-                    Thread.sleep(POLL);
+                    Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
                 }
             } catch (IOException e) {
                 record.put("consult_error", String.valueOf(e.getMessage()));
@@ -1856,7 +1857,7 @@ class QuestionLoopMeasurement {
                         driver.stub().end(warm.id(), warm.generation());
                         return;
                     }
-                    Thread.sleep(POLL);
+                    Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
                 }
             } catch (IOException e) {
                 record.put("warm_error", String.valueOf(e.getMessage()));
