@@ -25,7 +25,7 @@ The code lives on the branch `verification/question-loop-experiment` (`488ce47`)
 Classes: `QuestionStub` (stub MCP server: `pm_wait`, `pm_state`, `pm_do`, the task protocol with leases per generation,
 question links, question records on disk, `facts.answers`, the event log every figure is computed from);
 `QuestionStub.Relay` (the worker's MCP server as its harness starts it: forwards newline-delimited JSON-RPC to the stub's
-Unix socket after a first line with identity, role and generation; logs every line host-side with its arrival time);
+Unix socket after a first line with identity, role and generation; logs every line on the harness side with its arrival time);
 `QuestionDriver` (starts workers headless through `pm-exec`, answers as operator, resumes sessions, restarts the stub,
 injects faults, supervises the answer acknowledgement with each harness's values); `QuestionFixtures` (loop tasks from the
 corpus cache, the probe and the scenario recipes; `FORCE_ASK`, `FORCE_ASK_PLAN_TASK`, `FORCE_ASK_EACH`;
@@ -45,14 +45,14 @@ R3 `exit_observed`.
 Launch: worker directory below the OS temp dir; `pm-exec` from `-Dpm.experiment.exec`, else a native binary of a
 pm-mcp-clients checkout beside the repository, else `target/e2e-jvm-lib/pm-exec.jar` (`java
 --enable-native-access=ALL-UNNAMED -cp pm-exec.jar de.planmarshall.exec.PmExec`); harness executable from
-`-Dpm.experiment.exe.<host>`, else `PATH`, else known install locations; host-session markers
+`-Dpm.experiment.exe.<host>`, else `PATH`, else known install locations; harness-session markers
 (`HOST_SESSION_PREFIXES`) stripped, `PWD` set. Per-harness command lines and configuration: Evaluation Reference,
-Hosts as Relay Starters and Workers. OpenCode data home: `-Dpm.experiment.opencode.data-home=global|worker`.
+Harnesses as Relay Starters and Workers. OpenCode data home: `-Dpm.experiment.opencode.data-home=global|worker`.
 
 Classification: `launch_failed`, `early_exit`, `continuation_early_exit`, `voter_early_exit`, `quota_error`,
 `setup_failed`; `continued_by_hold`, `warm_asker_exited`, `continuation_gap`, `asker_ended_by_driver`;
 `QuestionDriver.recovery`. Faults of R3 (`QuestionDriver.Fault`, `-Dpm.experiment.r3.faults`): `STOP_BEFORE_ANSWER`
-(`stopTree`), `CALL_CUT`, `MODEL_HANG`, `KILL`, `RESUMED_EXIT`; host values in `QuestionDriver.Host`.
+(`stopTree`), `CALL_CUT`, `MODEL_HANG`, `KILL`, `RESUMED_EXIT`; harness values in `QuestionDriver.Host`.
 
 Bookkeeping: `target/question-loop/runs.jsonl`, `invocations.jsonl`; `incomplete`, `atSpecifiedScale`,
 `verdict_scale`; limits as the union over invocations; `-Dpm.experiment.result.suffix` with
