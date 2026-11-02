@@ -4,18 +4,17 @@
 link:README.adoc[Work packages of `plan-marshall-mcp`] » `engine-wiring`
 
 [horizontal]
-Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 3
 Where:: pm-mcp-server packages `mcp.server.runtime`, `mcp.server.api`
-Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+Status, milestone and dependencies:: in the link:README.adoc#packages[index], the only place that states them
 
-== What
+== Tasks
 
 * CDI producers of the stores, the engine and the plan instance services of `pm-core` and `pm-workflow`; the first dependency of `pm-mcp-server` on `pm-workflow`.
 * The registration of the persisted records for native reflection, with the build test that every persisted record of the library modules is registered.
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+The starting set of the trace matrix of the project skill `traced-implementation` (link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Planning the Work]); requirements, specification sections and watch documents are only referenced here.
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/14-implementation.adoc#PM-IMPL-1[PM-IMPL-1], link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-4[PM-ARCH-4], link:../../../plan-marshall-documentation/doc/requirements/09-technology.adoc#PM-TECH-3[PM-TECH-3]
 * Specification: link:../../../plan-marshall-documentation/doc/specification/module-structure.adoc#dependency-rules[Module Structure § Dependency Rules]; link:../../../plan-marshall-documentation/doc/specification/module-structure.adoc#test-placement[§ Test Placement]

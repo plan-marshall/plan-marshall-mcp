@@ -3,14 +3,14 @@
 :toclevels: 2
 :nofooter:
 
-One plan file per work package. A work package is what one session takes up and lands as one pull request here, updating the documents in `plan-marshall-documentation` as part of the same work. The files hold the tasks; what the tasks mean and require is stated in the documentation repository and linked by relative paths. The links assume the repositories checked out beside each other (`../plan-marshall-documentation`, `../pm-mcp-clients`, `../pm-mcp-core`, `../plan-marshall-mcp`); they do not resolve in the web view of a single repository.
+One file per work package and this index. How the work is planned, what a package file holds, when a package is ready, and what happens to a package when it is done are stated only in link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Project Setup § Planning the Work]. The links assume the repositories checked out beside each other (`../plan-marshall-documentation`, `../pm-mcp-clients`, `../pm-mcp-core`, `../plan-marshall-mcp`); they do not resolve in the web view of a single repository.
 
-The modules of this repository, their packages and their dependency rules are listed only in the link:../../../plan-marshall-documentation/doc/specification/module-structure.adoc[Module Structure Specification]; each package file names where it lands.
+The modules of this repository are listed only in the link:../../../plan-marshall-documentation/doc/specification/module-structure.adoc[Module Structure Specification]; each package file names where it lands.
 
 [#packages]
 == Packages
 
-The packages listed serve roadmap Milestones 2 to 4; later milestones are not cut into packages yet, and a package that names one of them as the home of something says what is left out here. This table is the only place that states the status of a package and what it depends on; the package files do not repeat either. A package is *ready* when its status is `open` and everything in its _Depends on_ column is `done`. Ready packages can be worked in parallel, also across the repositories. A dependency that has no work package yet keeps a package `blocked`; it is replaced by the package when that is planned.
+The status of a package is `open`, `blocked`, `done` or `dropped`; a `dropped` row names its reason. Dependencies are named by package id, a package of another repository as `<repository>` / `<id>`. The work packages of the other repositories: link:../../../pm-mcp-clients/doc/plans/README.adoc[`pm-mcp-clients`] and link:../../../pm-mcp-core/doc/plans/README.adoc[`pm-mcp-core`].
 
 [cols="3,4,1,3,2",options="header"]
 |===
@@ -36,61 +36,61 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:lifecycle-wiring.adoc[`lifecycle-wiring`]
 |Wiring of locks and lifecycle
 |`open`
-|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/lock-manager-and-leases.adoc[`pm-mcp-core` / `lock-manager-and-leases`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/runtime-lifecycle.adoc[`pm-mcp-core` / `runtime-lifecycle`]
+|`pm-mcp-core` / `lock-manager-and-leases`; `pm-mcp-core` / `runtime-lifecycle`
 |Milestone 2
 
 |link:operator-channel-api.adoc[`operator-channel-api`]
 |Operator channel on the API
 |`open`
-|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/audit-trail.adoc[`pm-mcp-core` / `audit-trail`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workspace-confinement.adoc[`pm-mcp-core` / `workspace-confinement`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/service-unit.adoc[`pm-mcp-core` / `service-unit`]
+|`pm-mcp-core` / `audit-trail`; `pm-mcp-core` / `workspace-confinement`; `pm-mcp-core` / `service-unit`
 |Milestone 2
 
 |link:integration-layers.adoc[`integration-layers`]
 |Exit: daemon and release-shape layers
 |`open`
-|link:local-adapter-on-api-contract.adoc[`local-adapter-on-api-contract`]; link:transport-library.adoc[`transport-library`]; link:protocol-filter-and-sessionless-tests.adoc[`protocol-filter-and-sessionless-tests`]; link:lifecycle-wiring.adoc[`lifecycle-wiring`]; link:operator-channel-api.adoc[`operator-channel-api`]
+|`local-adapter-on-api-contract`; `transport-library`; `protocol-filter-and-sessionless-tests`; `lifecycle-wiring`; `operator-channel-api`
 |Milestone 2
 
 |link:engine-wiring.adoc[`engine-wiring`]
 |The engine served by the daemon
 |`open`
-|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/workflow-engine.adoc[`pm-mcp-core` / `workflow-engine`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/plan-instance.adoc[`pm-mcp-core` / `plan-instance`]
+|`pm-mcp-core` / `workflow-engine`; `pm-mcp-core` / `plan-instance`
 |Milestone 3
 
 |link:enrolment-and-integrity-api.adoc[`enrolment-and-integrity-api`]
 |Enrolment and store integrity on the API
 |`open`
-|link:operator-channel-api.adoc[`operator-channel-api`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/enrolment-store.adoc[`pm-mcp-core` / `enrolment-store`]
+|`operator-channel-api`; `pm-mcp-core` / `enrolment-store`
 |Milestone 3
 
 |link:default-units-and-drift-tests.adoc[`default-units-and-drift-tests`]
 |Default workflow units and the drift tests
 |`blocked`
-|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/project-units-and-invariants.adoc[`pm-mcp-core` / `project-units-and-invariants`]; link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/diagram-generator.adoc[`pm-mcp-core` / `diagram-generator`]; link:engine-wiring.adoc[`engine-wiring`]
+|`pm-mcp-core` / `project-units-and-invariants`; `pm-mcp-core` / `diagram-generator`; `engine-wiring`
 |Milestone 3
 
 |link:job-runtime-wiring.adoc[`job-runtime-wiring`]
 |Job runtime and worker connections in the daemon
 |`open`
-|link:engine-wiring.adoc[`engine-wiring`]
+|`engine-wiring`
 |Milestone 4
 
 |link:worker-surface-tools.adoc[`worker-surface-tools`]
 |`pm_wait` and the worker surface of the skill tools
 |`open`
-|link:job-runtime-wiring.adoc[`job-runtime-wiring`]
+|`job-runtime-wiring`
 |Milestone 4
 
 |link:harness-and-roles-api.adoc[`harness-and-roles-api`]
 |Harness enrolment and roles on the API
 |`open`
-|link:operator-channel-api.adoc[`operator-channel-api`]
+|`operator-channel-api`
 |Milestone 4
 
 |link:worker-integration-tests.adoc[`worker-integration-tests`]
 |Workers against real processes
 |`open`
-|link:job-runtime-wiring.adoc[`job-runtime-wiring`]; link:worker-surface-tools.adoc[`worker-surface-tools`]; link:../../../pm-mcp-core/doc/plans/supervision-scenarios.adoc[`pm-mcp-core` / `supervision-scenarios`]
+|`job-runtime-wiring`; `worker-surface-tools`; `pm-mcp-core` / `supervision-scenarios`
 |Milestone 4
 
 |link:question-archive-recut.adoc[`question-archive-recut`]
@@ -99,8 +99,8 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |nothing
 |Milestone 4
 
-|link:question-loop-verification.adoc[`question-loop-verification`]
-|A worker's question and its continuation verified with real harnesses — its Done When is met only in part: the results at the specified scale and the settled values are carried by link:question-loop-follow-up.adoc[`question-loop-follow-up`]
+|`question-loop-verification`
+|A worker's question and its continuation verified with real harnesses — its Done When is met only in part: the results at the specified scale and the settled values are carried by `question-loop-follow-up`
 |`done`
 |nothing
 |Milestone 4
@@ -108,26 +108,50 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 |link:question-loop-follow-up.adoc[`question-loop-follow-up`]
 |The question-loop verification at the specified scale, and its open decisions
 |`open`
-|link:question-loop-verification.adoc[`question-loop-verification`]
+|`question-loop-verification`
 |Milestone 4
 
 |link:idle-memory-bound.adoc[`idle-memory-bound`]
 |Idle memory bound of a runtime that has worked
 |`open`
-|link:job-runtime-wiring.adoc[`job-runtime-wiring`]
+|`job-runtime-wiring`
 |Milestone 4
 
 |link:qualification-corpus-in-the-build.adoc[`qualification-corpus-in-the-build`]
 |The qualification corpus shipped and validated
 |`open`
-|link:https://github.com/plan-marshall/pm-mcp-core/blob/603d4f7/doc/plans/corpus-sources.adoc[`pm-mcp-core` / `corpus-sources`]
+|`pm-mcp-core` / `corpus-sources`
 |Milestone 4
 
-|link:corpus-costly-answers-and-tags.adoc[`corpus-costly-answers-and-tags`]
-|Costly answers and the grading tags `derived:<skill>` and `decided-by:<role>` in the model verification corpus: the schema member, its validation, the reviewed items, and the README
-|`open`
+|`corpus-costly-answers-and-tags`
+|Costly answers and the grading tags `derived:<skill>` and `decided-by:<role>` in the model verification corpus; dropped: the costly answers and the items the tags leave out of a grading are deferred (link:../../../plan-marshall-documentation/doc/later-improvements.adoc#L-37[Later Improvements, L-37]), and nothing else remains
+|`dropped`
 |nothing
 |Milestone 4
+
+|link:assembly-enrolment-recovery.adoc[`assembly-enrolment-recovery`]
+|The per-project recovery of the daemon with its enrolment steps: the enrolment check and the owed enrolment audit records at every runtime start, and the background pass over unenrolled projects
+|`open`
+|`lifecycle-wiring`; `pm-mcp-core` / `enrolment-store`
+|Milestone 3
+
+|`question-corpus-public-datasets`
+|The question corpus rebuilt on public datasets
+|`done`
+|nothing
+|Milestone 4
+
+|`question-corpus-ask-rate`
+|The ask rate of the question corpus measured
+|`done`
+|nothing
+|Milestone 4
+
+|`enter-api`
+|Scope entry on the API; dropped: retired with `pm-mcp enter`
+|`dropped`
+|nothing
+|Milestone 3
 
 |link:native-build-verification.adoc[`native-build-verification`]
 |The native build of the daemon against the deployed engine: the metadata of the engine modules, the `kill` and `proc_pidpath` downcalls, the Keychain and Secret Service paths
@@ -137,14 +161,7 @@ The packages listed serve roadmap Milestones 2 to 4; later milestones are not cu
 
 |===
 
-The work packages of the other repositories: link:../../../pm-mcp-clients/doc/plans/README.adoc[`pm-mcp-clients`] and link:../../../pm-mcp-core/doc/plans/README.adoc[`pm-mcp-core`].
-
 [#how]
 == How to Work a Package
 
-* *Take it.* A package is worked in the usual plan-marshall flow: a branch, the commits of the plan, and a pull request opened at finalize. The pull request of the package sets its row to `done` in the table above, within its commits. Nothing marks a package as taken before that pull request is open, so list the open pull requests of this repository for one that names the package before starting. A package whose dependency lies in another repository is ready when that dependency is merged there and its `SNAPSHOT` is deployed.
-* *Trace first.* The packages are cut from the roadmap items, with the requirements, sections, and watch documents the roadmap names. Before code, build the trace matrix of the project skill `traced-implementation` (`../plan-marshall-documentation/.claude/skills/traced-implementation/SKILL.md`) for the package: every requirement bullet, every specification section, and every watch item anchored to them, each with its destinations. Split or extend the package where the matrix shows it; a row left out is recorded `out of slice` with its reason.
-* *Present and remaining.* The roadmap item a package serves states what the code already covers. Read it first: a package delivers the remainder, never a second form of what exists.
-* *Dependencies are the order.* The roadmap milestone a package serves says for which exit it is needed, not when it may start. Add a dependency you discover, and a new package, to the table above.
-* *Done.* A package is done with its guarding tests, `verify`, `verify -Ppre-commit` (its rewrites reviewed and committed), `verify -Pcoverage`, and `verify -Pintegration-tests` green, and the native build where it touches a binary.
-* *Documents.* The code documentation of a package and its work package file with the index live here. The specification and requirement documents live in `plan-marshall-documentation`: a statement of a requirement or specification that a package proves wrong is corrected there, never worked around in code, and the concept, developer, and user documentation of the package, the deletion of the implemented specification sections and watch items, and the update of the roadmap item are made there as well. The plan of the package updates those documents directly, as part of its own work, and merges that pull request itself once the code is on `main` here.
+As link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Project Setup § Planning the Work] states. The Done When of a package includes the builds of this repository (`verify`, `verify -Ppre-commit` with its rewrites committed, `verify -Pcoverage`, `verify -Pintegration-tests`, and the native build where the package touches a binary), and the package keeps its documents where `CLAUDE.md` places them.

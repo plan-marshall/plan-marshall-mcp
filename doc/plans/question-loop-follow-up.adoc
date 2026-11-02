@@ -4,19 +4,73 @@
 link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-loop-follow-up`
 
 [horizontal]
-Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
-Where:: pm-e2e (the maintained measurement code, gated by properties), `plan-marshall-documentation` (the results, the developer document); experiment-only code stays on its branch. The values the runs settle are `pm-mcp-core` / `client-profile-measured-values`'s and this package names that one as their owner
-Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+Where:: pm-e2e (the maintained measurement code, gated by properties), `plan-marshall-documentation` (the results in the Evaluation Reference; the developer document once the code is on `main`); experiment-only code stays on its branch. The values the runs settle are `pm-mcp-core` / `client-profile-measured-values`'s and this package names that one as their owner
+Status, milestone and dependencies:: in the link:README.adoc#packages[index], the only place that states them
 
 == What
 
-The leftovers of link:question-loop-verification.adoc[`question-loop-verification`]. That package measured every item Q1 to Q7 and R1 to R4 at smoke scale (3 runs, 2 fixtures), so every verdict reads _not at the specified scale_ (link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] and its limits). The mechanisms are described in link:../../../plan-marshall-documentation/doc/developer/question-loop-experiment.adoc[The Question-Loop Experiment]; the code is kept on the pushed branch `verification/question-loop-experiment` of this repository (`488ce47`). This package turns the durable parts of that code into maintained code, settles what the smoke run left open, and repeats the measurement at the specified scale of 20 runs per fixture and host for each form — 20 warm and 20 fresh — (and per settings arm as well where the control of task 3 runs), with the criteria of the original package — except the two the operator fixed before the first run (task 2). The criteria are fixed before the first measured run and not changed by it: a criterion change is decided by the operator before the first run of the follow-up, on reasons not drawn from the follow-up's own runs, and recorded in this package.
+The leftovers of the done package `question-loop-verification`. That package measured every item Q1 to Q7 and R1 to R4 at smoke scale (3 runs, 2 fixtures), so every verdict reads _not at the specified scale_ (link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] and its limits). What running the harnesses showed is recorded in link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#question-loop-findings[Evaluation Reference, What Running the Harnesses as Workers Showed]; the experiment as found on the branch is described in <<_the_experiment_on_the_branch>> below; the code is kept on the pushed branch `verification/question-loop-experiment` of this repository (`488ce47`). This package turns the durable parts of that code into maintained code, settles what the smoke run left open, and repeats the measurement at the specified scale of 20 runs per fixture and host for each form — 20 warm and 20 fresh — (and per settings arm as well where the control of task 3 runs), with the criteria of the original package — except the two the operator fixed before the first run (task 2). The criteria are fixed before the first measured run and not changed by it: a criterion change is decided by the operator before the first run of the follow-up, on reasons not drawn from the follow-up's own runs, and recorded in this package.
 
 * _Evidence._ Every run's evidence — `runs.jsonl`, `invocations.jsonl`, the stub logs, the per-invocation archives and the answer audit — is kept and pushed outside any plan worktree: on the branch `question-loop-follow-up` of the private repository `cuioss/plan-marshall-telemetry`, beside the scenarios kept on that repository's branch `verification/question-items`, before the plan's worktree is removed. A published figure whose source is not in that store is not a result.
 
 * _Fixtures per item._ Q1 to Q7 and R3 run on 2 fixtures each — the count of the smoke scale, held so that the two scales compare item by item — where Q1 to Q5 and R3 take the loop tasks of the corpus topic `question/apply-answer`, Q5's bound tasks come from `question/ask-or-proceed`, Q6 takes the quorum fixtures of the two vote links, Q7 takes the fixtures of Q2 on Claude Code only, and the original descriptions are the controls of Q2. R1 and R2 run on the probe, R4 runs on the probe for small work and on the two scenarios named in task 10 for large work. Task 6 states the resulting invocations per item and host before the first run.
 
 The run costs differ by orders of magnitude and are planned with that in mind (task 6): OpenCode runs are cheap (60 runs of R3 cost 0.22 USD), Claude Code costs dollars per invocation of 24 runs (about 2.3 to 2.9 USD), Antigravity reports no figures; the wall time is the cost of R1 (6.6 h for 12 OpenCode runs) and R2 (9.3 h for 24 runs).
+
+== The Experiment on the Branch
+
+The code lives on the branch `verification/question-loop-experiment` (`488ce47`), test package
+`de.planmarshall.e2e.experiment.question` of `pm-e2e`. Task 1 extracts from it.
+
+Classes: `QuestionStub` (stub MCP server: `pm_wait`, `pm_state`, `pm_do`, the task protocol with leases per generation,
+question links, question records on disk, `facts.answers`, the event log every figure is computed from);
+`QuestionStub.Relay` (the worker's MCP server as its harness starts it: forwards newline-delimited JSON-RPC to the stub's
+Unix socket after a first line with identity, role and generation; logs every line host-side with its arrival time);
+`QuestionDriver` (starts workers headless through `pm-exec`, answers as operator, resumes sessions, restarts the stub,
+injects faults, supervises the answer acknowledgement with each host's values); `QuestionFixtures` (loop tasks from the
+corpus cache, the probe and the scenario recipes; `FORCE_ASK`, `FORCE_ASK_PLAN_TASK`, `FORCE_ASK_EACH`;
+`composeAnswer`); `QuestionResults` (pass criteria encoded before the first run, figures, verdicts, bookkeeping;
+`rereadsCanary`, `readsFile`); `QuestionEvidence` (persistent root of the stub logs, per-invocation archive);
+`QuestionLoopExperiment` (JUnit entry, disabled unless `-Dpm.experiment.question=<item>`; its class documentation lists
+every run property); `QuestionReaggregation` (`-Dpm.experiment.reaggregate=<item>`); `QuestionStubTest`,
+`AskProbeTest`, `VoterProbeTest`, `AgyProbeTest`, `OpenCodeProbeTest`.
+
+Stub: identity from the relay's environment (`PM_Q_SOCKET`, `PM_Q_WORKER`, `PM_Q_GENERATION`, role, harness); a newer
+generation fences the older (`generation_fenced`) and the driver ends older generations before launching a newer one
+(`superseded_ended`); links `ask`, `ask:TASK-NNN`, `consult:<role>`, `submit:vote`; envelope checks (2-5 options, one
+recommended, confidence, rationale, closed decision kind; `invalid_link_args`); question bound 3 per entry and plan
+task; continuation forms HOLD / RESUME / FALLBACK; `questions.jsonl` replayed by a restarted stub; `events.jsonl`; for
+R3 `exit_observed`.
+
+Launch: worker directory below the OS temp dir; `pm-exec` from `-Dpm.experiment.exec`, else a native binary of a
+pm-mcp-clients checkout beside the repository, else `target/e2e-jvm-lib/pm-exec.jar` (`java
+--enable-native-access=ALL-UNNAMED -cp pm-exec.jar de.planmarshall.exec.PmExec`); harness executable from
+`-Dpm.experiment.exe.<host>`, else `PATH`, else known install locations; host-session markers
+(`HOST_SESSION_PREFIXES`) stripped, `PWD` set. Per-harness command lines and configuration: Evaluation Reference,
+Hosts as Relay Starters and Workers. OpenCode data home: `-Dpm.experiment.opencode.data-home=global|worker`.
+
+Classification: `launch_failed`, `early_exit`, `continuation_early_exit`, `voter_early_exit`, `quota_error`,
+`setup_failed`; `continued_by_hold`, `warm_asker_exited`, `continuation_gap`, `asker_ended_by_driver`;
+`QuestionDriver.recovery`. Faults of R3 (`QuestionDriver.Fault`, `-Dpm.experiment.r3.faults`): `STOP_BEFORE_ANSWER`
+(`stopTree`), `CALL_CUT`, `MODEL_HANG`, `KILL`, `RESUMED_EXIT`; host values in `QuestionDriver.Host`.
+
+Bookkeeping: `target/question-loop/runs.jsonl`, `invocations.jsonl`; `incomplete`, `atSpecifiedScale`,
+`verdict_scale`; limits as the union over invocations; `-Dpm.experiment.result.suffix` with
+`-Dpm.experiment.result.invocations`; stub logs under `target/question-loop/work/` (`-Dpm.experiment.work`), socket at a
+short `/tmp` path; `evidence_missing` and `-Dpm.experiment.result.allow-missing-evidence`;
+`QuestionEvidence.archive` → `target/question-loop/archive/<invocation id>/` with `analysis.txt`.
+
+Running one item at smoke scale (needs harness logins, the corpus cache of `CorpusSourcesTest` (`-Pcorpus`), the JVM
+layout from `-Pintegration-tests` or a native `pm-exec`, and for R4 large work a checkout of
+`cuioss/plan-marshall-telemetry` branch `verification/question-items`):
+
+    ./mvnw test -pl pm-e2e -am -Dtest=QuestionLoopExperiment -Dsurefire.failIfNoSpecifiedTests=false \
+      -Dpm.experiment.question=Q1 -Dpm.experiment.runs=3 -Dpm.experiment.fixtures=2 \
+      -Dpm.experiment.hosts=opencode -Dpm.experiment.model.opencode=opencode-go/deepseek-v4.1-flash \
+      -Dpm.experiment.run-timeout=PT10M
+
+`runs.jsonl` is read per item; clear an item's records before the first invocation of a new pass. R4 runs as two
+invocations (`-Dpm.experiment.r4.large-runs=0`, then `-Dpm.experiment.runs=0`).
 
 == Tasks
 
@@ -25,7 +79,7 @@ Ordered by dependency: the extraction first, then the decisions and the preparat
 === 1. Extract the durable experiment code into pm-e2e
 
 [horizontal]
-Deliverable:: The durable parts of the experiment as maintained code: the stub MCP server with leases, fencing and replay; the driver that launches the harnesses through `pm-exec`; the fixtures (corpus cache and probe); the result evaluation and aggregation, with the `evidence_missing` guard and the per-invocation archive; the per-host classification of early exits and quota. The developer document is updated to the extracted form. The evidence outputs are written in the form the store of this package takes.
+Deliverable:: The durable parts of the experiment as maintained code: the stub MCP server with leases, fencing and replay; the driver that launches the harnesses through `pm-exec`; the fixtures (corpus cache and probe); the result evaluation and aggregation, with the `evidence_missing` guard and the per-invocation archive; the per-host classification of early exits and quota. The developer document of the extracted code is written (none exists while the code is on a branch). The evidence outputs are written in the form the store of this package takes.
 Lands:: pm-e2e, under the rules of this repository (Maven, JUnit 5, no Mockito, `package-info.java` per package). The measurement is gated by properties, so that no normal build calls a harness; what stays experiment-only stays gated or on the branch. The developer document in `plan-marshall-documentation`.
 Done when:: the extracted classes have their own tests at the coverage bar of the repository, `verify`, `verify -Ppre-commit`, `verify -Pcoverage` and `verify -Pintegration-tests` are green with the measurement gate off, a gated run reproduces one smoke group of the results — the same verdict per item and every count within one run of the smoke group's figure, the group and its figures named in the plan's record — and the developer document describes only what is in the tree.
 
@@ -138,11 +192,11 @@ Done when:: no limit of the Evaluation Reference says _not at the specified scal
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+The starting set of the trace matrix of the project skill `traced-implementation` (link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Planning the Work]); requirements, specification sections and watch documents are only referenced here.
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-12[PM-WF-12], link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-18[PM-WF-18], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-2[PM-WORK-2], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-4[PM-WORK-4], link:../../../plan-marshall-documentation/doc/requirements/13-client-profiles.adoc#PM-CLIENT-2[PM-CLIENT-2]
 * Specification: link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] (rows Q1 to Q7 and R1 to R4), link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#limits[Limits]; link:../../../pm-mcp-core/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#continuation[Model Work § Continuing after a Question]; link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc#roles[Model Work § Roles as Configuration Artifacts]; link:../../../pm-mcp-core/doc/specification/client-profiles/01-profile-schema.adoc#headless-resumability[Client Profiles § Resumability]; link:../../../pm-mcp-core/doc/specification/client-profiles/01-profile-schema.adoc#headless-inline-settings[§ Inline settings]; link:../../../pm-mcp-core/doc/specification/client-profiles/01-profile-schema.adoc#profile-verification[§ Profile Verification]
-* Developer documentation: link:../../../plan-marshall-documentation/doc/developer/question-loop-experiment.adoc[The Question-Loop Experiment]
+* Developer documentation: written by task 1 in `plan-marshall-documentation` (`doc/developer/`), once the extracted code is on `main`
 * Watch: link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]; link:../../../pm-mcp-core/doc/implementation-watch/client-profiles.adoc#PM-WATCH-CLIENT-17[PM-WATCH-CLIENT-17]
 
 == Done When
