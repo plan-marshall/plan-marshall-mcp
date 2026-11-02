@@ -1861,8 +1861,13 @@ public final class QuestionDriver implements AutoCloseable {
 
     /**
      * @param worker a worker
-     * @return the SHA-256 over the paths and contents of its worker directory, without the harness configuration and
-     *         data directory: a change after the ask is a change of the worktree
+     * @return the SHA-256 over the paths and contents of its worker directory, without what the harness and the stub
+     *         write there themselves: the {@code data/} directory, every dot-prefixed path (the harnesses keep their
+     *         own state in {@code .claude/}, {@code .agents/} and similar, which the driver cannot list ahead of
+     *         time), {@code *mcp-config.json} and {@code opencode.json}. A change after the ask to any other file is a
+     *         change of the worktree. The exclusion is deliberately wide: a worker's change to a dot-prefixed file of
+     *         the fixture itself (for example a {@code .gitignore}) is not seen, which the loop tasks do not need
+     *         because they change {@code solution.py}.
      * @throws IOException if a file cannot be read
      */
     public String worktreeDigest(Worker worker) throws IOException {

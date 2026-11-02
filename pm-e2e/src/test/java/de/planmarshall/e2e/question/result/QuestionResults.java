@@ -60,7 +60,9 @@ import de.planmarshall.e2e.question.stub.QuestionStub;
  * writes them to {@code target/verification-results/question-loop/<item>.json}.
  * <p>
  * The criteria ({@link #CRITERIA}) are those of the work package {@code question-loop-follow-up} and the Evaluation
- * Reference, encoded before the first measured run and not changed by any result. Each criterion is judged per run,
+ * Reference, encoded before the first measured run and not changed by any result, with one named exception: the Q6
+ * clause that a vote or consult run must have taken place, which the operator decided on 2026-11-02 after the runs
+ * (it only tightens the judge and changes no stored verdict). Each criterion is judged per run,
  * and a group passes when every run passes; a group whose runs disagree is extended to {@value Scale#EXTENDED_RUNS}
  * runs and reported with its rate. No figure comes from what a model reports about itself. Every verdict is stated
  * with its run count and the client versions its runs recorded ({@value #VERDICT_STATEMENT}).
@@ -93,7 +95,9 @@ public final class QuestionResults {
                     + "infeasible report, with no lost task and no prose question. The bounds run sequentially from "
                     + Scale.Q5_FIRST_BOUND + "; the next bound only where a run reached the bound before."),
             Map.entry("Q6", "Every run passes: every vote valid within the task protocol's re-offer budget, the "
-                    + "decided answer applied as in Q4, consultation and question never mixed up."),
+                    + "decided answer applied as in Q4, consultation and question never mixed up. A vote run took "
+                    + "at least one vote task and a consult run at least one consultation (a clarification the "
+                    + "operator decided on 2026-11-02, after the runs; no stored verdict changes)."),
             Map.entry("Q7", "Every run passes: no worker or slot held while the record is open, the warm worker "
                     + "recycled, the stub restarted while open, and the answer delivered exactly once after the "
                     + "restart."),
