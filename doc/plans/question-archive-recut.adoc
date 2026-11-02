@@ -4,11 +4,10 @@
 link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-archive-recut`
 
 [horizontal]
-Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 4
 Where:: the private repository `cuioss/plan-marshall-telemetry`, directory `verification/` (its pull request #1, branch `verification/question-items`, is the base); nothing in this repository changes but the index row
-Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+Status, milestone and dependencies:: in the link:README.adoc#packages[index], the only place that states them
 
-== What
+== Tasks
 
 `cuioss/plan-marshall-telemetry` holds verification items taken from real operator questions of archived plans: 44 items below `verification/corpus/decision/question/`, 15 below `verification/corpus/decision/own-words/`, and 18 scenarios below `verification/question-loop/scenarios/`. Their question items grade a decider on the operator's actual choice. A decider without the plan's whole context cannot be graded on that choice; what it can be graded on is whether the question needed the operator at all. The data stays private: nothing of it enters a public repository.
 

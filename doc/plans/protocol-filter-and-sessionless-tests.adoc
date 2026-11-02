@@ -4,11 +4,10 @@
 link:README.adoc[Work packages of `plan-marshall-mcp`] » `protocol-filter-and-sessionless-tests`
 
 [horizontal]
-Serves:: link:../../../plan-marshall-documentation/doc/roadmap.adoc[Roadmap] Milestone 2
 Where:: pm-mcp-server packages `mcp.server.tools`, `mcp.server.security`
-Status and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+Status, milestone and dependencies:: in the link:README.adoc#packages[index], the only place that states them
 
-== What
+== Tasks
 
 * An `initialize` without `Mcp-Method` receives no `Mcp-Session-Id` either.
 * The component tests use the sessionless form. Today they reach the daemon with `McpAssured` over the loopback TCP listener that the test profile opens. Settle first, in the trace matrix, how they reach it without TCP: `McpAssured` over the Unix socket if `quarkus-mcp-server-test` offers that transport, otherwise MCP calls through the socket client of `pm-api`. Only then is the loopback listener of the test profile removed; if neither works, stop and correct the roadmap item with the evidence.
@@ -16,7 +15,7 @@ Status and dependencies:: in the link:README.adoc#packages[index], the only plac
 
 == Trace
 
-Requirements, specification sections, and watch documents stay in `plan-marshall-documentation` (those of the engine in `pm-mcp-core`) and are only referenced here. They are the starting set; the trace matrix of `traced-implementation` is built from them before code (link:README.adoc#how[How to work a package]).
+The starting set of the trace matrix of the project skill `traced-implementation` (link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Planning the Work]); requirements, specification sections and watch documents are only referenced here.
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-3[PM-ARCH-3], link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-2[PM-ARCH-2], link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-4[PM-SEC-4]
 * Specification: link:../../../plan-marshall-documentation/doc/specification/runtime-model/03-relay.adoc#_host_protocol_forms[Runtime Model § Host Protocol Forms]

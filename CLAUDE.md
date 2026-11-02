@@ -172,13 +172,9 @@ A reference from code or from this file to a document is its path in the documen
 
 ## Work Packages
 
-The work of this repository is planned as work packages in `doc/plans/`, one file per package, with the index
-`doc/plans/README.adoc`, the only place that states the status of a package and what it depends on (also packages
-of the other repositories). A package is ready when it is open and everything it depends on is done; the roadmap milestone it serves says for which exit it
-is needed, not when it may start. The plan files hold the tasks only: requirements, specifications and watch
-items stay in `plan-marshall-documentation` and are linked by relative paths that assume the repositories checked
-out beside each other. A package is worked in the usual plan-marshall flow of the section "Git Workflow" (branch,
-commits, pull request at finalize), and its row in the index is set to `done` within those commits.
+The work of this repository is planned as work packages in `doc/plans/` (index `doc/plans/README.adoc`). How work
+packages are planned, when one is ready, what its file holds and what happens when it is done is stated only in
+`../plan-marshall-documentation/doc/developer/project-setup.adoc` (_Planning the Work_).
 
 ## Git Workflow
 

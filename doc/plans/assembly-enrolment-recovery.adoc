@@ -1,0 +1,31 @@
+= The daemon's recovery with its enrolment steps
+:nofooter:
+
+link:README.adoc[Work packages of `plan-marshall-mcp`] » `assembly-enrolment-recovery`
+
+[horizontal]
+Where:: pm-mcp-server package `mcp.server.runtime` (the recovery built and started by the daemon)
+Status, milestone and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+
+== Tasks
+
+The specification sections named are the single statement of what each task builds.
+
+. *The recovery built with its enrolment steps*: the daemon builds its per-project recovery with `ProjectRecovery.withEnrolment` of `pm-runtime` over the enrolment store, so that the enrolment check runs as step 1 and the owed enrolment audit records as step 2: link:../../../pm-mcp-core/doc/specification/runtime-lifecycle/01-startup-recovery-drain.adoc#per-project-recovery[Runtime Lifecycle § Per-Project Recovery], steps 1 and 2; link:../../../pm-mcp-core/doc/specification/credentials-and-enrolment/02-enrolment-and-project-lifecycle.adoc#enrolment-integrity[Credentials & Enrolment § Enrolment Integrity], _Verification Points_.
+. *The background pass over unenrolled projects*: the owed audit records of a project no longer enrolled, handed over by the background pass: § Per-Project Recovery, step 2.
+. *Started at Ready*: the recovery pass started over all enrolled projects when the daemon is ready, and a call addressing a project waiting for its recovery: link:../../../pm-mcp-core/doc/specification/runtime-lifecycle/01-startup-recovery-drain.adoc#_startup_sequence[Runtime Lifecycle § Startup Sequence], _Ready_; § Per-Project Recovery, the opening paragraph.
+
+Left out: the other recovery steps and the sweep (`lifecycle-wiring`); the jobs step (`job-runtime-wiring`).
+
+== Trace
+
+The starting set of the trace matrix of the project skill `traced-implementation` (link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Planning the Work]); requirements, specification sections and watch documents are only referenced here.
+
+* Requirements: link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-5[PM-SEC-5], link:../../../plan-marshall-documentation/doc/requirements/01-architecture.adoc#PM-ARCH-7[PM-ARCH-7], link:../../../plan-marshall-documentation/doc/requirements/06-execution.adoc#PM-EXEC-2[PM-EXEC-2]
+* Specification: the sections the tasks name; link:../../../pm-mcp-core/doc/specification/store-schemas/11-enrolment-store.adoc#enrolment-store[Store Schemas § Project Enrolment Store]
+* Watch: link:../../../pm-mcp-core/doc/implementation-watch/credentials-and-enrolment.adoc[Credentials & Enrolment]; link:../../../pm-mcp-core/doc/implementation-watch/runtime-lifecycle.adoc[Runtime Lifecycle]
+
+== Done When
+
+* Watch: none anchored to steps 1 and 2; the trace matrix names any it finds.
+* Tests: a `*IT` of the packaged daemon per enrolment failure (a tampered sidecar, a widened mode, an invalid file, a duplicate `project_root`), each with its audit record at the next start and the project not served; an owed `.audit-intent` handed over at the next start, and one of an unenrolled project by the background pass; a call addressing a recovering project answered `runtime_recovering` on expiry of its wait.
