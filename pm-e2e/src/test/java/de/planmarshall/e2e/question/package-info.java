@@ -17,6 +17,6 @@
  * evaluation. Every figure comes from the stub's event log, the relay's host-side log and the worker's output, never
  * from what a model reports about itself. The results are recorded in the Evaluation Reference of
  * {@code plan-marshall-documentation} ({@code doc/specification/evaluation.adoc}); the code is described in its
- * developer document {@code doc/developer/question-loop-experiment.adoc}.
+ * developer document {@code doc/developer/question-loop-measurement.adoc}.
  */
 package de.planmarshall.e2e.question;
