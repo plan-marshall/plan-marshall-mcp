@@ -1187,8 +1187,8 @@ class QuestionLoopMeasurement {
      * records the event's status, {@code rateLimitType} and {@code resetsAt} and marks the run as not run
      * ({@value RunView#NOT_RUN}, reason {@value RunView#USAGE_LIMIT}): it is never a failed run.
      *
-     * @param runRecordthe run record
-     * @param quota  the quota error
+     * @param runRecord the run record
+     * @param quota     the quota error
      */
     static void recordQuotaError(ObjectNode runRecord, QuestionDriver.QuotaError quota) {
         runRecord.put(QuestionDriver.QUOTA_ERROR, true);

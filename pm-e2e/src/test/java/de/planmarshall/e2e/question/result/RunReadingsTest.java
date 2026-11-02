@@ -233,6 +233,9 @@ class RunReadingsTest {
         void numbers() {
             assertAll(() -> assertEquals(0.5, RunReadings.share(1, 2)), () -> assertEquals(0, RunReadings.share(1, 0)),
                     () -> assertEquals(2, RunReadings.median(List.of(3L, 1L, 2L))),
+                    () -> assertEquals(250_000L, RunReadings.median(List.of(400_000L, 100_000L))),
+                    () -> assertEquals(3L, RunReadings.median(List.of(4L, 1L, 2L, 7L))),
+                    () -> assertEquals(5L, RunReadings.median(List.of(5L))),
                     () -> assertEquals(-1, RunReadings.median(List.of())),
                     () -> assertEquals(3, RunReadings.max(List.of(3L, 1L))),
                     () -> assertEquals(-1, RunReadings.max(List.of())));

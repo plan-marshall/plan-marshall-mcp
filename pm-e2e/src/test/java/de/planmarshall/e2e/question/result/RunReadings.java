@@ -772,12 +772,20 @@ public final class RunReadings {
         return population == 0 ? 0 : (double) count / population;
     }
 
+    /**
+     * The median of the values: the middle value of an odd count, the mean of the two middle values (rounded down)
+     * of an even count, and {@code -1} for no value.
+     */
     static long median(List<Long> values) {
         if (values.isEmpty()) {
             return -1;
         }
         var sorted = values.stream().sorted().toList();
-        return sorted.get(sorted.size() / 2);
+        var middle = sorted.size() / 2;
+        if (sorted.size() % 2 == 1) {
+            return sorted.get(middle);
+        }
+        return Math.floorDiv(sorted.get(middle - 1) + sorted.get(middle), 2L);
     }
 
     static long max(List<Long> values) {
