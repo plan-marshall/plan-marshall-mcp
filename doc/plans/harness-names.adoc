@@ -1,0 +1,21 @@
+= The harness named as the documents name it
+:nofooter:
+
+link:README.adoc[Work packages of `plan-marshall-mcp`] » `harness-names`
+
+[horizontal]
+Where:: pm-mcp-server packages `mcp.server.tools`, `mcp.server.security`; pm-e2e
+Status, milestone and dependencies:: in the link:README.adoc#packages[index], the only place that states them
+
+The documents name the coding agent that runs workers the _harness_; _host_ means only the machine. The code of this repository still says _host_ for the harness in its documentation and test names. The renames change no behaviour and no wire name.
+
+== Tasks
+
+* The class documentation and display names that say _host_ for the harness say _harness_: `SessionlessInitialize` (a session-opening harness, link:../../../plan-marshall-documentation/doc/specification/runtime-model/03-relay.adoc[Runtime Model § Relay]), `McpSurfaceIT` (`serves both harness forms`), `StdioPeer` (as a harness speaks to its MCP server). _Host_ for the machine (the loopback listener, the `Host` header, `PM_MCP_HOME`) stays.
+  Proof: `git grep -w -i host` over `pm-mcp-server/src` and `pm-e2e/src` finds only the machine, the HTTP `Host` header and the session-relay names of the next item.
+* Not renamed here: the session-relay headers `PM-MCP-Client` and `PM-MCP-Host-Marker` (`IdentityAttributes.SESSION_HEADERS`) and the round trip of `ReleaseLayoutIT` and `StdioHarnessIT` through `pm-mcp serve --client neutral`. They serve a harness session acting through the relay, which the specification no longer has (a harness is a worker only, and `pm-mcp` has the one verb `serve --job`, link:../../../plan-marshall-documentation/doc/specification/cli-and-security/01-cli-and-installer.adoc#command-tree[CLI, Coordination & Security § Command Tree]); whether they are removed with the relay's `--client` in `pm-mcp-clients` is decided before this package starts, and the package then removes them or leaves them as they are.
+
+== Trace
+
+* Requirements: link:../../../plan-marshall-documentation/doc/requirements/13-harness-profiles.adoc#PM-CLIENT-1[PM-CLIENT-1]
+* Specification: link:../../../plan-marshall-documentation/doc/specification/runtime-model/03-relay.adoc[Runtime Model § Relay]; link:../../../plan-marshall-documentation/doc/specification/cli-and-security/01-cli-and-installer.adoc#command-tree[CLI, Coordination & Security § Command Tree]

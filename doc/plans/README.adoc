@@ -159,6 +159,11 @@ The status of a package is `open`, `blocked`, `done` or `dropped`; a `dropped` r
 |nothing
 |Milestone 4
 
+|link:harness-names.adoc[`harness-names`]
+|The class documentation and test names say harness where they mean the harness; the session-relay names wait for the decision on their removal
+|`open`
+|nothing
+|none: follows the naming of the documents
 |===
 
 [#how]
