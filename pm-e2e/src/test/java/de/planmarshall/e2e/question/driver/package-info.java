@@ -12,7 +12,7 @@
  * the faults of R3 and classifies how each worker generation ended.
  * <ul>
  * <li><em>Launch per host.</em> {@link de.planmarshall.e2e.question.driver.Host} holds the values of each host's
- * client profile: Claude Code, OpenCode 2.x and Antigravity, with the argv of a fresh, a resumed and a model-bound
+ * harness profile: Claude Code, OpenCode 2.x and Antigravity, with the argv of a fresh, a resumed and a model-bound
  * launch, where the session id comes from in the harness's structured output, the acknowledgement deadline or silence
  * limit, the limit at which the host cuts a silent call, and where the stub's MCP configuration is placed.
  * {@link de.planmarshall.e2e.question.driver.QuestionDriver} runs every harness through {@code pm-exec}

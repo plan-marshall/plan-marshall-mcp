@@ -26,7 +26,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import de.planmarshall.e2e.question.stub.QuestionStub;
 
 /**
- * The hosts of the measurement with the per-host values of their client profiles (PM-CLIENT-2): the launch arguments
+ * The hosts of the measurement with the per-host values of their harness profiles (PM-CLIENT-2): the launch arguments
  * of a fresh, a resumed and a model-bound launch, the field of the structured output that carries the session id, the
  * deadline of the answer acknowledgement or the silence limit, the limit at which the host cuts a silent call, and
  * where the stub's MCP configuration is placed below the worker directory, each as the branch
