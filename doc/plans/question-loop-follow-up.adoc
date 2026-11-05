@@ -1,17 +1,18 @@
-= The question-loop verification at the specified scale
+= The question-loop verification at the revised scale
 :nofooter:
 
 link:README.adoc[Work packages of `plan-marshall-mcp`] » `question-loop-follow-up`
 
 [horizontal]
-Where:: pm-e2e (the maintained measurement code, gated by properties), `plan-marshall-documentation` (the results in the Evaluation Reference; the developer document once the code is on `main`); experiment-only code stays on its branch. The values the runs settle are `pm-mcp-core` / `client-profile-measured-values`'s and this package names that one as their owner
+Where:: pm-e2e (the maintained measurement code, gated by properties), `plan-marshall-documentation` (the results in the Evaluation Reference; the developer document once the code is on `main`), the evidence store (the branch `question-loop-follow-up` of `cuioss/plan-marshall-telemetry`); experiment-only code stays on its branch. The values the runs settle are `pm-mcp-core` / `client-profile-measured-values`'s and this package names that one as their owner
+Parts:: the Claude Code part, worked by PLAN-03 of the epic `question-loop-corrections`, and the OpenCode and Antigravity part, PLAN-04 of the same epic, staged and deferred. Each task below names its part (see <<parts>>)
 Status, milestone and dependencies:: in the link:README.adoc#packages[index], the only place that states them
 
 == What
 
-The leftovers of the done package `question-loop-verification`. That package measured every item Q1 to Q7 and R1 to R4 at smoke scale (3 runs, 2 fixtures), so every verdict reads _not at the specified scale_ (link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] and its limits). What running the harnesses showed is recorded in link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#question-loop-findings[Evaluation Reference, What Running the Harnesses as Workers Showed]; the experiment as found on the branch is described in <<_the_experiment_on_the_branch>> below; the code is kept on the pushed branch `verification/question-loop-experiment` of this repository (`488ce47`). This package turns the durable parts of that code into maintained code, settles what the smoke run left open, and repeats the measurement at the specified scale of 20 runs per fixture and harness for each form — 20 warm and 20 fresh — (and per settings arm as well where the control of task 3 runs), with the criteria of the original package — except the two the operator fixed before the first run (task 2). The criteria are fixed before the first measured run and not changed by it: a criterion change is decided by the operator before the first run of the follow-up, on reasons not drawn from the follow-up's own runs, and recorded in this package.
+The leftovers of the done package `question-loop-verification`. That package measured every item Q1 to Q7 and R1 to R4 at smoke scale (3 runs, 2 fixtures), so every verdict reads _not at the specified scale_ (link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] and its limits). What running the harnesses showed is recorded in link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#question-loop-findings[Evaluation Reference, What Running the Harnesses as Workers Showed]; the experiment as found on the branch is described in <<_the_experiment_on_the_branch>> below; the code is kept on the pushed branch `verification/question-loop-experiment` of this repository (`488ce47`). This package turns the durable parts of that code into maintained code, settles what the smoke run left open, and repeats the measurement at the revised scale of <<scale>>, with the criteria of the original package except where the operator changed them before the first run (task 2 and <<scale>>). The criteria are fixed before the first measured run and not changed by it: a criterion change is decided by the operator before the first run of the follow-up, on reasons not drawn from the follow-up's own runs, and recorded in this package (<<decisions>>). One clarification is the named exception: on 2026-11-02, after the runs, the operator decided that a Q6 vote or consult run must have taken place to pass (decision record of that date); it only tightens the judge and changes no stored verdict.
 
-* _Evidence._ Every run's evidence — `runs.jsonl`, `invocations.jsonl`, the stub logs, the per-invocation archives and the answer audit — is kept and pushed outside any plan worktree: on the branch `question-loop-follow-up` of the private repository `cuioss/plan-marshall-telemetry`, beside the scenarios kept on that repository's branch `verification/question-items`, before the plan's worktree is removed. A published figure whose source is not in that store is not a result.
+* _Evidence._ Every run's evidence — `runs.jsonl`, `invocations.jsonl`, the stub logs, the per-invocation archives and the answer audit — is kept and pushed outside any plan worktree: on the branch `question-loop-follow-up` of the private repository `cuioss/plan-marshall-telemetry`, beside the scenarios kept on that repository's branch `verification/question-items`, before the plan's worktree is removed. A published figure whose source is not in that store is not a result, with one exception the operator decided on 2026-11-01: the worker outputs (`output-*.jsonl`, `stderr-*.log`, `relay-*.jsonl`, 84 MB) are not kept, because a verdict is bound to one client version and the harnesses change daily; the cost, rate-limit and refusal figures read from them are kept instead, per invocation, in `figures.json` of its store directory, and are read, not re-derivable.
 
 * _Fixtures per item._ Q1 to Q7 and R3 run on 2 fixtures each — the count of the smoke scale, held so that the two scales compare item by item — where Q1 to Q5 and R3 take the loop tasks of the corpus topic `question/apply-answer`, Q5's bound tasks come from `question/ask-or-proceed`, Q6 takes the quorum fixtures of the two vote links, Q7 takes the fixtures of Q2 on Claude Code only, and the original descriptions are the controls of Q2. R1 and R2 run on the probe, R4 runs on the probe for small work and on the two scenarios named in task 10 for large work. Task 6 states the resulting invocations per item and harness before the first run.
 
@@ -45,7 +46,7 @@ R3 `exit_observed`.
 Launch: worker directory below the OS temp dir; `pm-exec` from `-Dpm.experiment.exec`, else a native binary of a
 pm-mcp-clients checkout beside the repository, else `target/e2e-jvm-lib/pm-exec.jar` (`java
 --enable-native-access=ALL-UNNAMED -cp pm-exec.jar de.planmarshall.exec.PmExec`); harness executable from
-`-Dpm.experiment.exe.<host>`, else `PATH`, else known install locations; harness-session markers
+`-Dpm.experiment.exe.<harness>`, else `PATH`, else known install locations; harness-session markers
 (`HOST_SESSION_PREFIXES`) stripped, `PWD` set. Per-harness command lines and configuration: Evaluation Reference,
 Harnesses as Relay Starters and Workers. OpenCode data home: `-Dpm.experiment.opencode.data-home=global|worker`.
 
@@ -66,40 +67,127 @@ layout from `-Pintegration-tests` or a native `pm-exec`, and for R4 large work a
 
     ./mvnw test -pl pm-e2e -am -Dtest=QuestionLoopExperiment -Dsurefire.failIfNoSpecifiedTests=false \
       -Dpm.experiment.question=Q1 -Dpm.experiment.runs=3 -Dpm.experiment.fixtures=2 \
-      -Dpm.experiment.hosts=opencode -Dpm.experiment.model.opencode=opencode-go/deepseek-v4.1-flash \
+      -Dpm.experiment.harnesses=opencode -Dpm.experiment.model.opencode=opencode-go/deepseek-v4.1-flash \
       -Dpm.experiment.run-timeout=PT10M
 
 `runs.jsonl` is read per item; clear an item's records before the first invocation of a new pass. R4 runs as two
 invocations (`-Dpm.experiment.r4.large-runs=0`, then `-Dpm.experiment.runs=0`).
 
+[#parts]
+== Parts
+
+The harnesses change nearly daily, so a measured value is a statement about the client versions it was measured on; the OpenCode 2.x profile (Roadmap Milestone 14) and the shipped profile documents of `pm-mcp-clients` have no work package, so OpenCode and Antigravity values have no consumer yet. The package is therefore worked in two parts (operator, 2026-10-29):
+
+* _The Claude Code part (PLAN-03)._ The extraction of task 1, for all three harnesses because it is one body of code, the decisions of task 2 except where a bullet names PLAN-04, the Codex exclusion of task 5, the parallel limit of task 5a, the run plan of task 6 for the Claude Code groups, the Claude Code groups of tasks 7 to 11, the consultation part of Q6, the Claude Code values of task 12, and the results of task 13 for Claude Code.
+* _The part of PLAN-04._ Tasks 3 and 4, the OpenCode and Antigravity groups of tasks 6 to 11, the Q2 observation on Antigravity (task 9), the vote quorum of Q6 (it votes on two harnesses), the OpenCode and Antigravity values of task 12, whether one question bound spans the harnesses, and whether Q7 becomes harness-generic.
+
+The package stays open until the part of PLAN-04 is done or recorded as moved to a successor package; task 13 closes it only then.
+
+[#scale]
+== Scale and Criteria
+
+The measurement is decision-driven, not scale-driven: it runs only as much as the values it settles need (`headless.resumability`, the `questions` values of the shipped roles, the question bound). The revised scale, decided by the operator on 2026-10-28 before the first run (<<decisions>>), replaces the scale the original package specified:
+
+* _Base._ 3 runs per fixture, harness and form (warm and fresh), the scale of the smoke run, with the driver defects fixed, so that the mechanisms are confirmed and every figure has durable evidence.
+* _Criterion._ The rate thresholds of the original package (at least 95 % for Q1, Q2's asks, Q4, R1 and R2; at least 90 % for the second ask of Q5) are testable only at about 20 runs. They become "every run of the group passes". A group whose runs disagree (some pass, some fail) is extended to 10 runs and reported with its rate; a group whose runs all agree is not extended. A value is shipped only for a duration, bound or rule at which every run passed. The clauses that were already "every run" or "no run" (Q2's no-harness-tool and no-guess clauses, Q3, Q5's bound clause, Q6, Q7, R3) and R4's missing criterion are unchanged.
+* _Q5, the question bound._ Sequential: the shipped `3` runs first; if no run reached the bound, `3` stays and the candidates `4` and `5` are not run; only where a run reached it, `4` runs, then `5`.
+* _R1 and R2, hold and resume._ Longest first: the cap (a 3,600 s hold; a resume after 1 h) runs first per harness; where every run passes, that duration is the harness's value and the shorter durations are not run; where one fails, the measurement descends through 30, 15 and 5 min until one passes. R2 stays at 1 h at most.
+* _Statement._ A verdict is stated with the number of runs behind it and the client version, never as "passed at the specified scale"; a rule of the form "no run reached the bound" is stated with the pooled count it rests on. The client version (the version each run's output names, or the version probe where it names none) and the model are recorded for every run and published with every value, so that a settled value carries the version range it was measured on.
+
+[#decisions]
+== Decision Record
+
+The operator's decisions that bind the runs, recorded before the first measured run. No measured run starts before this record exists.
+
+[horizontal]
+2026-10-28:: *R3 `CALL_CUT`*: the criterion changes, so that a cut call the worker survives is not a lost continuation; the profile's `cut` setting stays (task 2). *Q4 reference form*: the item's reference form accepts `f(7) == [...]` as a match for the bare list (task 2). *Scale revision*: the scale and criteria of <<scale>>, for the reason that the harnesses change nearly daily, so a value measured over days is stale on arrival; the reason is not drawn from any run of the follow-up. *R2 at 24 hours*: not run; R2 stays at 1 h at most.
+2026-10-29:: *Harness split*: the parts of <<parts>>; this package is not closed by the Claude Code part.
+2026-10-30:: *Run budget*: a cap of 60 USD of harness invocations for the Claude Code groups (estimate 33 to 42 USD for the base runs with the parallel-limit runs, 44 to 55 USD with Q5's further bounds and groups extended to 10); R4 large work runs last and stops at the cap, and what it did not reach is recorded as not run; the Sonnet repeats of task 11 are outside the cap and each needs the operator's word. *Parallel limit*: the step of task 5a is added before the run plan. *Q6 quorum*: the quorum of the two vote links moves to PLAN-04; the consultation part of Q6 runs here, on Claude Code.
+2026-10-31:: *Coverage bar*: the extracted code stays in `pm-e2e/src/test/java` (no change to the module structure), and its coverage is read from a JaCoCo report over the test classes of `de.planmarshall.e2e.question`, added to the `coverage` profile of `pm-e2e` (task 1). *R4 forcing and scenarios*: the ask of large work is forced with the `FORCE_ASK` text as for the loop tasks, the scenarios `q-api-vacuity-read-exceeds-dispatch` and `q-pm-detector-residue-caller-root` are kept, and hold, resume and fallback are measured for small and for large work (tasks 2 and 10). *Q7 harness scope*: Q7 stays Claude Code only in the Claude Code part, because the harnesses outside Claude Code are PLAN-04's; whether Q7 becomes harness-generic is handed to PLAN-04 (task 2). *Run budget replaced*: the cap of 60 USD for the Claude Code groups is replaced by a cap of 45 USD; the 9.47 USD of the parallel-limit runs counts against it, the reserves and R4 large work shrink to what is left, and R4 large work stops at the cap with what it did not reach recorded as not run (task 6). *Quota*: if the account runs out of quota, the operator changes the contract or the account; quota pressure is no reason to stop or shrink the runs, and the measured groups start without waiting for the weekly reset of the usage window.
+2026-11-01:: *Sonnet repeats (task 11)*: the operator named the fresh groups of Q5 at the bounds 3 and 4, the only Claude Code groups that failed on `claude-haiku-4-5`, for a repeat on `claude-sonnet-5-5` at 3 runs per group, outside the cap; no other group failed, so no other repeat was to be decided. *R4 large work*: recorded as not run, because one invocation was estimated at 1.8 to 15 USD and a running invocation cannot be stopped by its cost. *Raw worker outputs*: not kept in the evidence store (84 MB, 16 MB compressed; the operator asked what they are good for when the harnesses change daily and a verdict is bound to one client version); `figures.json` per invocation (cost, rate-limit statuses, refusals, cost of each run) is kept instead, pushed at `bf129e2a` of the evidence branch.
+
+2026-11-02:: *Q6 criterion clarification (after the runs)*: the finalize code review found that the Q6 judge passed a vote run without a vote and a consult run without a consultation. The operator decided to add the clause to the criterion text (`QuestionResults.CRITERIA`) instead of reverting the judge change: a vote run takes at least one vote task and a consult run at least one consultation. It only tightens the judge. The stored Q6 invocation (`Q6-2026-10-31T190232686981Z-f7ae13ca`, 12 consult runs) is unaffected: every run holds `consulted`, `consultation_answered` and `consultation_delivered` events, and its re-aggregation with the stricter judge still reads pass. This also gives the consultation count that the Q6 row had listed as not published: each of the 12 runs consulted at least once.
+
+[#claude-code-results]
+== The Claude Code Part: Settled Values and Hand-Off
+
+The Claude Code part measured its groups on 31 October and 1 November 2026, on Claude Code 2.1.316 with `claude-haiku-4-5` at the parallel limit of 12, the repeat of Q5 with `claude-sonnet-5-5`. The verdicts, the invocations and the limits are in link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#question-loop-follow-up-result[Evaluation Reference, Follow-Up Result]; every invocation is in the evidence store, under `question-loop-follow-up/store/<invocation>` of the branch `question-loop-follow-up` of `cuioss/plan-marshall-telemetry`. Cost: 41.89 USD on Haiku against the cap of 45 USD (including the 9.47 USD of the parallel limit), 1.76 USD on Sonnet outside it; no run met a refusal.
+
+[#settled-values]
+=== Settled Values for Claude Code
+
+Each value is Claude Code's, measured on 2.1.316 with `claude-haiku-4-5`, and named for `pm-mcp-core` / `client-profile-measured-values` to write into its owning specification; nothing is written into `doc/specification/` of `pm-mcp-core` or into a profile by this package.
+
+[horizontal]
+`headless.resumability.hold`:: candidate `max_hold_seconds` 3,600: the hold of 3,600 s continued in the same generation in 6 of 6 runs (3 per form), longest first, so no shorter hold was run (R1, link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/R1-2026-10-31T203100760085Z-1a5b960b[`R1-2026-10-31T203100760085Z-1a5b960b`]).
+`headless.resumability.resume`:: candidate `max_age_seconds` 3,600: the resume after 3,600 s continued from the session in 6 of 6 runs and after 300 s with a stub restart in 6 of 6, median acknowledgement 5.4 to 6.2 s; a resume of a missing session failed at once in 6 of 6; 24 hours was not run (task 2) (R2, link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/R2-2026-10-31T213237581119Z-eceb36ad[`R2-2026-10-31T213237581119Z-eceb36ad`]).
+`questions` values of the shipped roles:: deliberately open. Small work has figures (R4, 18 runs, link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/R4-2026-10-31T191624667845Z-20b3a306[`R4-2026-10-31T191624667845Z-20b3a306`]: median tokens and worker time, fresh and warm, hold 340,436 / 380,467 and 100 s / 100 s, resume 376,581 / 409,258 and 44 s / 41 s, fallback 232,081 / 376,050 and 382 s / 98 s); large work was not run (decision of 2026-11-01), so `questions.hold_seconds` and `resume_within_seconds` stay as shipped (open) until large work has figures.
+Question bound:: `3` stays, unsettled by the measurement. The rule of task 9 takes the smallest candidate at which no run reached the bound; both candidates run were reached: without the bound form 10 of 26 Haiku runs reached it at `3` and 5 of 26 at `4` (Sonnet 3 of 6 and 1 of 6). `5` was not run (cap). Q5 itself fails on Haiku at both bounds (92 of 104 runs; 6 of 8 fresh groups fail at 10 runs) and passes on Sonnet (24 of 24, fresh groups, 3 runs each) (link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T184121103951Z-1205273f[`Q5-2026-10-31T184121103951Z-1205273f`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T223934215397Z-c1d17842[`…c1d17842`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T230720166509Z-3b5d9362[`…3b5d9362`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-10-31T232838636032Z-cb2390d0[`…cb2390d0`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-11-01T082926400134Z-3780fc3c[`…3780fc3c`], link:https://github.com/cuioss/plan-marshall-telemetry/tree/question-loop-follow-up/question-loop-follow-up/store/Q5-2026-11-01T083640584861Z-62d43227[`…62d43227`]).
+Unmeasured roles and harnesses:: stay as shipped: the `resumability` forms of OpenCode and Antigravity `false` and `null`, the `questions` values of every role open, Codex not measured.
+
+[#task-decisions]
+=== Decisions of Tasks 11 and 12 for Claude Code
+
+* *Task 11, per group*: the fresh groups of Q5 at the bounds 3 and 4 (`he-12-2ac` and `he-134-2ac`, with and without the bound form) were repeated on `claude-sonnet-5-5` at 3 runs each and passed (decision of 2026-11-01). Every other Claude Code group passed on `claude-haiku-4-5` (Q1 to Q4, the warm groups of Q5, Q6's consultation, Q7, R1, R2, R3) or has no criterion (R4), so no repeat was to be decided for it.
+* *Task 12*: the Claude Code values are settled from this package's own driver runs, longest first, on the probe (<<settled-values>>), not from a stage built elsewhere; the stage `resumability` repeats them once `question-continuation` builds it. Of the four schema findings, the one that applies to Claude Code is the held call the harness cuts and the worker survives (R3, 12 of 12); it stays in the Evaluation Reference, and whether the schema gets a member for it is open, with the other three, for the owning package.
+
+[#open-points]
+=== Open for the Operator
+
+Stated, not decided:
+
+* Q4 keys its groups by the reply kind, so its 24 runs form 12 groups of 2 runs, where the run plan counted groups of 3 runs with the reply rotating inside a group; every run passed.
+* Q6's consultation part passed in 12 runs, but its figures carry no count of consultations, so how many consultations were exercised is not visible in the analysis.
+* What the failure of Q5's fresh groups on `claude-haiku-4-5` means for the shipped settings.
+* Whether the Q1 runs of the parallel limit count against Q1: 2 of their 96 runs failed (one warm run at level 1, one at level 6), while the measured Q1 invocation passed 24 of 24.
+* Whether Q3's fresh askers that called `pm_wait` and were ended by the driver at the silence limit (10 of 12) pass, as the evaluation reads them, or fail the criterion's end of turn, as the smoke reading counted them.
+
+[#plan-04-hand-off]
+=== Handed to PLAN-04
+
+Each item below is PLAN-04's, by name; none is dropped.
+
+* Task 3, OpenCode, whole: the question loop's findings and their owner, the session id pointer, the tool-catalog refusal of R2, the inline settings and their control, the data home, the model choice per role.
+* Task 4, Antigravity, whole: what it cannot show, the cut call, the invalid votes of Q6, the MCP configuration path, Q2's question tool.
+* The OpenCode and Antigravity groups of task 6 (their run plan and budget) and of tasks 7 to 11: Q1 to Q6, R1 to R4 on OpenCode, and on Antigravity as far as task 4 allows.
+* Task 9: the Q2 observation on Antigravity, the OpenCode (and Antigravity) groups of Q5, and whether one question bound spans the harnesses.
+* Q6: the vote quorum of the two vote links.
+* Q7: whether it becomes harness-generic.
+* Task 10: the large and small work of R4 on OpenCode and Antigravity.
+* Task 12: the OpenCode and Antigravity values, the decision on the stage's expectation for a missing session, and the OpenCode tool-catalog finding.
+* Task 13: the results of the part of PLAN-04 and the closing of this package.
+
 == Tasks
 
-Ordered by dependency: the extraction first, then the decisions and the preparation of the harnesses, then the measurements, then the values they settle.
+Ordered by dependency: the extraction first, then the decisions and the preparation of the harnesses, then the measurements, then the values they settle. The numbers are kept from the original package so that references to them stay valid; the parallel limit is inserted as task 5a.
 
 === 1. Extract the durable experiment code into pm-e2e
 
 [horizontal]
-Deliverable:: The durable parts of the experiment as maintained code: the stub MCP server with leases, fencing and replay; the driver that launches the harnesses through `pm-exec`; the fixtures (corpus cache and probe); the result evaluation and aggregation, with the `evidence_missing` guard and the per-invocation archive; the per-harness classification of early exits and quota. The developer document of the extracted code is written (none exists while the code is on a branch). The evidence outputs are written in the form the store of this package takes.
+Part:: Claude Code part (PLAN-03); the OpenCode and Antigravity launch and classification code is extracted and kept maintained for PLAN-04.
+Deliverable:: The durable parts of the experiment as maintained code: the stub MCP server with leases, fencing and replay; the driver that launches the harnesses through `pm-exec`; the fixtures (corpus cache and probe); the result evaluation and aggregation, with the `evidence_missing` guard and the per-invocation archive; the per-harness classification of early exits and quota, for Claude Code, OpenCode and Antigravity, with a gated smoke-level check that each harness's launch code starts. The developer document of the extracted code is written (none exists while the code is on a branch). The evidence outputs are written in the form the store of this package takes.
 Lands:: pm-e2e, under the rules of this repository (Maven, JUnit 5, no Mockito, `package-info.java` per package). The measurement is gated by properties, so that no normal build calls a harness; what stays experiment-only stays gated or on the branch. The developer document in `plan-marshall-documentation`.
-Done when:: the extracted classes have their own tests at the coverage bar of the repository, `verify`, `verify -Ppre-commit`, `verify -Pcoverage` and `verify -Pintegration-tests` are green with the measurement gate off, a gated run reproduces one smoke group of the results — the same verdict per item and every count within one run of the smoke group's figure, the group and its figures named in the plan's record — and the developer document describes only what is in the tree.
+Done when:: every extracted class has its own test class and the JaCoCo report of `verify -Pcoverage` over the test classes of `de.planmarshall.e2e.question` shows the coverage bar of the repository (decision of 2026-10-31), `verify`, `verify -Ppre-commit`, `verify -Pcoverage` and `verify -Pintegration-tests` are green with the measurement gate off, a gated run reproduces one smoke group of the results — the same verdict per item and every count within one run of the smoke group's figure, the group and its figures named in the plan's record; that run is level 1 of task 5a — and the developer document describes only what is in the tree.
 
 === 2. Decide what the package owner owns
 
-Each decision is recorded with its evidence in the Evaluation Reference or the owning specification before the runs that depend on it; none is settled by editing a criterion in passing, and this package changes no criterion itself.
+Each decision is recorded with its evidence in the Evaluation Reference or the owning specification before the runs that depend on it; none is settled by editing a criterion in passing, and this package changes no criterion itself, apart from the Q6 clarification of 2026-11-02 named in the decision record.
 
 [horizontal]
+Part:: Claude Code part (PLAN-03), except whether Q7 becomes harness-generic, which is PLAN-04's.
 Deliverable:: A recorded decision for each of the following.
 * *R3 `CALL_CUT`.* A held call that the harness cuts (Antigravity at 180 s) is carried on by the same worker. The measured finding fails on every harness because the criterion counts the cut as undetected. _The operator decided before the first measured run (2026-10-28)_: the criterion changes, so that a cut call the worker survives is not a lost continuation, and the profile's `cut` setting stays as it is. The changed criterion is written into the Evaluation Reference before the first run.
 * *Q4 reference form.* One deepseek fresh/default run missed for a format-only reason: it submitted `f(7) == [...]` instead of the bare list, and `followsReference` compares exactly. _The operator decided before the first measured run (2026-10-28)_: the item's reference form accepts `f(7) == [...]` as a match for the bare list, so a format-only deviation is not a miss. The accepted form is written into the Evaluation Reference before the first run.
-* *R2 at 24 hours.* Not run, by the operator's decision of 1 hour at most. It stays _not run_ unless the operator decides otherwise; record the decision either way.
-* *R4 scenario choice and forcing.* How the ask of the large-work scenarios is forced on a harness that does not ask unless forced, whether large work has a fallback form, and which scenarios carry it (see task 10).
-* *Q7 harness scope.* Q7 is hard-wired to Claude Code: make it harness-generic, or record why it stays Claude Code only. Antigravity skipped Q7.
+* *R2 at 24 hours.* _The operator decided (2026-10-28)_: not run, R2 stays at 1 hour at most. The decision is written into the Evaluation Reference.
+* *R4 scenario choice and forcing.* _The operator decided (2026-10-31)_: the ask of the large-work scenarios is forced with the `FORCE_ASK` text as for the loop tasks, the scenarios `q-api-vacuity-read-exceeds-dispatch` and `q-pm-detector-residue-caller-root` are kept, and hold, resume and fallback are measured for small and for large work (task 10).
+* *Q7 harness scope.* Q7 is hard-wired to Claude Code; Antigravity skipped Q7. _The operator decided (2026-10-31)_: Q7 is measured on Claude Code only in the Claude Code part, because the harnesses outside Claude Code are PLAN-04's; whether Q7 becomes harness-generic is PLAN-04's question.
 Lands:: link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#limits[Evaluation Reference, Limits] and, where a value follows, its owning specification through `pm-mcp-core` / `client-profile-measured-values`.
-Done when:: every decision is recorded with its reason, the two criterion decisions of the bullets above are recorded in their decided form, and the tasks below name the decided form.
+Done when:: every decision is recorded with its reason and date, the two criterion decisions of the bullets above are recorded in their decided form, and the tasks below name the decided form.
 
 === 3. OpenCode: the question loop's findings and the measurement setup
 
 [horizontal]
+Part:: PLAN-04. The Claude Code part runs no OpenCode group.
 Deliverable::
 * *The question loop's findings only.* Whether the profile or the version pattern changes for what the specification now states — the supported version range, `run --standalone` with the project from `PWD`, the version probe, the `events` mapping (the open question `opencode-event-source`), the tool names — is the work of the Roadmap Milestone 14 item that verifies and ships the OpenCode 2.x profile. This package names that item as the owner of those findings and changes nothing of the profile for them.
 * Define the session id pointer for the `sessionID` field of OpenCode's output lines (the schema's `session_id` expects a JSON Pointer); the operator accepted the proposal.
@@ -113,6 +201,7 @@ Done when:: the session id pointer is defined and named for `client-profile-meas
 === 4. Antigravity: what is observable, and its configuration path
 
 [horizontal]
+Part:: PLAN-04. The Claude Code part runs no Antigravity group.
 Deliverable::
 * Record what Antigravity cannot show: the expired-session case is not measurable, the canary re-read is not observable in its output, and its output reports no cost or tokens. State per item whether it is measured another way or stays _not measurable_.
 * The cut call: the harness cuts a held call at 180 s and the same worker carries on; the outcome is the decided one of task 2 — the criterion changes and the `cut` setting stays.
@@ -120,75 +209,97 @@ Deliverable::
 * The MCP configuration path: settled on 2026-10-26 on agy 1.4.7 by one print run: both `.agents/mcp_config.json` in the worker directory (the specification's form) and the workspace plugin `.agents/plugins/<name>/mcp_config.json` (the experiment's form) are loaded, a `mcp_config.json` at the directory root is not; `agy mcp list` shows only the global file and is no evidence either way. Choose one form for the profile and the driver and say why (the plugin form needs a `plugin.json`, the specification's form does not).
 * Q2: Antigravity cannot withhold its own question tool; the measurement of what that tool does is task 9.
 Lands:: the Antigravity profile and its verification in `pm-mcp-core`, through `client-profile-measured-values`; the driver of task 1 here; the limits of the Evaluation Reference.
-Done when:: each Antigravity item is measured at the scale of task 8 (20 runs per fixture and harness) or carries a recorded reason it cannot be, the configuration path is the same form in the driver and is named for `client-profile-measured-values` to specify, and the form the profile takes is named there too.
+Done when:: each Antigravity item is measured at the revised scale of <<scale>> (3 runs per fixture, harness and form, every run of the group passing, a disagreeing group extended to 10) or carries a recorded reason it cannot be, the configuration path is the same form in the driver and is named for `client-profile-measured-values` to specify, and the form the profile takes is named there too.
 
 === 5. Codex, not measured
 
 [horizontal]
+Part:: Claude Code part (PLAN-03).
 Deliverable:: The recorded exclusion of Codex, in place of its measurement: it was not measured at all, is not installed on the measuring machine, and was not in the original package's scope. By the operator's decision it stays out of this package, so no item has a Codex row and each item states that Codex is _not measured_, with that reason.
 Lands:: the Evaluation Reference in `plan-marshall-documentation`.
 Done when:: every item the Evaluation Reference lists for the question loop carries the statement that Codex is not measured with the reason, and no figure of the package rests on a Codex run.
 
+=== 5a. The parallel limit of Claude Code
+
+How many workers Claude Code sustains at once is unmeasured, and it decides the wall time of the measurement (operator, 2026-10-30). The limit is a finding of this package, measured before the run plan of task 6.
+
+[horizontal]
+Part:: Claude Code part (PLAN-03).
+Method:: One cheap group of 24 runs with the fixed driver on `claude-haiku-4-5`, at 1 worker at a time (the reproduction of task 1, no extra runs), then at 3 and at 6 workers, and at 12 only if 6 was clean. The measurement stops at the first level that degrades.
+Read per level:: Rate-limit and quota refusals, runs lost or timed out, the item's verdict and counts against level 1, the time from the ask to `pm_wait` or to the end of the turn, the cost per run, and the wall time, each with the client version and the model. The figures come from the stub's event log, the relay's log and the worker's output.
+Rule:: Fixed before the first of these runs: the limit is the highest level with no refusal, no lost run, verdict and counts within one run of level 1. The measured runs of tasks 7 to 11 use that level, and each run records its level. A failure seen only above level 1 is a finding about parallelism and is repeated at level 1 before it counts against an item.
+Limits:: The limit is a statement about this account, machine, model and client version, and about `claude-haiku-4-5` only. It is no specified or shipped value, and the criteria of the items do not change by it.
+Lands:: the Evaluation Reference and the developer document in `plan-marshall-documentation`, with the account, machine, model and client version named; every invocation in the evidence store.
+Done when:: the per-level figures are published, the limit follows the rule above, and every figure resolves to an invocation in the evidence store.
+
 === 6. Plan the runs
 
 [horizontal]
-Deliverable:: A run plan for tasks 7 to 11: the groups (item, harness, model, warm or fresh, and the settings arm where the control runs), the number of invocations per group from the scale of task 8, the bound variants of task 9 and the Sonnet repeats of task 11, the expected wall time and the expected cost per harness, the order that puts the cheap harnesses first, and the default budget the operator confirms or replaces — about 55 USD of harness invocations and about 240 h of wall time, from the package's own smoke figures (2.3 to 2.9 USD per 24 Claude Code runs; R1 6.6 h for 12 OpenCode runs and R2 9.3 h for 24) scaled to those groups. The wall times are serial where a harness needs it (OpenCode's data home, task 3) and parallel where it does not.
+Part:: Claude Code part (PLAN-03) for the Claude Code groups; the OpenCode and Antigravity groups are PLAN-04's, which plans them with its own budget.
+Deliverable:: A run plan for tasks 7 to 11: the groups (item, harness, model, warm or fresh, and the settings arm where the control runs), the number of invocations per group at the revised scale of <<scale>> (3 runs per fixture, harness and form, with the extension of a disagreeing group to 10 budgeted), Q5's sequential bound variants of task 9, R1 and R2 longest first, the Sonnet repeats of task 11, the parallel level of task 5a, the expected wall time and the expected cost per harness, and the budget the operator confirms or replaces. For the Claude Code groups the cap is 45 USD (decision of 2026-10-31, replacing the 60 USD of 2026-10-30; estimate from the package's own smoke figures, 2.3 to 2.9 USD per 24 Claude Code runs), R4 large work is planned last, and the Sonnet repeats are listed outside the cap. The wall times are serial where a harness needs it (OpenCode's data home, task 3) and at the parallel level of task 5a for Claude Code.
 Lands:: the package's records in `plan-marshall-documentation` (the developer document), not in code.
-Done when:: the operator has accepted the plan together with its budget or a replaced one, the invocation count per item and harness is stated, and each later task's runs fit it.
+Done when:: the operator has accepted the plan together with its budget or a replaced one, recorded with its date, the invocation count per item and harness is stated, and each later task's runs fit it.
 
 === 7. Re-measure the Claude Code groups of before the reboot of 2026-10-24
 
 [horizontal]
-Deliverable:: Q1, Q2, Q7, R1, R2, R3 and R4 on Claude Code come from before the reboot; their stub logs are lost, only the run records and the worker outputs survive. Re-measure these groups under the fixed driver, so that every figure comes from a stub log again. The groups carry two known defects, to be absent in the new runs: the answer audit reports 128 runs whose operator answer contradicted its reply, of which the per-item counts read so far are Q1 20, Q2 25, Q7 1 and R3 Claude 23 — 69 runs, so the remaining 59 are read from the audit before the first measured run; the per-run list is the file `answer-audit.json` of the measurement — the smoke run's copy is lost with the deleted worktree, so the new runs write their own into the evidence store and the audit is read from there — and two Q1 runs and one Q3 run show the warm-asker-exit signature.
+Part:: Claude Code part (PLAN-03).
+Deliverable:: Q1, Q2, Q7, R1, R2, R3 and R4 on Claude Code come from before the reboot; their stub logs are lost, only the run records and the worker outputs survive. Re-measure these groups under the fixed driver at the revised scale of <<scale>>, so that every figure comes from a stub log again. The groups carry two known defects, to be absent in the new runs: the answer audit reports 128 runs whose operator answer contradicted its reply, of which the per-item counts read so far are Q1 20, Q2 25, Q7 1 and R3 Claude 23 — 69 runs, so the remaining 59 are read from the audit before the first measured run; the per-run list is the file `answer-audit.json` of the measurement — the smoke run's copy is lost with the deleted worktree, so the new runs write their own into the evidence store and the audit is read from there — and two Q1 runs and one Q3 run show the warm-asker-exit signature.
 Lands:: the Evaluation Reference rows of those items; the replaced rows say that the old figures are superseded.
 Done when:: no row of the Evaluation Reference rests on a lost stub log or on a run whose operator answer contradicts its reply, and the audit of the answers of the new runs is clean and reads from the evidence store.
 
-=== 8. Run Q1 to Q7 and R1 to R4 at the specified scale
+=== 8. Run Q1 to Q7 and R1 to R4 at the revised scale
 
 [horizontal]
-Deliverable:: Every item run at 20 runs per fixture and harness for each form — warm and fresh — 2 fixtures for Q1 to Q7 and R3, where Q7 runs on Claude Code only, the probe for R1 and R2, the probe and the two scenarios of task 10 for R4 — with the criteria as task 2 fixed them, on every harness where the item applies (Claude Code with `claude-haiku-4-5`, OpenCode with the inline settings and the serial data home of task 3, Antigravity as far as task 4 allows). Each verdict is then _passed_ or _failed_ at the specified scale, no longer _not at the specified scale_.
+Part:: Claude Code part (PLAN-03) for the Claude Code groups, including the consultation part of Q6; PLAN-04 for the OpenCode and Antigravity groups and the vote quorum of Q6.
+Deliverable:: Every item run at the revised scale of <<scale>> — 3 runs per fixture, harness and form (warm and fresh), a group whose runs disagree extended to 10 and reported with its rate — on 2 fixtures for Q1 to Q7 and R3, where Q7 runs on Claude Code only, the probe for R1 and R2 (longest first), the probe and the two scenarios of task 10 for R4, with the criteria as task 2 and <<scale>> fixed them, on every harness where the item applies (Claude Code with `claude-haiku-4-5` at the parallel level of task 5a; OpenCode with the inline settings and the serial data home of task 3, and Antigravity as far as task 4 allows, in the part of PLAN-04). Each verdict is stated as _passed_ (every run of the group passed) or _failed_, with its run count, client version and model, no longer _not at the specified scale_.
 Lands:: the Evaluation Reference rows Q1 to Q7 and R1 to R4, with the limits that remain.
-Done when:: every row names its verdict at 20 runs per fixture and harness, or the group that was not run with its reason (task 2 for R2 at 24 hours).
+Done when:: every row names its verdict with its run count and client version, or the group that was not run with its reason (task 2 for R2 at 24 hours; the cap of task 6).
 
 === 9. Settle Q2 and the question bound of Q5
 
 [horizontal]
+Part:: Claude Code part (PLAN-03) for Q2 on Claude Code and the bound of Q5 on Claude Code; PLAN-04 for the Q2 observation on Antigravity, the OpenCode groups of Q5, and whether one bound spans the harnesses.
 Deliverable::
-* Q2: no harness question tool was called in any run, so what such a tool does in a headless worker is unobserved. Where a harness cannot withhold it (Antigravity), force a call and record whether it hangs, fails or answers itself.
-* Q5: only the bound value 3 was tried; fresh Claude Code with the bound failed (1 timeout) and the fresh OpenCode groups failed (2 timeouts each); the same question was asked again where the replies only restated the options. Whether a run reached the bound was not read from the event log. Run the bound at its candidate values `3` (the shipped value), `4` and `5`, at 20 runs per fixture and harness per variant (the scale of task 8), with the event-log evidence of whether the bound was reached; the rule that picks the value is the smallest candidate at which no run of any group reached the bound, and where every candidate is reached the shipped `3` stays and the reach is recorded as the finding.
+* Q2: no harness question tool was called in any run, so what such a tool does in a headless worker is unobserved. Where a harness cannot withhold it (Antigravity, the part of PLAN-04), force a call and record whether it hangs, fails or answers itself.
+* Q5: only the bound value 3 was tried; fresh Claude Code with the bound failed (1 timeout) and the fresh OpenCode groups failed (2 timeouts each); the same question was asked again where the replies only restated the options. Whether a run reached the bound was not read from the event log. Run the bound sequentially at the revised scale of <<scale>>, with the event-log evidence of whether the bound was reached: the shipped `3` first; if no run reached it, `3` stays and `4` and `5` are not run; only where a run reached it, `4`, then `5`. The rule that picks the value is the smallest candidate at which no run of any group reached the bound, stated with the pooled count it rests on; where every candidate is reached the shipped `3` stays and the reach is recorded as the finding. The value settled in the Claude Code part is recorded as Claude Code's.
 Lands:: the Evaluation Reference, and the question bound in link:../../../pm-mcp-core/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#question-bound[Model Work § Question Bound], the harness that cannot withhold its question tool in the owning specification — through `pm-mcp-core` / `client-profile-measured-values`.
-Done when:: the Q2 behaviour of each harness is observed or recorded as not observable, and the bound is one of the three candidates with event-log evidence per variant and the rule that picked it stated.
+Done when:: the Q2 behaviour of each harness is observed or recorded as not observable, and the bound is one of the three candidates with event-log evidence per variant run and the rule that picked it stated.
 
 === 10. Measure the cost of large work (R4)
 
 [horizontal]
-Deliverable:: R4 was run minimally: two scenarios (`q-api-vacuity-read-exceeds-dispatch` and `q-pm-detector-residue-caller-root`), fresh only, one run each in hold and in resume; on OpenCode there was no ask in 4 of 4 runs because the asking is not forced, and large work has no fallback form. The hold and resume cost of large work is not measured, both corpus items are drafts, and 16 other scenarios stay unused (they need tasks replayed from records whose commits are gone, or outside state that changed). With the decision of task 2 on the forcing and the scenario choice, measure the tokens and time of hold, resume and the fallback with small and large work before the ask, per harness and model, at the scale of task 8.
+Part:: Claude Code part (PLAN-03) for Claude Code; PLAN-04 for OpenCode and Antigravity.
+Deliverable:: R4 was run minimally: two scenarios (`q-api-vacuity-read-exceeds-dispatch` and `q-pm-detector-residue-caller-root`), fresh only, one run each in hold and in resume; on OpenCode there was no ask in 4 of 4 runs because the asking is not forced, and large work has no fallback form. The hold and resume cost of large work is not measured, both corpus items are drafts, and 16 other scenarios stay unused (they need tasks replayed from records whose commits are gone, or outside state that changed). With the decision of task 2 (the ask forced with the `FORCE_ASK` text, the two scenarios kept), measure the tokens and time of hold, resume and the fallback with small and large work before the ask, per harness and model, at the revised scale of <<scale>>. On Claude Code large work runs last and stops at the cap of task 6; what it did not reach is recorded as not run.
 Lands:: the Evaluation Reference row R4; the figures set the `questions` values of the shipped roles in link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc#roles[Model Work § Roles as Configuration Artifacts], which stay open until this task is done, and are written through `pm-mcp-core` / `client-profile-measured-values`.
-Done when:: hold, resume and fallback figures for small and large work exist per measured harness and model, and the `questions` values of the shipped roles are set from them or recorded as deliberately open.
+Done when:: hold, resume and fallback figures for small and large work exist per measured harness and model, or are recorded as not run with the reason, and the `questions` values of the shipped roles are set from them or recorded as deliberately open.
 
 === 11. Repeat the groups that claude-haiku-4-5 fails with claude-sonnet-5-5
 
 [horizontal]
-Deliverable:: The original package said an item that `claude-haiku-4-5` fails is repeated with `claude-sonnet-5-5`; nothing was repeated. For each failing group of tasks 7 to 10 the operator decides whether a repeat is meaningful, and the groups it names are repeated at 20 runs per fixture and harness. No failing group leaves this task without that recorded decision.
+Part:: Claude Code part (PLAN-03).
+Deliverable:: The original package said an item that `claude-haiku-4-5` fails is repeated with `claude-sonnet-5-5`; nothing was repeated. For each failing Claude Code group of tasks 7 to 10 the operator decides whether a repeat is meaningful, and the groups it names are repeated at the revised scale of <<scale>>, outside the cap of task 6. No failing group leaves this task without that recorded decision.
 Lands:: the Evaluation Reference, per group with its model.
-Done when:: every failing Claude Code group either has a Sonnet row at 20 runs per fixture and harness or carries the operator's recorded decision that no repeat is meaningful, with its reason.
+Done when:: every failing Claude Code group either has a Sonnet row with its run count and client version or carries the operator's recorded decision that no repeat is meaningful, with its reason.
 
 === 12. Settle the resumability values and the profile schema
 
 [horizontal]
+Part:: Claude Code part (PLAN-03) for the Claude Code values; PLAN-04 for the OpenCode and Antigravity values, the decision on the stage's expectation for a missing session (which concerns those two harnesses), and the OpenCode tool-catalog finding. A value or form the Claude Code part did not measure stays as shipped (`false`, `null`, open) and is named so for `client-profile-measured-values`.
 Deliverable::
-* The measured candidates (hold and resume up to 3,600 s on Claude Code, OpenCode 2.x and Antigravity) sit beside the unchanged shipped values (`false` and `null`) in link:../../../pm-mcp-core/doc/specification/harness-profiles/01-profile-schema.adoc#headless-resumability[Harness Profiles § Resumability]. The values are settled from this package's own driver runs, on the probe of task 1, so that no value waits for a stage built elsewhere; the stage `resumability` of `pm-operator profile verify` repeats this measurement once `question-continuation` builds it, and the rule of that section that every value comes from the stage is corrected to this order by the owning package.
+* The measured candidates (hold and resume up to 3,600 s on Claude Code, OpenCode 2.x and Antigravity) sit beside the unchanged shipped values (`false` and `null`) in link:../../../pm-mcp-core/doc/specification/harness-profiles/01-profile-schema.adoc#headless-resumability[Harness Profiles § Resumability]. The values are settled from this package's own driver runs, longest first per <<scale>>, on the probe of task 1, so that no value waits for a stage built elsewhere; the stage `resumability` of `pm-operator profile verify` repeats this measurement once `question-continuation` builds it, and the rule of that section that every value comes from the stage is corrected to this order by the owning package.
 * The stage expects a resume of a missing session to fail at once, but OpenCode and Antigravity start a new session instead: the operator decides whether the stage or the expectation changes, and the decision is recorded here.
 * The profile schema has no place for four findings: whether a model reaches the tools, a missing session that starts a new one, a cut call the worker survives, and the OpenCode tool-catalog refusal of task 3. Decide the schema additions. Those are measured outcomes, not launch settings: the form a new member takes is the one `headless.inline_settings` has — a member in the `required` list of the profile schema, `null` where a harness has none, validated by `core.profile` and merged into the launch — and none of the four is added to `inline_settings`; each gets its own member or stays in the Evaluation Reference. The settled values go into the profile that ships the 2.x range `>=2.1.0 <3.0.0`; where Milestone 14 has not shipped it when this task is reached, they go into the evaluation reference only, the profile keeps its provisional `inline_settings`, and each `resumability` form not measured stays `false` or `null` — the operator confirms that.
 Lands:: `pm-mcp-core` (the harness profile schema and the profile verification stage) through `client-profile-measured-values`, with its documentation in `plan-marshall-documentation`; the profile documents of `pm-api` in `pm-mcp-clients`, where the values land; the Evaluation Reference rows here.
-Done when:: the measured values per profile are settled from this package's runs and recorded with their evidence, the form the stage or its expectation takes is decided and recorded, each finding has a place in the schema or a recorded reason for none, each open decision of this task carries the operator's recorded decision, and the values and the schema changes are named for `client-profile-measured-values` to ship — where Milestone 14's 2.x profile has not landed, the OpenCode profile keeps its provisional object and a `resumability` form not measured stays `false` or `null`, with the measured values in the evaluation reference.
+Done when:: the measured values per profile are settled from this package's runs and recorded with their evidence, run count and client version, the form the stage or its expectation takes is decided and recorded, each finding has a place in the schema or a recorded reason for none, each open decision of this task carries the operator's recorded decision, and the values and the schema changes are named for `client-profile-measured-values` to ship — where Milestone 14's 2.x profile has not landed, the OpenCode profile keeps its provisional object and a `resumability` form not measured stays `false` or `null`, with the measured values in the evaluation reference.
 
 === 13. Record the results and close
 
 [horizontal]
-Deliverable:: The rows of the Evaluation Reference at the specified scale, their limits, the developer document, and the values of tasks 9, 10 and 12 settled and recorded with their evidence, named for `client-profile-measured-values` to write into their owning specifications; a statement of `plan-marshall-documentation` that the results prove wrong is corrected in the same change, and a statement of the engine's specification that they prove wrong is named for the owning package.
+Part:: each part records its own results; the package closes only when both parts are done.
+Deliverable:: The rows of the Evaluation Reference at the revised scale, their limits, the developer document, and the values of tasks 9, 10 and 12 settled and recorded with their evidence, named for `client-profile-measured-values` to write into their owning specifications; a statement of `plan-marshall-documentation` that the results prove wrong is corrected in the same change, and a statement of the engine's specification that they prove wrong is named for the owning package. The Claude Code part records every OpenCode and Antigravity item as handed to PLAN-04 by name.
 Lands:: `plan-marshall-documentation` (pull request beside the code pull request, per the way of a change in link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc[Project Setup]).
-Done when:: no limit of the Evaluation Reference says _not at the specified scale_ for a question-loop item without its reason, and the documents hold no statement that the results of this package contradict.
+Done when:: no limit of the Evaluation Reference says _not at the specified scale_ for a question-loop item without its reason, the documents hold no statement that the results of this package contradict, and the part of PLAN-04 is done or recorded as moved to a successor package. Only then is the package's row in the index set to `done`.
 
 == Trace
 
@@ -196,9 +307,9 @@ The starting set of the trace matrix of the project skill `traced-implementation
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-12[PM-WF-12], link:../../../plan-marshall-documentation/doc/requirements/02-workflow.adoc#PM-WF-18[PM-WF-18], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-2[PM-WORK-2], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-4[PM-WORK-4], link:../../../plan-marshall-documentation/doc/requirements/13-harness-profiles.adoc#PM-CLIENT-2[PM-CLIENT-2]
 * Specification: link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#results[Evaluation Reference, Results] (rows Q1 to Q7 and R1 to R4), link:../../../plan-marshall-documentation/doc/specification/evaluation.adoc#limits[Limits]; link:../../../pm-mcp-core/doc/specification/model-work/06-envelopes-questions-deadlines.adoc#continuation[Model Work § Continuing after a Question]; link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc#roles[Model Work § Roles as Configuration Artifacts]; link:../../../pm-mcp-core/doc/specification/harness-profiles/01-profile-schema.adoc#headless-resumability[Harness Profiles § Resumability]; link:../../../pm-mcp-core/doc/specification/harness-profiles/01-profile-schema.adoc#headless-inline-settings[§ Inline settings]; link:../../../pm-mcp-core/doc/specification/harness-profiles/01-profile-schema.adoc#profile-verification[§ Profile Verification]
-* Developer documentation: written by task 1 in `plan-marshall-documentation` (`doc/developer/`), once the extracted code is on `main`
+* Developer documentation: link:../../../plan-marshall-documentation/doc/developer/question-loop-measurement.adoc[The Question-Loop Measurement]
 * Watch: link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]; link:../../../pm-mcp-core/doc/implementation-watch/harness-profiles.adoc#PM-WATCH-CLIENT-17[PM-WATCH-CLIENT-17]
 
 == Done When
 
-Tasks 1 to 13 are done: the maintained measurement code is in pm-e2e behind its gate, every item Q1 to Q7 and R1 to R4 has its result at the specified scale or a recorded reason on every harness that applies, the decisions of task 2 are recorded, the package states the configuration of its OpenCode runs and the decision on the data home, and the `headless.resumability` values, the `questions` values of the shipped roles and the question bound are settled and recorded with their evidence, named for `client-profile-measured-values` to write into their owning specifications. Every published figure has its source in the evidence store this package names.
+Tasks 1 to 13, with 5a, are done in both parts: the maintained measurement code is in pm-e2e behind its gate, the parallel limit of Claude Code is published with its per-level figures, every item Q1 to Q7 and R1 to R4 has its result at the revised scale of <<scale>> — every run of the group passing, a disagreeing group extended to 10 and reported with its rate, each verdict with its run count, client version and model — or a recorded reason on every harness that applies, the decisions of task 2 are recorded, the package states the configuration of its OpenCode runs and the decision on the data home, and the `headless.resumability` values, the `questions` values of the shipped roles and the question bound are settled and recorded with their evidence, each stated for the harness it was measured on, named for `client-profile-measured-values` to write into their owning specifications. Every published figure has its source in the evidence store this package names.

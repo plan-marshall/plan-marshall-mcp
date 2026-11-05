@@ -19,6 +19,14 @@
         <skipITs>true</skipITs>
         <!-- See the failsafe configuration of the integration-tests profile -->
         <pm.clients.checkout>${maven.multiModuleProjectDirectory}/../pm-mcp-clients</pm.clients.checkout>
+        <!-- The gate of the question-loop measurement (de.planmarshall.e2e.question): empty, so a normal build runs
+             no measurement, re-aggregation or smoke check and never starts a harness (MeasurementGateTest). Set one on
+             the command line to run it, e.g. -Dtest=QuestionLoopMeasurement -Dpm.experiment.question=Q1. -->
+        <pm.experiment.question />
+        <pm.experiment.reaggregate />
+        <pm.experiment.answer-audit />
+        <pm.experiment.relocate />
+        <pm.experiment.smoke />
     </properties>
     <dependencies>
         <!-- Build order only: pm-e2e stages pm-mcpd of this build and never uses the classes of pm-mcp-server
@@ -66,9 +74,88 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
+            <!-- Passes the gate of the measurement to the tests: empty unless set on the command line -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <pm.experiment.question>${pm.experiment.question}</pm.experiment.question>
+                        <pm.experiment.reaggregate>${pm.experiment.reaggregate}</pm.experiment.reaggregate>
+                        <pm.experiment.answer-audit>${pm.experiment.answer-audit}</pm.experiment.answer-audit>
+                        <pm.experiment.relocate>${pm.experiment.relocate}</pm.experiment.relocate>
+                        <pm.experiment.smoke>${pm.experiment.smoke}</pm.experiment.smoke>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
     <profiles>
+        <!-- The coverage of the question-loop code, which lives in src/test/java (operator decision): its classes,
+             without the test classes, are copied to the classes directory the JaCoCo report and check of the parent's
+             profile read, and reported on their own in target/site/jacoco-question -->
+        <profile>
+            <id>coverage</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-resources-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>question-classes</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                                    <resources>
+                                        <resource>
+                                            <directory>${project.build.testOutputDirectory}</directory>
+                                            <includes>
+                                                <include>de/planmarshall/e2e/question/**/*.class</include>
+                                            </includes>
+                                            <excludes>
+                                                <exclude>**/*Test.class</exclude>
+                                                <exclude>**/*Test$*.class</exclude>
+                                                <!-- Named exclusion (operator decision): QuestionLoopMeasurement.Session
+                                                     drives a live harness (it launches workers, answers and supervises
+                                                     them), so it runs only in a measured run against a live harness and
+                                                     never in a build. Not copied here, it is in neither the JaCoCo
+                                                     report nor the check; every other question-loop class keeps the
+                                                     80 % instruction and branch bar. -->
+                                                <exclude>de/planmarshall/e2e/question/QuestionLoopMeasurement$Session.class</exclude>
+                                                <exclude>de/planmarshall/e2e/question/QuestionLoopMeasurement$Session$*.class</exclude>
+                                            </excludes>
+                                        </resource>
+                                    </resources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>report-question</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>report</goal>
+                                </goals>
+                                <configuration>
+                                    <includes>
+                                        <include>de/planmarshall/e2e/question/**</include>
+                                    </includes>
+                                    <outputDirectory>${project.build.directory}/site/jacoco-question</outputDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <!-- Runs the *IT tests -->
         <profile>
             <id>integration-tests</id>

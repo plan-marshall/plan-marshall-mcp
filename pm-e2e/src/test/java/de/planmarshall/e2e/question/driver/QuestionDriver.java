@@ -1,0 +1,2914 @@
+/*
+ * Copyright © 2026-present Oliver Wolff
+ *
+ * SPDX-License-Identifier: LicenseRef-Proprietary
+ *
+ * All rights reserved. This file is part of plan-marshall-mcp, which is proprietary software.
+ * No right to use, copy, modify or distribute this file is granted; see the LICENSE.md file at
+ * the root of this repository.
+ */
+package de.planmarshall.e2e.question.driver;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.InterruptedIOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import de.planmarshall.e2e.question.stub.QuestionStub;
+import de.planmarshall.e2e.question.stub.QuestionStub.PartAnswer;
+import de.planmarshall.e2e.question.stub.QuestionStub.TaskSpec;
+import de.planmarshall.e2e.question.stub.StubRelay;
+
+/**
+ * The driver of the measurement: starts workers headless through {@code pm-exec} in worker directories outside the
+ * repository, warm and fresh, on Claude Code, OpenCode and Antigravity ({@link Host}); answers each decision on the
+ * operator's behalf after the hold the item measures; resumes a stored session by the harness's resume command on the
+ * session id read from the worker's structured result; restarts the stub; injects the faults of R3 ({@link Fault});
+ * and supervises the answer acknowledgement as the server's supervisor will (PM-WORK-2, PM-WORK-3).
+ * <p>
+ * Every action it takes is appended to the stub's event log, beside the stub's own events; the relay writes its
+ * host-side log and the driver the worker's arrival-stamped output into the run directory. How a generation ended is
+ * classified here ({@link #launchFailure(Worker)}, {@link #earlyExit(Worker)}, {@link #quotaError(Worker)}), and the
+ * readers of those logs while they are still written ({@link #jsonLinesSoFar(Path)}, {@link #waits(List)}) are shared
+ * with the evaluation.
+ */
+public final class QuestionDriver implements AutoCloseable {
+
+    /** Environment variables of the driver's own host session, never passed to a worker. */
+    static final List<String> HOST_SESSION_PREFIXES = List.of("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT",
+            "CLAUDE_CODE_SSE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_MESSAGING", "CLAUDE_CODE_BRIDGE",
+            "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION", "CLAUDE_CODE_CHILD", "OPENCODE_SESSION", "CODEX_SANDBOX");
+
+    /**
+     * The tool through which OpenCode 2.1.2 offers MCP tools to the model: it runs code that calls
+     * {@code tools['plan-marshall'].pm_wait()} (verified 2026-10-21). The agent permits it together with
+     * {@code plan-marshall*}; permitting {@code plan-marshall.pm_wait} and its siblings by name did not expose the
+     * stub's tools to the code.
+     */
+    static final String OPENCODE_CODE_TOOL = "execute";
+
+    /** The outcome of a generation whose process exited before its relay connected ({@link #launchFailure(Worker)}). */
+    public static final String LAUNCH_FAILED = "launch_failed";
+    /** The outcome of a generation that connected and exited without a single call to the stub. */
+    public static final String EARLY_EXIT = "early_exit";
+    /**
+     * The outcome of a continuation generation (a generation of the asking worker after the one that asked) that
+     * connected and exited without a single call to the stub.
+     */
+    public static final String CONTINUATION_EARLY_EXIT = "continuation_early_exit";
+    /**
+     * The outcome of a voter (the worker of a vote task) that connected and exited without a single call to the stub:
+     * the vote of its role is missing. It counts neither as {@value #EARLY_EXIT} nor as
+     * {@value #CONTINUATION_EARLY_EXIT}, and its run keeps its ask.
+     */
+    public static final String VOTER_EARLY_EXIT = "voter_early_exit";
+    /** The outcome of a generation whose harness answered with a quota or limit error ({@link #QUOTA_PATTERN}). */
+    public static final String QUOTA_ERROR = "quota_error";
+    /**
+     * A harness's quota or limit error: the text {@code quota} in any case, matched only in the harness's own error
+     * output ({@link #quotaDetail(String, List)}), never in a tool's input or result, assistant text or a file the
+     * worker read. Antigravity answered {@code error: Individual quota reached. Please upgrade your subscription to
+     * increase your limits. Resets in 42h26m24s.} on {@code stderr} and as the {@code error} of its result object in
+     * the last three Antigravity runs of the Q3 smoke pass (2026-10-22). Lines of {@code pm-exec}'s own do not count.
+     */
+    public static final Pattern QUOTA_PATTERN = Pattern.compile("quota", Pattern.CASE_INSENSITIVE);
+    /** The field of a {@value #QUOTA_ERROR} event and run record that names the rule it was detected by. */
+    public static final String QUOTA_RULE = "quota_rule";
+    /** The rule of {@link #quotaDetail(String, List)}: the harness's own error output only. */
+    public static final String HARNESS_ERROR_OUTPUT = "harness_error_output";
+    /**
+     * The rule of {@link #rateLimitRefusal(List)}: a {@code rate_limit_event} line of Claude Code's {@code stream-json}
+     * output whose {@code rate_limit_info.status} is neither {@code allowed} nor {@code allowed_warning}, a refusal by
+     * the account's usage limit. Such a refusal does not contain the text {@code quota}.
+     */
+    public static final String RATE_LIMIT_EVENT = "rate_limit_event";
+    /** The field of a {@value #RATE_LIMIT_EVENT} quota error with the event's {@code rate_limit_info.status}. */
+    public static final String RATE_LIMIT_STATUS = "rate_limit_status";
+    /** The field of a {@value #RATE_LIMIT_EVENT} quota error with the event's {@code rateLimitType}. */
+    public static final String RATE_LIMIT_TYPE = "rate_limit_type";
+    /**
+     * The field of a {@value #RATE_LIMIT_EVENT} quota error with the event's {@code resetsAt}: an ISO instant when the
+     * event gives epoch seconds, else its text, empty when it gives none.
+     */
+    public static final String RESETS_AT = "resets_at";
+    /** The statuses of a {@code rate_limit_event} under which the account may run. */
+    static final Set<String> RATE_LIMIT_ALLOWED = Set.of("allowed", "allowed_warning");
+
+    /** The event the stub logs when a generation's relay connects: the first event the generation causes itself. */
+    public static final String CONNECTED = "connected";
+    /** The event the stub logs for every tool call of a generation. */
+    public static final String CALL = "call";
+    /** The event the stub logs for every ask it records. */
+    public static final String ASKED = "asked";
+    /** The event the driver logs when it injects a fault into a generation. */
+    public static final String FAULT_INJECTED = "fault_injected";
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final Duration TERMINATION_GRACE = Duration.ofSeconds(10);
+    private static final Duration POLL = Duration.ofMillis(100);
+    private static final boolean LINUX = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("linux");
+    private static final String WORKER = "worker";
+    private static final String GENERATION = "generation";
+    private static final String EVENT = "event";
+    private static final String DECISION = "decision";
+    private static final String TASK = "task";
+
+    /** The event the driver logs when a {@link Fault#CALL_CUT} run's held call was not cut by the host in time. */
+    static final String CALL_NOT_CUT = "call_not_cut";
+
+    /** The event the driver logs when a fault could not be injected as specified ({@link #stopWhileHolding}). */
+    static final String FAULT_NOT_INJECTED = "fault_not_injected";
+
+    /** The event the driver logs when it reads, after a loss, what the stub made of the lost task ({@link #recovery}). */
+    static final String RECOVERY = "recovery";
+
+    /**
+     * Where OpenCode keeps its data ({@code XDG_DATA_HOME}), set by {@value #PROPERTY}: {@code global} (the default)
+     * or {@code worker}.
+     */
+    public enum OpenCodeDataHome {
+        /**
+         * The operator's own data home, which the worker inherits: it has the operator's login, so the models of the
+         * login are routable ({@code opencode/gpt-5.4-nano} ran there, verified 2026-10-21), and every OpenCode
+         * worker writes the one SQLite database of it; the sessions of the runs stay in the operator's history. A
+         * departure from the per-worker data home of the work package, accepted by the operator.
+         */
+        GLOBAL,
+        /**
+         * A data home per worker below its directory ({@link #opencodeDataHome(Path)}), as the work package
+         * specifies: the login does not carry, and only the free models of the provider {@code opencode} are routable.
+         */
+        WORKER;
+
+        /** The system property that selects it. */
+        public static final String PROPERTY = "pm.experiment.opencode.data-home";
+
+        /**
+         * @param value {@code global} or {@code worker}, in any case; {@code null} for the default
+         * @return the data home
+         * @throws IllegalArgumentException for any other value
+         */
+        public static OpenCodeDataHome of(String value) {
+            if (value == null) {
+                return GLOBAL;
+            }
+            for (var home : values()) {
+                if (home.name().equalsIgnoreCase(value.strip())) {
+                    return home;
+                }
+            }
+            throw new IllegalArgumentException("unknown -D" + PROPERTY + "=" + value + ": global or worker");
+        }
+    }
+
+    /**
+     * The driver's settings.
+     *
+     * @param host             the host
+     * @param model            the model, {@code null} for the harness default
+     * @param workspace        the parent of the worker directories, outside every repository
+     * @param runDir           where the worker output and the relay logs go
+     * @param exec             the {@code pm-exec} command line
+     * @param openCodeDataHome where an OpenCode worker keeps its data
+     * @param parallel         how many runs the measurement runs at once, recorded with every launch
+     */
+    public record Settings(Host host, String model, Path workspace, Path runDir, List<String> exec,
+    OpenCodeDataHome openCodeDataHome, int parallel) {
+
+        /**
+         * Settings of one run at a time with OpenCode on its default data home ({@link OpenCodeDataHome#GLOBAL}).
+         *
+         * @param host      the host
+         * @param model     the model, {@code null} for the harness default
+         * @param workspace the parent of the worker directories
+         * @param runDir    where the worker output and the relay logs go
+         * @param exec      the {@code pm-exec} command line
+         */
+        public Settings(Host host, String model, Path workspace, Path runDir, List<String> exec) {
+            this(host, model, workspace, runDir, exec, OpenCodeDataHome.GLOBAL, 1);
+        }
+    }
+
+    /**
+     * One worker launch.
+     *
+     * @param worker      the worker id
+     * @param generation  its generation
+     * @param role        its role
+     * @param prompt      the launch prompt
+     * @param resumable   whether its session is kept (the launch omits the no-persistence flag)
+     * @param toolTimeout the host's MCP tool timeout to configure, {@code null} for the host default
+     * @param workTools   the host tools beside the stub's (file tools for real work), by the host's names
+     * @param sessionId   the session to resume, {@code null} for a new session
+     */
+    public record Launch(String worker, int generation, String role, String prompt, boolean resumable, Duration toolTimeout,
+    List<String> workTools, String sessionId) {
+    }
+
+    /**
+     * A started worker generation.
+     *
+     * @param launch    its launch
+     * @param host      its host
+     * @param process   the process ({@code pm-exec}, which runs the harness in its place)
+     * @param directory its worker directory, shared by the generations of the worker
+     * @param output    its arrival-stamped output
+     * @param relayLog  its relay's host-side log
+     */
+    public record Worker(Launch launch, Host host, Process process, Path directory, Path output, Path relayLog) {
+
+        /** @return the worker id */
+        public String id() {
+            return launch.worker();
+        }
+
+        /** @return the generation */
+        public int generation() {
+            return launch.generation();
+        }
+    }
+
+    /**
+     * A worker generation that failed to launch: its process exited, or {@code pm-exec} reported an error, before the
+     * stub saw its relay connect.
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param exit       the exit code of its process
+     * @param stderr     the first line of {@code stderr} that is not a line of {@code pm-exec}'s own
+     *                   ({@code {"pm_exec":...}}), the harness's cause; without one {@code pm-exec}'s error line, else
+     *                   its first line, empty when none
+     * @param tail       the last {@value #STDERR_TAIL} lines of {@code stderr} that are not lines of {@code pm-exec}'s
+     *                   own
+     */
+    public record LaunchFailure(String worker, int generation, int exit, String stderr, List<String> tail) {
+    }
+
+    /** How many of the harness's last {@code stderr} lines a launch failure records. */
+    static final int STDERR_TAIL = 5;
+
+    /**
+     * A worker generation that ended early: its relay connected, but its process exited without a single call to the
+     * stub (OpenCode with {@code opencode/gpt-5.4-nano} said the plan-marshall tools were unavailable and exited within
+     * seconds in 15 of 24 runs of the Q1 smoke pass). A continuation generation, one after the generation in which its
+     * worker asked, ends so too (OpenCode continuations in three of four runs of the Q4 smoke pass); it is recorded
+     * apart, as {@value #CONTINUATION_EARLY_EXIT}, because its run did ask. A voter, the worker of a vote task
+     * ({@code vote-<question_set>-<role>}), ends so too (OpenCode with {@code opencode/gpt-5.4-nano} in run 1 of the
+     * first Q6 attempt); it is recorded apart, as {@value #VOTER_EARLY_EXIT}, and does not end the run: its vote is
+     * missing.
+     *
+     * @param worker       the worker id
+     * @param generation   its generation
+     * @param exit         the exit code of its process
+     * @param detail       the first line of {@code stderr} that is not a line of {@code pm-exec}'s own, else the last
+     *                     line of its output ({@link #earlyExitDetail(String, List)}), empty when none
+     * @param continuation whether it is a continuation generation: its worker asked in an earlier generation
+     * @param voter        whether it is a voter
+     */
+    public record EarlyExit(String worker, int generation, int exit, String detail, boolean continuation, boolean voter) {
+
+        /**
+         * @return the outcome it is recorded as: {@value #VOTER_EARLY_EXIT} for a voter, else
+         *         {@value #CONTINUATION_EARLY_EXIT} for a continuation generation, else {@value #EARLY_EXIT}
+         */
+        String outcome() {
+            if (voter) {
+                return VOTER_EARLY_EXIT;
+            }
+            return continuation ? CONTINUATION_EARLY_EXIT : EARLY_EXIT;
+        }
+    }
+
+    /**
+     * A worker generation whose harness answered with a quota or limit error: {@link #QUOTA_PATTERN} in its own error
+     * output ({@value #HARNESS_ERROR_OUTPUT}, {@link #quotaDetail(String, List)}; Antigravity said
+     * {@code Individual quota reached} in the last three Antigravity runs of the Q3 smoke pass), or a refusing
+     * {@code rate_limit_event} of Claude Code ({@value #RATE_LIMIT_EVENT}, {@link #rateLimitRefusal(List)}).
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param detail     the matching line
+     * @param rule       the rule it was detected by: {@value #HARNESS_ERROR_OUTPUT} or {@value #RATE_LIMIT_EVENT}
+     * @param refusal    the refusing event under {@value #RATE_LIMIT_EVENT}, {@code null} under the other rule
+     */
+    public record QuotaError(String worker, int generation, String detail, String rule, RateLimitRefusal refusal) {
+
+        /** @return whether the account's usage limit refused the generation ({@value #RATE_LIMIT_EVENT}) */
+        public boolean usageLimit() {
+            return refusal != null;
+        }
+    }
+
+    /**
+     * A {@code rate_limit_event} of Claude Code that refuses the generation ({@value #RATE_LIMIT_EVENT}).
+     *
+     * @param status        its {@code rate_limit_info.status}
+     * @param rateLimitType its {@code rateLimitType}, empty when it gives none
+     * @param resetsAt      its {@code resetsAt} as an ISO instant (from epoch seconds) or as given, empty when none
+     * @param line          the output line
+     */
+    public record RateLimitRefusal(String status, String rateLimitType, String resetsAt, String line) {
+    }
+
+    private final QuestionStub.Settings stubSettings;
+    private final Settings settings;
+    private final boolean ownsStub;
+    private final List<Worker> workers = new CopyOnWriteArrayList<>();
+    /** The workers of this driver and of every driver of the same stub (its siblings and its root). */
+    private final List<Worker> family;
+    private final Set<String> endedOnLaunch;
+    private final List<QuestionDriver> siblings = new CopyOnWriteArrayList<>();
+    private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
+    private final Map<String, EarlyExit> earlyExits = new ConcurrentHashMap<>();
+    private final Map<String, QuotaError> quotaErrors = new ConcurrentHashMap<>();
+    private final Map<String, Integer> signalledPids = new ConcurrentHashMap<>();
+    private volatile QuestionStub stub;
+
+    private QuestionDriver(QuestionStub.Settings stubSettings, Settings settings, QuestionStub stub,
+            boolean ownsStub, List<Worker> family, Set<String> endedOnLaunch) {
+        this.stubSettings = stubSettings;
+        this.settings = settings;
+        this.stub = stub;
+        this.ownsStub = ownsStub;
+        this.family = family;
+        this.endedOnLaunch = endedOnLaunch;
+    }
+
+    /**
+     * A driver of another host on the same stub, for a continuation or a vote on another harness; closing it ends
+     * its workers and leaves the stub running. Its workers count in {@link #launchFailure()} of this driver.
+     *
+     * @param host  the host
+     * @param model its model, {@code null} for the harness default
+     * @return the sibling driver
+     */
+    public QuestionDriver sibling(Host host, String model) {
+        var sibling = new QuestionDriver(stubSettings, new Settings(host, model, settings.workspace(),
+                        settings.runDir(), settings.exec(), settings.openCodeDataHome(), settings.parallel()), stub, false,
+                family, endedOnLaunch);
+        siblings.add(sibling);
+        return sibling;
+    }
+
+    /**
+     * Leases a queued task (a continuation, a vote) to a new generation and starts it on that task.
+     *
+     * @param taskId the task
+     * @param entity its entity
+     * @param launch the launch (its prompt is the contract; the start instruction is appended)
+     * @return the worker
+     * @throws IOException if it cannot be started
+     */
+    public Worker startLeased(String taskId, String entity, Launch launch) throws IOException {
+        stub.leaseAtSpawn(taskId, launch.worker(), launch.generation());
+        return launch(withPrompt(launch, launch.prompt() + "\n\nStart: call pm_state with entity \"" + entity
+                + "\" and follow its link ack."));
+    }
+
+    /** @return every worker this driver started */
+    public List<Worker> workers() {
+        return List.copyOf(workers);
+    }
+
+    /**
+     * Starts the stub and returns its driver.
+     *
+     * @param stubSettings the stub's settings
+     * @param settings     the driver's settings
+     * @return the driver
+     * @throws IOException if the stub cannot start or a directory not be created
+     */
+    public static QuestionDriver start(QuestionStub.Settings stubSettings, Settings settings) throws IOException {
+        Files.createDirectories(settings.workspace());
+        Files.createDirectories(settings.runDir());
+        return new QuestionDriver(stubSettings, settings, QuestionStub.start(stubSettings), true,
+                new CopyOnWriteArrayList<>(), ConcurrentHashMap.newKeySet());
+    }
+
+    /** @return the running stub */
+    public QuestionStub stub() {
+        return stub;
+    }
+
+    /** @return the driver's settings */
+    public Settings settings() {
+        return settings;
+    }
+
+    /**
+     * Stops the stub and starts it again on the same directory: open records are replayed.
+     *
+     * @return the new stub
+     * @throws IOException if it cannot be restarted
+     */
+    public QuestionStub restartStub() throws IOException {
+        stub.event("stub_restart", Map.of());
+        stub.close();
+        stub = QuestionStub.start(stubSettings);
+        return stub;
+    }
+
+    /**
+     * Queues a task, leases it to a fresh generation, and starts that generation on it.
+     *
+     * @param spec   the task
+     * @param launch the launch (its prompt is the contract; the start instruction is appended)
+     * @return the worker
+     * @throws IOException if it cannot be started
+     */
+    public Worker startFresh(TaskSpec spec, Launch launch) throws IOException {
+        stub.queue(spec);
+        stub.leaseAtSpawn(spec.taskId(), launch.worker(), launch.generation());
+        return launch(withPrompt(launch, launch.prompt() + "\n\nStart: call pm_state with entity \"" + spec.entity()
+                + "\" and follow its link ack."));
+    }
+
+    /**
+     * Starts a warm generation that takes task after task from {@code pm_wait}.
+     *
+     * @param launch the launch (its prompt is the contract; the start instruction is appended)
+     * @return the worker
+     * @throws IOException if it cannot be started
+     */
+    public Worker startWarm(Launch launch) throws IOException {
+        return launch(withPrompt(launch, launch.prompt() + "\n\nStart: call pm_wait. Take task after task; end "
+                + "your turn only when pm_wait returns 'wait: end'."));
+    }
+
+    /**
+     * Resumes a stored session as a new generation, leased the task that waits for it.
+     *
+     * @param previous   the generation that asked and ended
+     * @param taskId     the suspended task
+     * @param sessionId  the session id read from its structured result
+     * @param generation the new generation
+     * @return the resumed worker
+     * @throws IOException if it cannot be started
+     */
+    public Worker resume(Worker previous, String taskId, String sessionId, int generation) throws IOException {
+        stub.leaseAtSpawn(taskId, previous.id(), generation);
+        var entity = previous.launch();
+        var launch = new Launch(entity.worker(), generation, entity.role(), "The answer to your question is there. "
+                + "Call pm_state, follow its link ack, and continue the task with the answer.", true,
+                entity.toolTimeout(), entity.workTools(), sessionId);
+        return launch(launch);
+    }
+
+    /**
+     * Resumes a session that does not exist or is older than its limit. The specification expects the resume to fail
+     * at once; Antigravity instead warns on {@code stderr} ({@link #stderr(Worker)}), starts a new conversation with a
+     * new id and runs it to its end, so the caller reads the session id the generation reports
+     * ({@link #sessionId(Worker)}) as well as its exit.
+     *
+     * @param previous   the generation whose session is named
+     * @param sessionId  the session id to try
+     * @param generation the new generation
+     * @return the started worker
+     * @throws IOException if it cannot be started
+     */
+    public Worker resumeWithoutTask(Worker previous, String sessionId, int generation) throws IOException {
+        var entity = previous.launch();
+        return launch(new Launch(entity.worker(), generation, entity.role(), "Continue.", true, entity.toolTimeout(),
+                entity.workTools(), sessionId));
+    }
+
+    /**
+     * @param worker a worker
+     * @return the last session id its structured result names ({@code session_id} on Claude Code, {@code sessionID}
+     *         on OpenCode, {@code conversation_id} on Antigravity)
+     * @throws IOException if the output cannot be read
+     */
+    public Optional<String> sessionId(Worker worker) throws IOException {
+        return worker.host().sessionId(outputLines(worker.output()));
+    }
+
+    /** The client version per executable path, probed once per JVM ({@link #clientVersion(Worker)}). */
+    private static final Map<String, String> PROBED_VERSIONS = new ConcurrentHashMap<>();
+
+    /** How long the version probe of a harness may take. */
+    private static final Duration VERSION_PROBE_LIMIT = Duration.ofSeconds(30);
+
+    /**
+     * The client version of a worker's harness, for the run record: the version its output names
+     * ({@link Host#versionFromOutput(List)}), else the first line the harness's version probe prints
+     * ({@link Host#versionCommand(String)}), run once per executable. A probe that fails gives {@code unknown}.
+     *
+     * @param worker a worker
+     * @return the client version
+     * @throws IOException if the output cannot be read
+     */
+    public String clientVersion(Worker worker) throws IOException {
+        var fromOutput = worker.host().versionFromOutput(outputLines(worker.output()));
+        if (fromOutput.isPresent()) {
+            return fromOutput.get();
+        }
+        var executable = worker.host().resolveExecutable(System.getenv());
+        return PROBED_VERSIONS.computeIfAbsent(executable, path -> probeVersion(worker.host().versionCommand(path)));
+    }
+
+    /**
+     * @param command the version probe
+     * @return the first line it prints that is not blank, {@code unknown} when it prints none, fails or outlasts
+     *         {@link #VERSION_PROBE_LIMIT}
+     */
+    static String probeVersion(List<String> command) {
+        try {
+            var process = new ProcessBuilder(command).redirectErrorStream(true)
+                    .redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null"))).start();
+            if (!process.waitFor(VERSION_PROBE_LIMIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                return "unknown";
+            }
+            var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            return output.lines().map(String::strip).filter(line -> !line.isEmpty()).findFirst().orElse("unknown");
+        } catch (IOException _) {
+            return "unknown";
+        } catch (InterruptedException _) {
+            Thread.currentThread().interrupt();
+            return "unknown";
+        }
+    }
+
+    /**
+     * @param worker a worker
+     * @return what it wrote to {@code stderr} so far, empty when nothing
+     * @throws IOException if the file cannot be read
+     */
+    public String stderr(Worker worker) throws IOException {
+        var file = stderrFile(settings.runDir(), worker.id(), worker.generation());
+        return Files.exists(file) ? Files.readString(file, StandardCharsets.UTF_8) : "";
+    }
+
+    /**
+     * @param runDir     the run directory of a worker's files
+     * @param worker     the worker id
+     * @param generation its generation
+     * @return the file its {@code stderr} goes to
+     */
+    public static Path stderrFile(Path runDir, String worker, int generation) {
+        return runDir.resolve("stderr-" + worker + "-g" + generation + ".log");
+    }
+
+    /**
+     * Waits for a worker to exit.
+     *
+     * @param worker  the worker
+     * @param timeout the maximum wait
+     * @return the exit code, or empty if it still runs
+     * @throws InterruptedException if interrupted
+     */
+    public Optional<Integer> awaitExit(Worker worker, Duration timeout) throws InterruptedException {
+        if (worker.process().waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
+            return Optional.of(worker.process().exitValue());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The event the driver logs, and the field of a Q7 run record, when it ends the fresh asker that still runs at
+     * its silence limit after the ask ({@link #endAsker}): a harness action, the end of a turn the model did not end.
+     */
+    public static final String ASKER_ENDED_BY_DRIVER = "asker_ended_by_driver";
+
+    /**
+     * The event the driver logs when the open time of a Q7 run starts: the asking generation has stopped (it exited,
+     * or the driver ended it), so the record is open with no worker of the task connected.
+     */
+    public static final String OPEN_TIME_STARTED = "open_time_started";
+
+    /** How long {@link #endAsker} waits for the driver's own {@code worker_exited} of an ended asker. */
+    private static final Duration EXIT_EVENT_WAIT = Duration.ofSeconds(30);
+
+    /**
+     * How the fresh asker of a Q7 run stopped before the open time ({@link #endAsker}).
+     *
+     * @param worker        the asking worker
+     * @param generation    its generation
+     * @param endedByDriver whether the driver ended it at its silence limit, because it still ran
+     * @param afterAskMs    the milliseconds from the ask to its exit observed by the driver, or to its end by the
+     *                      driver
+     * @param holdingWait   whether it held a {@code pm_wait} when the driver ended it (by the stub log: a
+     *                      {@code wait_started} without an end), {@code false} when it exited by itself
+     */
+    public record AskerEnd(String worker, int generation, boolean endedByDriver, long afterAskMs, boolean holdingWait) {
+    }
+
+    /**
+     * Ends the fresh asker of a Q7 run before the open time starts, by the rule the other fresh items follow: the
+     * driver waits for the asker's exit up to its silence limit after the ask, and ends an asker that still runs, as
+     * the launch of a newer generation ends an older one ({@link #SUPERSEDED_ENDED}) and as the server ends a worker
+     * whose turn does not end. Such an end is logged as {@value #ASKER_ENDED_BY_DRIVER} with the time after the ask
+     * and whether the asker held a {@code pm_wait} then; once the driver's own {@code worker_exited} of it is in the
+     * log, {@value #OPEN_TIME_STARTED} is logged: the record is open with no worker of the task connected.
+     *
+     * @param asker        the asking generation
+     * @param askedAt      when it asked (epoch milliseconds, the {@code asked} event)
+     * @param silenceLimit how long after the ask it may run before it is ended
+     * @return how it stopped
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public AskerEnd endAsker(Worker asker, long askedAt, Duration silenceLimit) throws IOException, InterruptedException {
+        var waitFor = Duration.ofMillis(Math.max(0, askedAt + silenceLimit.toMillis() - System.currentTimeMillis()));
+        var exited = awaitExit(asker, waitFor).isPresent();
+        AskerEnd end;
+        if (exited) {
+            end = new AskerEnd(asker.id(), asker.generation(), false, System.currentTimeMillis() - askedAt, false);
+        } else {
+            var holding = holdingWait(jsonLinesSoFar(stub.events()), asker.id(),
+                    asker.generation());
+            end = new AskerEnd(asker.id(), asker.generation(), true, System.currentTimeMillis() - askedAt, holding);
+            var fields = identity(asker);
+            fields.put("after_ask_ms", end.afterAskMs());
+            fields.put("holding_wait", holding);
+            stub.event(ASKER_ENDED_BY_DRIVER, fields);
+            terminate(asker);
+        }
+        awaitEvent(event -> "worker_exited".equals(event.path(EVENT).asText()) && matches(event, asker),
+                System.currentTimeMillis() + EXIT_EVENT_WAIT.toMillis());
+        var fields = identity(asker);
+        fields.put(ASKER_ENDED_BY_DRIVER, end.endedByDriver());
+        stub.event(OPEN_TIME_STARTED, fields);
+        return end;
+    }
+
+    /**
+     * Ends a worker as the server ends one: {@code SIGTERM}, then {@code SIGKILL} after the termination grace.
+     *
+     * @param worker the worker
+     * @throws InterruptedException if interrupted
+     */
+    public void terminate(Worker worker) throws InterruptedException {
+        var stopped = continueStopped(worker.process());
+        if (!worker.process().isAlive()) {
+            stopped.forEach(ProcessHandle::destroyForcibly);
+            return;
+        }
+        if (stopped.isEmpty()) {
+            signal(worker, "CONT");
+        }
+        worker.process().destroy();
+        if (!worker.process().waitFor(TERMINATION_GRACE.toMillis(), TimeUnit.MILLISECONDS)) {
+            worker.process().descendants().forEach(ProcessHandle::destroyForcibly);
+            worker.process().destroyForcibly();
+        }
+        stopped.forEach(ProcessHandle::destroyForcibly);
+    }
+
+    /**
+     * The processes of each worker whose tree the driver stopped ({@link #stopTree}), keyed by the launched process,
+     * until they are continued ({@link #continueStopped}); static, so that a sibling driver that ends the worker and
+     * the shutdown hook ({@link #continueAllStopped()}) continue it too.
+     */
+    private static final Map<Process, List<ProcessHandle>> STOPPED_TREES = new ConcurrentHashMap<>();
+
+    static {
+        Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(QuestionDriver::continueAllStopped));
+    }
+
+    /** How often {@link #stopTree} looks for descendants the stop has not reached yet. */
+    static final int STOP_PASSES = 5;
+
+    /**
+     * Stops ({@code SIGSTOP}) a launched process and all its descendants, as {@link Fault#KILL} reaches all of them
+     * ({@link ProcessHandle#descendants()}): the process first, so that it starts no further child, then its
+     * descendants, again until a pass finds none the stop has not reached ({@value #STOP_PASSES} passes at most). The
+     * tree is kept until it is continued ({@link #continueStopped}), which every end of the worker does
+     * ({@link #terminate}). The launched process alone was stopped before 2026-10-26: OpenCode's
+     * {@code run --standalone} runs its model loop and MCP client in a child process, which went on calling the stub
+     * after the stop in all 24 OpenCode runs of {@link Fault#STOP_BEFORE_ANSWER} and {@link Fault#MODEL_HANG} (R3
+     * invocation {@code R3-2026-10-25T201227591735Z-a84865dd}).
+     *
+     * @param process the launched process
+     * @return the processes signalled, the launched process first
+     */
+    static List<ProcessHandle> stopTree(Process process) {
+        var signalled = new LinkedHashMap<Long, ProcessHandle>();
+        var next = List.of(process.toHandle());
+        for (var pass = 0; pass <= STOP_PASSES && !next.isEmpty(); pass++) {
+            next.forEach(handle -> signalled.put(handle.pid(), handle));
+            STOPPED_TREES.put(process, List.copyOf(signalled.values()));
+            kill("STOP", next);
+            next = process.descendants().filter(handle -> !signalled.containsKey(handle.pid())).toList();
+        }
+        return List.copyOf(signalled.values());
+    }
+
+    /**
+     * Continues ({@code SIGCONT}) the tree of a launched process the driver stopped: every process of it that still
+     * runs, also one the launched process no longer has as descendant, and the launched process's current descendants.
+     * A process whose tree was not stopped is left alone.
+     *
+     * @param process the launched process
+     * @return the processes of the stopped tree, empty when it was not stopped
+     */
+    static List<ProcessHandle> continueStopped(Process process) {
+        var stopped = STOPPED_TREES.remove(process);
+        if (stopped == null) {
+            return List.of();
+        }
+        var tree = new LinkedHashMap<Long, ProcessHandle>();
+        stopped.forEach(handle -> tree.put(handle.pid(), handle));
+        process.descendants().forEach(handle -> tree.putIfAbsent(handle.pid(), handle));
+        kill("CONT", List.copyOf(tree.values()));
+        return stopped;
+    }
+
+    /** Continues every tree still stopped (the shutdown hook): a JVM that ends never leaves a process stopped. */
+    static void continueAllStopped() {
+        for (var process : List.copyOf(STOPPED_TREES.keySet())) {
+            continueStopped(process);
+        }
+    }
+
+    /** Sends a signal to the processes that still run, in one {@code kill} call. */
+    private static void kill(String signal, List<ProcessHandle> processes) {
+        var command = new ArrayList<String>(List.of("kill", "-" + signal));
+        processes.stream().filter(ProcessHandle::isAlive).forEach(handle -> command.add(Long.toString(handle.pid())));
+        if (command.size() == 2) {
+            return;
+        }
+        try {
+            var kill = new ProcessBuilder(command).redirectErrorStream(true).start();
+            kill.getInputStream().readAllBytes();
+            kill.waitFor(5, TimeUnit.SECONDS);
+        } catch (IOException e) {
+            throw new IllegalStateException("kill -" + signal + " failed", e);
+        } catch (InterruptedException _) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Injects a fault into a worker; {@link Fault#CALL_CUT} is made by the host ({@link Host#cutSetting()}) and is
+     * logged by {@link #awaitCallCut} once the logs show it, never here.
+     *
+     * @param worker the worker
+     * @param fault  the fault
+     */
+    public void inject(Worker worker, Fault fault) {
+        inject(worker, fault, Map.of());
+    }
+
+    /**
+     * Injects a fault into a worker and logs it as {@value #FAULT_INJECTED} with further fields. The stop of
+     * {@link Fault#STOP_BEFORE_ANSWER} and {@link Fault#MODEL_HANG} reaches the worker's whole process tree
+     * ({@link #stopTree}) and is logged once it is made, with the number of processes it reached
+     * ({@value #SIGNALLED_PIDS}, also kept for the run record: {@link #signalledPids(Worker)}); every other fault is
+     * logged before it is made, as before.
+     *
+     * @param worker  the worker
+     * @param fault   the fault
+     * @param details the fields beside the worker, its generation and the fault
+     */
+    void inject(Worker worker, Fault fault, Map<String, Object> details) {
+        var fields = identity(worker);
+        fields.put("fault", fault.name());
+        fields.putAll(details);
+        if (fault.stopsTree()) {
+            var signalled = stopTree(worker.process()).size();
+            signalledPids.put(worker.id() + "#" + worker.generation(), signalled);
+            fields.put(SIGNALLED_PIDS, signalled);
+            stub.event(FAULT_INJECTED, fields);
+            return;
+        }
+        stub.event(FAULT_INJECTED, fields);
+        if (fault.killsTree()) {
+            worker.process().descendants().forEach(ProcessHandle::destroyForcibly);
+            worker.process().destroyForcibly();
+        }
+        // CALL_CUT is made by the host and logged by awaitCallCut
+    }
+
+    /** The field of {@value #FAULT_INJECTED} with the number of processes a stop reached ({@link #stopTree}). */
+    static final String SIGNALLED_PIDS = "signalled_pids";
+
+    /**
+     * @param worker a worker
+     * @return the number of processes the stop injected into it reached ({@link #stopTree}), empty when it was not
+     *         stopped
+     */
+    public Optional<Integer> signalledPids(Worker worker) {
+        return Optional.ofNullable(signalledPids.get(worker.id() + "#" + worker.generation()));
+    }
+
+    /**
+     * Stops ({@code SIGSTOP}) the asking generation while it holds {@code pm_wait} for its asked task, before the
+     * answer is delivered ({@link Fault#STOP_BEFORE_ANSWER}): waits until the stub log shows a {@code pm_wait} of the
+     * generation started at or after the ask and not ended ({@link #heldWait}), then injects the stop with the hold's
+     * start ({@code hold_started_at}), {@code held: true} and the milliseconds since the ask. A generation that does
+     * not hold within the given time, or exits, is not stopped: that is logged as {@value #FAULT_NOT_INJECTED} with
+     * the reason {@code no_hold}.
+     *
+     * @param worker  the asking generation
+     * @param askedAt when it asked (epoch milliseconds, the {@code asked} event)
+     * @param within  how long to wait for its hold
+     * @return the held wait it was stopped in, empty when it was not stopped
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public Optional<Wait> stopWhileHolding(Worker worker, long askedAt, Duration within)
+            throws IOException, InterruptedException {
+        var held = awaitHold(worker, askedAt, System.currentTimeMillis() + within.toMillis());
+        if (held.isEmpty()) {
+            var fields = identity(worker);
+            fields.put("fault", Fault.STOP_BEFORE_ANSWER.name());
+            fields.put("reason", "no_hold");
+            stub.event(FAULT_NOT_INJECTED, fields);
+            return held;
+        }
+        var details = new LinkedHashMap<String, Object>();
+        details.put("held", true);
+        details.put("hold_started_at", held.get().start());
+        details.put("after_ask_ms", System.currentTimeMillis() - askedAt);
+        inject(worker, Fault.STOP_BEFORE_ANSWER, details);
+        return held;
+    }
+
+    /**
+     * Waits until the stub log shows a generation holding {@code pm_wait} ({@link #heldWait}).
+     *
+     * @param worker      the generation
+     * @param since       the earliest start of the wait (epoch milliseconds)
+     * @param untilMillis the deadline (epoch milliseconds)
+     * @return the held wait, empty at the deadline or once the generation's process exited
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    Optional<Wait> awaitHold(Worker worker, long since, long untilMillis)
+            throws IOException, InterruptedException {
+        while (true) {
+            var held = heldWait(jsonLinesSoFar(stub.events()), worker.id(), worker.generation(), since);
+            if (held.isPresent() || !worker.process().isAlive() || System.currentTimeMillis() >= untilMillis) {
+                return held.filter(_ -> worker.process().isAlive());
+            }
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls a worker process and the stub log, no event to await
+        }
+    }
+
+    /**
+     * @param events     the stub log
+     * @param worker     a worker
+     * @param generation its generation
+     * @param since      the earliest start of the wait (epoch milliseconds)
+     * @return the {@code pm_wait} of the generation that started at or after {@code since} and that the log shows
+     *         still held ({@link #waits(List)}), empty when there is none
+     */
+    static Optional<Wait> heldWait(List<JsonNode> events, String worker, int generation, long since) {
+        return waits(events).stream().filter(wait -> wait.worker().equals(worker)
+                && wait.generation() == generation && wait.start() >= since && wait.end() == Long.MAX_VALUE)
+                .findFirst();
+    }
+
+    /**
+     * A held call the host cut ({@link Fault#CALL_CUT}), as the logs show it.
+     *
+     * @param worker     the worker
+     * @param generation its generation
+     * @param heldSince  the start of the held {@code pm_wait} (epoch milliseconds, its {@code wait_started})
+     * @param cutAt      when the logs show the cut (epoch milliseconds)
+     * @param evidence   {@value #CUT_CANCELLED} (the host's {@code notifications/cancelled} of the held call in the
+     *                   relay's host-side log), {@value #CUT_SUPERSEDED} (a newer {@code pm_wait} of the generation
+     *                   while the held one was open: the host had given the held call up), {@code reply_failed} or
+     *                   {@code disconnected} (the stub's events)
+     */
+    public record CallCut(String worker, int generation, long heldSince, long cutAt, String evidence) {
+
+        /** @return the milliseconds from the start of the held call to its cut */
+        public long afterMs() {
+            return cutAt - heldSince;
+        }
+    }
+
+    /** {@link CallCut#evidence()} of the host's {@code notifications/cancelled} of the held call. */
+    static final String CUT_CANCELLED = "cancelled";
+
+    /** {@link CallCut#evidence()} of a newer {@code pm_wait} of the generation that superseded the held one. */
+    static final String CUT_SUPERSEDED = "superseded";
+
+    /**
+     * Waits for the host to cut the held {@code pm_wait} of a generation ({@link Fault#CALL_CUT}, {@link #callCut}),
+     * up to a deadline. A cut is logged as {@value #FAULT_INJECTED} with {@code cut_by: host}, its evidence, the
+     * times, and how the run made the host cut ({@code means}, {@code tool_timeout_ms}, {@code host_cut_ms}); no cut
+     * by the deadline is logged as {@value #CALL_NOT_CUT} with whether and since when the generation held a call.
+     *
+     * @param worker      the generation
+     * @param since       the ask (epoch milliseconds): the held call starts at or after it
+     * @param untilMillis the deadline (epoch milliseconds): the time the operator's answer is due
+     * @param setting     how the run makes the host cut
+     * @return the cut, empty when the logs show none by the deadline
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public Optional<CallCut> awaitCallCut(Worker worker, long since, long untilMillis, Host.CutSetting setting)
+            throws IOException, InterruptedException {
+        while (true) {
+            var events = jsonLinesSoFar(stub.events());
+            var cut = callCut(events, relayLines(worker.relayLog()), worker.id(), worker.generation(), since);
+            if (cut.isPresent() || System.currentTimeMillis() >= untilMillis) {
+                var fields = identity(worker);
+                fields.put("means", setting.means());
+                fields.put("tool_timeout_ms", setting.toolTimeout() == null ? -1 : setting.toolTimeout().toMillis());
+                fields.put("host_cut_ms", setting.hostCut().toMillis());
+                if (cut.isPresent()) {
+                    var value = cut.get();
+                    var details = new LinkedHashMap<String, Object>();
+                    details.put("cut_by", "host");
+                    details.put("evidence", value.evidence());
+                    details.put("held_since", value.heldSince());
+                    details.put("cut_at", value.cutAt());
+                    details.put("after_ms", value.afterMs());
+                    details.putAll(fields);
+                    details.remove(WORKER);
+                    details.remove(GENERATION);
+                    inject(worker, Fault.CALL_CUT, details);
+                } else {
+                    var held = waits(events).stream().filter(wait -> wait.worker().equals(worker.id())
+                            && wait.generation() == worker.generation() && wait.start() >= since).findFirst();
+                    fields.put("held", held.isPresent());
+                    fields.put("held_since", held.map(Wait::start).orElse(-1L));
+                    stub.event(CALL_NOT_CUT, fields);
+                }
+                return cut;
+            }
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
+        }
+    }
+
+    /**
+     * Whether the host cut the held {@code pm_wait} of a generation: the first {@code pm_wait} it started at or after
+     * {@code since} ({@code wait_started}), and the earliest sign that the host gave that call up: its
+     * {@code notifications/cancelled} in the relay's host-side log (for a {@code pm_wait} request the host sent at or
+     * after {@code since}), a newer {@code pm_wait} of the generation that superseded it ({@code wait_again} with the
+     * reason {@code superseded}), a failed reply to it ({@code reply_failed} of {@code pm_wait}), or the generation's
+     * {@code disconnected}, each at or after the start of the held call.
+     *
+     * @param events     the stub log
+     * @param relay      the relay's host-side log of the generation ({@link #relayLines(Path)})
+     * @param worker     the worker
+     * @param generation its generation
+     * @param since      the ask (epoch milliseconds)
+     * @return the cut, empty when the logs show none
+     */
+    static Optional<CallCut> callCut(List<JsonNode> events, List<JsonNode> relay, String worker, int generation,
+            long since) {
+        var held = waits(events).stream().filter(wait -> wait.worker().equals(worker)
+                && wait.generation() == generation && wait.start() >= since).findFirst();
+        if (held.isEmpty()) {
+            return Optional.empty();
+        }
+        var start = held.get().start();
+        var cutAt = Long.MAX_VALUE;
+        var evidence = "";
+        var waitIds = new HashSet<String>();
+        for (var entry : relay) {
+            var at = entry.path("at").asLong();
+            var message = relayMessage(entry);
+            if (!"from_host".equals(entry.path("dir").asText()) || at < since || message.isEmpty()) {
+                continue;
+            }
+            var method = message.get().path("method").asText();
+            var params = message.get().path("params");
+            if ("tools/call".equals(method) && "pm_wait".equals(params.path("name").asText())) {
+                waitIds.add(message.get().path("id").toString());
+            } else if ("notifications/cancelled".equals(method)
+                    && waitIds.contains(params.path("requestId").toString()) && at >= start && at < cutAt) {
+                cutAt = at;
+                evidence = CUT_CANCELLED;
+            }
+        }
+        for (var event : events) {
+            var at = event.path("at").asLong();
+            if (!matches(event, worker, generation) || at < start || at >= cutAt) {
+                continue;
+            }
+            var name = event.path(EVENT).asText();
+            var sign = switch (name) {
+                case "wait_again" -> CUT_SUPERSEDED.equals(event.path("reason").asText()) ? CUT_SUPERSEDED : "";
+                case "reply_failed" -> "pm_wait".equals(event.path("tool").asText()) ? name : "";
+                case "disconnected" -> name;
+                default -> "";
+            };
+            if (!sign.isEmpty()) {
+                cutAt = at;
+                evidence = sign;
+            }
+        }
+        return evidence.isEmpty() ? Optional.empty()
+                : Optional.of(new CallCut(worker, generation, start, cutAt, evidence));
+    }
+
+    // --- the logs while they are written ---
+
+    /**
+     * The lines of a file read while it may still be written ({@link #writtenLines(Path)}).
+     *
+     * @param complete the lines that end with a line break, without it
+     * @param cutOff   whether the file ends in a line without a line break that is not blank: one still being written
+     */
+    public record WrittenLines(List<String> complete, boolean cutOff) {
+    }
+
+    /**
+     * The JSON lines of a file read while it may still be written ({@link #readJsonLinesSoFar(Path)}).
+     *
+     * @param nodes   the complete lines, parsed
+     * @param skipped the final lines not read: none or one
+     */
+    public record JsonLinesSoFar(List<JsonNode> nodes, int skipped) {
+    }
+
+    /**
+     * One held {@code pm_wait} of a worker generation, from the stub log ({@link #waits(List)}).
+     *
+     * @param worker     the worker
+     * @param generation its generation
+     * @param start      its {@code wait_started} (epoch milliseconds)
+     * @param end        its end (epoch milliseconds), {@link Long#MAX_VALUE} while the log shows none
+     */
+    public record Wait(String worker, int generation, long start, long end) {
+    }
+
+    /** The events of a generation that end its held {@code pm_wait} ({@link #waits(List)}). */
+    private static final Set<String> WAIT_ENDS = Set.of("wait_again", "wait_end", "refused", "answer_delivered",
+            "consultation_delivered", "offered", "disconnected", "worker_exited");
+
+    /**
+     * Reads a file that a process or thread may be appending to at the same moment: its writer appends a line and then
+     * its line break, but a line longer than a write's buffer reaches the file in parts, so a reader may see the start
+     * of a line without its end. Only the lines up to the last line break are decoded (strictly as UTF-8, a cut may
+     * split a character); what follows it is the line still being written and is reported as {@code cutOff}, not read.
+     *
+     * @param file a file
+     * @return its complete lines and whether a cut-off line follows them; none when the file does not exist
+     * @throws IOException if it cannot be read, or its complete lines are no UTF-8
+     */
+    public static WrittenLines writtenLines(Path file) throws IOException {
+        if (!Files.exists(file)) {
+            return new WrittenLines(List.of(), false);
+        }
+        var bytes = Files.readAllBytes(file);
+        var end = bytes.length;
+        while (end > 0 && bytes[end - 1] != '\n' && bytes[end - 1] != '\r') {
+            end--;
+        }
+        var cutOff = false;
+        for (var index = end; index < bytes.length && !cutOff; index++) {
+            cutOff = bytes[index] != ' ' && bytes[index] != '\t';
+        }
+        var text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes, 0, end)).toString();
+        return new WrittenLines(text.lines().toList(), cutOff);
+    }
+
+    /**
+     * Reads a JSON Lines file while its writer may still append to it, as the driver does during a run (the worker's
+     * output, the stub's event log): a final line still being written is skipped and counted, never an error. That is
+     * a final line without its line break ({@link #writtenLines(Path)}), or a final line that is no JSON. A line that
+     * is no JSON anywhere before it still fails, so that a corrupt file is reported.
+     *
+     * @param file a JSON Lines file
+     * @return its complete lines, parsed, and the number of final lines skipped; none when the file does not exist
+     * @throws IOException if it cannot be read, or a line before the last is no JSON
+     */
+    public static JsonLinesSoFar readJsonLinesSoFar(Path file) throws IOException {
+        var written = writtenLines(file);
+        var lines = written.complete().stream().filter(line -> !line.isBlank()).toList();
+        var nodes = new ArrayList<JsonNode>();
+        var skipped = written.cutOff() ? 1 : 0;
+        for (var index = 0; index < lines.size(); index++) {
+            try {
+                nodes.add(QuestionStub.JSON.readTree(lines.get(index)));
+            } catch (JsonProcessingException e) {
+                if (written.cutOff() || index < lines.size() - 1) {
+                    throw e;
+                }
+                skipped++;
+            }
+        }
+        return new JsonLinesSoFar(List.copyOf(nodes), skipped);
+    }
+
+    /**
+     * @param file a JSON Lines file, read while its writer may still append to it
+     * @return its complete lines, parsed ({@link #readJsonLinesSoFar(Path)})
+     * @throws IOException if it cannot be read, or a line before the last is no JSON
+     */
+    public static List<JsonNode> jsonLinesSoFar(Path file) throws IOException {
+        return readJsonLinesSoFar(file).nodes();
+    }
+
+    /**
+     * The held {@code pm_wait} calls of a stub log: each {@code wait_started} of a generation, ended by the first
+     * later event of the same generation that ends a wait ({@code wait_again}, {@code wait_end}, {@code refused}, a
+     * delivery, an offer over the wait, {@code disconnected}, {@code worker_exited}), by its next
+     * {@code wait_started}, or by the stub's stop ({@code stub_stopped}).
+     *
+     * @param events the stub log
+     * @return the waits, in the order they ended
+     */
+    public static List<Wait> waits(List<JsonNode> events) {
+        var open = new LinkedHashMap<String, Long>();
+        var waits = new ArrayList<Wait>();
+        for (var event : events) {
+            var name = event.path(EVENT).asText();
+            var at = event.path("at").asLong();
+            if ("stub_stopped".equals(name)) {
+                open.forEach((key, start) -> waits.add(wait(key, start, at)));
+                open.clear();
+                continue;
+            }
+            var worker = event.path(WORKER).asText("");
+            if (worker.isEmpty()) {
+                continue;
+            }
+            var key = worker + "#" + event.path(GENERATION).asInt();
+            var ends = WAIT_ENDS.contains(name) && !("offered".equals(name) && event.path("at_spawn").asBoolean());
+            if ("wait_started".equals(name) || ends) {
+                var start = open.remove(key);
+                if (start != null) {
+                    waits.add(wait(key, start, at));
+                }
+            }
+            if ("wait_started".equals(name)) {
+                open.put(key, at);
+            }
+        }
+        open.forEach((key, start) -> waits.add(wait(key, start, Long.MAX_VALUE)));
+        return waits;
+    }
+
+    private static Wait wait(String key, long start, long end) {
+        var cut = key.lastIndexOf('#');
+        return new Wait(key.substring(0, cut), Integer.parseInt(key.substring(cut + 1)), start, end);
+    }
+
+    /**
+     * @param events     the stub log
+     * @param worker     a worker
+     * @param generation its generation
+     * @return whether the log shows the generation holding a {@code pm_wait} now: a {@code wait_started} without an end
+     */
+    public static boolean holdingWait(List<JsonNode> events, String worker, int generation) {
+        return waits(events).stream().anyMatch(wait -> wait.worker().equals(worker)
+                && wait.generation() == generation && wait.end() == Long.MAX_VALUE);
+    }
+
+    /**
+     * @param relayLog the relay's host-side log of a generation
+     * @return its lines that are JSON ({@code at}, {@code dir}, {@code line}); a line still being written (the cut-off
+     *         end of the file, {@link #writtenLines(Path)}) or no JSON is skipped
+     * @throws IOException if it cannot be read
+     */
+    static List<JsonNode> relayLines(Path relayLog) throws IOException {
+        var lines = new ArrayList<JsonNode>();
+        for (var line : writtenLines(relayLog).complete()) {
+            try {
+                if (!line.isBlank()) {
+                    lines.add(QuestionStub.JSON.readTree(line));
+                }
+            } catch (JsonProcessingException _) {
+                // a line the relay is still writing
+            }
+        }
+        return lines;
+    }
+
+    private static Optional<JsonNode> relayMessage(JsonNode entry) {
+        try {
+            var message = QuestionStub.JSON.readTree(entry.path("line").asText());
+            return message != null && message.isObject() ? Optional.of(message) : Optional.empty();
+        } catch (JsonProcessingException _) {
+            return Optional.empty();
+        }
+    }
+
+    /** What the driver does after a loss, read from the stub ({@link #recovery}). */
+    public enum RecoveryStep {
+        /** The lost task waits resumable with its stored session: resume it again. */
+        RESUME,
+        /**
+         * The stub continued the decision in a new task that is still queued, or that is offered to or worked by a
+         * generation that has ended (the lost one, or one whose process is gone): start a generation leased on it,
+         * whose lease fences the ended holder and takes the task over.
+         */
+        CONTINUE,
+        /**
+         * The stub's continuation, or the lost task offered again, is held or closed by a generation that still runs,
+         * or closed by any: start none.
+         */
+        TAKEN,
+        /**
+         * The stub's continuation is held by a generation that has ended, in a state no new generation can take over
+         * (an answer delivered to it, a question it asked, a suspended session): start none, and log the run's
+         * {@value QuestionDriver#CONTINUATION_GAP}, so it never ends as a silent timeout.
+         */
+        GAP,
+        /** The stub has neither continued the decision nor made the task resumable yet: as before the fix. */
+        WAIT
+    }
+
+    /**
+     * What the stub made of a lost generation's task, read before the driver starts a generation for it.
+     *
+     * @param step        the step
+     * @param task        the task it concerns: the stub's continuation, else the lost task
+     * @param entity      the entity of that task, empty when the log does not name it
+     * @param state       that task's state in the stub
+     * @param holder      the generation ({@code <worker>#<generation>}) the stub last offered or delivered that task
+     *                    to, empty when none
+     * @param holderEnded whether that holder has ended: the lost generation itself, or one whose process is gone
+     */
+    public record Recovery(RecoveryStep step, String task, String entity, String state, String holder,
+    boolean holderEnded) {
+    }
+
+    /**
+     * The reason of a {@value #CONTINUATION_GAP} when the stub's continuation is held by an ended generation in a state
+     * no new generation can take over ({@link RecoveryStep#GAP}).
+     */
+    public static final String HELD_BY_ENDED_GENERATION = "held_by_ended_generation";
+
+    /** The states of a continuation that a new generation's lease takes over from an ended holder. */
+    private static final Set<String> HANDOVER_STATES = Set.of("task.offered", "entity.active", "envelope.task.active",
+            "consulting");
+
+    /**
+     * Reads what the stub made of a lost task before the driver starts a generation for it ({@link #recovery(List,
+     * String, String, Function)}), and logs it as {@value #RECOVERY}. The driver starts no generation for a task the
+     * stub already continued or offered again and a generation holds or closed: the R3 smoke attempt's run
+     * {@code cc787dd3} (fault {@link Fault#RESUMED_EXIT}) resumed the session again on the task the stub had already
+     * closed {@code lost} and continued at the resumed process's exit; that generation was refused
+     * {@code job_scope_mismatch} on the closed task, took the continuation over {@code pm_wait}, and left the closed
+     * task offered, so the run timed out.
+     * <p>
+     * A continuation held by a generation that has ended is not taken ({@link #recovery(List, String, String, String,
+     * Predicate, Function)}): before 2026-10-25 it was, and in four {@link Fault#CALL_CUT} runs of R3 on Antigravity
+     * (invocation {@code R3-2026-10-25T120818373435Z-ddbd64e3}, runs {@code 44b3bfbc}, {@code d9f539db},
+     * {@code 9397f2df}, {@code 4e0461ad}) the stub offered the continuation at the loss to the lost generation itself,
+     * which still held a {@code pm_wait} it had called again without acknowledging the answer; the driver ended that
+     * generation in the same millisecond, started none, and the continuation stayed leased to it until the run limit.
+     * Such a holder is logged with {@code holder_ended: true}; a {@link RecoveryStep#GAP} is logged as
+     * {@value #CONTINUATION_GAP} with its reason {@value #HELD_BY_ENDED_GENERATION}.
+     *
+     * @param worker     the lost generation
+     * @param decisionId the decision whose answer the task waited for
+     * @param taskId     the lost task
+     * @return the step
+     * @throws IOException if the event log cannot be read
+     */
+    public Recovery recovery(Worker worker, String decisionId, String taskId) throws IOException {
+        var lost = worker.id() + "#" + worker.generation();
+        var recovery = recovery(jsonLinesSoFar(stub.events()), decisionId, taskId, lost,
+                holder -> holder.equals(lost) || ended(holder), stub::state);
+        var fields = identity(worker);
+        fields.put(DECISION, decisionId);
+        fields.put("step", recovery.step().name().toLowerCase(Locale.ROOT));
+        fields.put(TASK, recovery.task());
+        fields.put("state", recovery.state());
+        fields.put("holder", recovery.holder());
+        if (recovery.holderEnded()) {
+            fields.put("holder_ended", true);
+        }
+        stub.event(RECOVERY, fields);
+        if (recovery.step() == RecoveryStep.GAP) {
+            var gap = identity(worker);
+            gap.put(DECISION, decisionId);
+            gap.put("reason", HELD_BY_ENDED_GENERATION);
+            gap.put(TASK, recovery.task());
+            gap.put("state", recovery.state());
+            gap.put("holder", recovery.holder());
+            stub.event(CONTINUATION_GAP, gap);
+        }
+        return recovery;
+    }
+
+    /**
+     * @param holder a generation, {@code <worker>#<generation>}
+     * @return whether it is a generation of this driver or of a driver of the same stub whose process has exited, or
+     *         that the launch of a newer generation ended
+     */
+    private boolean ended(String holder) {
+        return endedOnLaunch.contains(holder) || family.stream().anyMatch(worker -> holder.equals(worker.id() + "#"
+                + worker.generation()) && !worker.process().isAlive());
+    }
+
+    /**
+     * The rule of {@link #recovery(Worker, String, String)} with only the lost generation counted as ended
+     * ({@link #recovery(List, String, String, String, Predicate, Function)}).
+     *
+     * @param events     the stub log
+     * @param decisionId the decision whose answer the task waited for
+     * @param taskId     the lost task
+     * @param lost       the lost generation, {@code <worker>#<generation>}
+     * @param state      the stub's state of a task
+     * @return the step
+     */
+    static Recovery recovery(List<JsonNode> events, String decisionId, String taskId, String lost,
+            Function<String, Optional<String>> state) {
+        return recovery(events, decisionId, taskId, lost, lost::equals, state);
+    }
+
+    /**
+     * The rule of {@link #recovery(Worker, String, String)} over a stub log and the stub's task states. A decision the
+     * stub continued in a new task ({@code continued}) gives {@link RecoveryStep#CONTINUE} while that task is queued;
+     * once it is not, the generation the stub last offered or delivered it to decides: a holder that still runs, or a
+     * closed task, gives {@link RecoveryStep#TAKEN} as before; a holder that has ended (the lost generation, or one whose
+     * process is gone) gives {@link RecoveryStep#CONTINUE} while the task is offered, active or consulting, which a new
+     * generation's lease takes over by fencing the ended one, and {@link RecoveryStep#GAP} in any other open state.
+     * Without a continuation a lost task that is resumable gives {@link RecoveryStep#RESUME}, one the stub offered or
+     * delivered again to another generation than the lost one, and that is not queued, gives {@link RecoveryStep#TAKEN},
+     * any other {@link RecoveryStep#WAIT}, as before. {@link Recovery#holderEnded()} is set only where an ended holder
+     * decided the step.
+     *
+     * @param events     the stub log
+     * @param decisionId the decision whose answer the task waited for
+     * @param taskId     the lost task
+     * @param lost       the lost generation, {@code <worker>#<generation>}
+     * @param ended      whether a generation ({@code <worker>#<generation>}) has ended; true at least for the lost one
+     * @param state      the stub's state of a task
+     * @return the step
+     */
+    static Recovery recovery(List<JsonNode> events, String decisionId, String taskId, String lost,
+            Predicate<String> ended, Function<String, Optional<String>> state) {
+        var continued = first(events, "continued", event -> decisionId.equals(event.path(DECISION).asText()));
+        if (continued.isPresent()) {
+            var task = continued.get().path(TASK).asText();
+            var current = state.apply(task).orElse("");
+            var holder = holder(events, task);
+            var entity = continued.get().path("entity").asText();
+            if ("task.queued".equals(current)) {
+                return new Recovery(RecoveryStep.CONTINUE, task, entity, current, holder, false);
+            }
+            if (holder.isEmpty() || closed(current) || !ended.test(holder)) {
+                return new Recovery(RecoveryStep.TAKEN, task, entity, current, holder, false);
+            }
+            var step = HANDOVER_STATES.contains(current) ? RecoveryStep.CONTINUE : RecoveryStep.GAP;
+            return new Recovery(step, task, entity, current, holder, true);
+        }
+        var current = state.apply(taskId).orElse("");
+        var holder = holder(events, taskId);
+        RecoveryStep step;
+        if ("task.resumable".equals(current)) {
+            step = RecoveryStep.RESUME;
+        } else if (!current.isEmpty() && !"task.queued".equals(current) && !holder.isEmpty()
+                && !holder.equals(lost)) {
+            step = RecoveryStep.TAKEN;
+        } else {
+            step = RecoveryStep.WAIT;
+        }
+        return new Recovery(step, taskId, "", current, holder, false);
+    }
+
+    /**
+     * @param state a task's state in the stub
+     * @return whether it is the state of a closed task: completed, or ended {@code asked}, {@code infeasible} or
+     *         {@code lost}
+     */
+    private static boolean closed(String state) {
+        return state.endsWith(".completed") || Set.of("task.asked", "task.infeasible", "task.lost").contains(state);
+    }
+
+    private static String holder(List<JsonNode> events, String taskId) {
+        String holder = "";
+        for (var event : events) {
+            var name = event.path(EVENT).asText();
+            if (taskId.equals(event.path(TASK).asText()) && ("offered".equals(name)
+                    || "answer_delivered".equals(name)) && event.has(WORKER)) {
+                holder = event.path(WORKER).asText() + "#" + event.path(GENERATION).asInt();
+            }
+        }
+        return holder;
+    }
+
+    /**
+     * Waits until the decision a worker asked is answered, as the loop takes the answer: the next decision delivered
+     * to the operator is held and answered on the operator's behalf ({@code decision_seen}, {@code answer_sent});
+     * a decision its quorum decided ({@code adjudicated} {@code decided}, answered with {@code channel: quorum}) is
+     * taken as it is, without waiting for an operator, and logged as {@value #QUORUM_ANSWER_TAKEN}. Either way the
+     * caller continues the task the same way afterwards (hold, resume, or the fallback task with
+     * {@code facts.answers}), and starts no generation for a continuation the asking worker already took and closed
+     * over its held {@code pm_wait} ({@link #continuedByHold(String)}). A quorum that escalates (a disagreement, a confidence below the score, a missing vote)
+     * delivers the decision to the operator, who answers it. The wait ends early, empty, when a worker of this driver
+     * or of a sibling failed to launch, ended early, or met a quota error ({@link #awaitEventWhileLaunched}).
+     *
+     * @param decisionId the decision the worker asked
+     * @param timeout    how long to wait for the answer
+     * @param hold       how long the operator takes to answer
+     * @param reply      the operator's answer per part, from the decision's snapshot
+     * @return the decision answered (the one delivered to the operator whose answer the stub recorded, or the asked
+     *         one decided by its quorum), or empty when none was answered in time or the run ended; an answer the stub
+     *         refused answers nothing ({@link #answeredDecision})
+     * @throws IOException          if the event log or a worker's output cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public Optional<String> awaitAnswer(String decisionId, Duration timeout, Duration hold,
+            Function<ObjectNode, List<PartAnswer>> reply) throws IOException, InterruptedException {
+        var deadline = System.currentTimeMillis() + timeout.toMillis();
+        while (true) {
+            var operators = answerNext(POLL, hold, reply);
+            if (operators.isPresent()) {
+                return operators;
+            }
+            var answered = stub.decision(decisionId).filter(decision -> decision.path("answered").asBoolean());
+            if (answered.isPresent()) {
+                stub.event(QUORUM_ANSWER_TAKEN, Map.of("decision", decisionId));
+                return Optional.of(decisionId);
+            }
+            if (quotaError().isPresent() || launchFailure().isPresent() || earlyExit().isPresent()
+                    || System.currentTimeMillis() >= deadline) {
+                return Optional.empty();
+            }
+        }
+    }
+
+    /** The event the driver logs when it takes a decision its quorum answered, without an operator. */
+    static final String QUORUM_ANSWER_TAKEN = "quorum_answer_taken";
+
+    /**
+     * The event the driver logs, and the field of a run record, when the continuation of an answered decision was
+     * taken and closed by the asking worker over its held {@code pm_wait} before the driver would start a generation
+     * for it ({@link #continuedByHold(String)}): no new generation is started then.
+     */
+    public static final String CONTINUED_BY_HOLD = "continued_by_hold";
+
+    /**
+     * A continuation made by hold within the decision: the stub continued the answered decision in a new task, offered
+     * that task over {@code pm_wait} to a generation of the asking worker that still held it, and that generation
+     * closed it before the driver started a generation for it. It happens in a vote run, where the quorum decides
+     * while the asker still holds {@code pm_wait} (established on the second Q6 attempt, run
+     * {@code Q6-claude-fresh-question_apply-answer_he-0-000-4efb702b}: the driver then started generation 2 on the
+     * closed task, which the stub refused, and the run waited out its limit). In the operator path the asker has
+     * exited before the decision is answered, so the continuation is still queued.
+     *
+     * @param decision    the answered decision
+     * @param task        the continuing task
+     * @param worker      the asking worker
+     * @param generation  the generation that took and closed it: the one that asked or a later one
+     * @param outcome     the outcome it closed with ({@code submitted}, or {@code asked} for a further question)
+     * @param closedAt    when it closed (epoch milliseconds)
+     * @param submittedAt when that generation submitted it (epoch milliseconds), {@code -1} without a submission
+     * @param channel     the channel the decision was answered through ({@code quorum} or {@code cli}), empty when
+     *                    the log does not say
+     */
+    public record HeldContinuation(String decision, String task, String worker, int generation, String outcome,
+    long closedAt, long submittedAt, String channel) {
+    }
+
+    /**
+     * Whether the continuation of an answered decision was made by hold ({@link HeldContinuation}), read from the
+     * stub's event log, and if so logs it as {@value #CONTINUED_BY_HOLD}. The caller starts no new generation for such
+     * a continuation: the asking worker has continued and closed it.
+     *
+     * @param decisionId the answered decision
+     * @return the continuation made by hold, empty when the stub did not continue the decision in a new task or the
+     *         asking worker did not take and close that task over {@code pm_wait}
+     * @throws IOException if the event log cannot be read
+     */
+    public Optional<HeldContinuation> continuedByHold(String decisionId) throws IOException {
+        var held = heldContinuation(jsonLinesSoFar(stub.events()), decisionId);
+        if (held.isPresent()) {
+            var value = held.get();
+            var fields = new LinkedHashMap<String, Object>();
+            fields.put(DECISION, value.decision());
+            fields.put(TASK, value.task());
+            fields.put(WORKER, value.worker());
+            fields.put(GENERATION, value.generation());
+            fields.put("outcome", value.outcome());
+            fields.put("closed_at", value.closedAt());
+            fields.put("submitted_at", value.submittedAt());
+            fields.put("channel", value.channel());
+            stub.event(CONTINUED_BY_HOLD, fields);
+        }
+        return held;
+    }
+
+    /**
+     * The rule of {@link #continuedByHold(String)} over an event log: the decision was asked by a generation of a
+     * worker ({@value #ASKED}), the stub continued it in a new task ({@code continued}), that task was offered over
+     * {@code pm_wait} ({@code offered} without {@code at_spawn}) to a generation of the asking worker no older than
+     * the one that asked, and that generation closed it ({@code closed}, whatever its outcome).
+     *
+     * @param events     the stub's event log
+     * @param decisionId the answered decision
+     * @return the continuation made by hold, empty otherwise
+     */
+    static Optional<HeldContinuation> heldContinuation(List<JsonNode> events, String decisionId) {
+        var asked = first(events, ASKED, event -> decisionId.equals(event.path(DECISION).asText()));
+        var continued = first(events, "continued", event -> decisionId.equals(event.path(DECISION).asText()));
+        if (asked.isEmpty() || continued.isEmpty()) {
+            return Optional.empty();
+        }
+        var worker = asked.get().path(WORKER).asText();
+        var askedIn = asked.get().path(GENERATION).asInt();
+        var task = continued.get().path(TASK).asText();
+        var closed = first(events, "closed", event -> task.equals(event.path(TASK).asText())
+                && worker.equals(event.path(WORKER).asText()) && event.path(GENERATION).asInt() >= askedIn);
+        if (closed.isEmpty()) {
+            return Optional.empty();
+        }
+        var generation = closed.get().path(GENERATION).asInt();
+        var overWait = first(events, "offered", event -> task.equals(event.path(TASK).asText())
+                && worker.equals(event.path(WORKER).asText()) && event.path(GENERATION).asInt() == generation
+                && !event.path("at_spawn").asBoolean());
+        if (overWait.isEmpty()) {
+            return Optional.empty();
+        }
+        var submittedAt = first(events, "submitted", event -> task.equals(event.path(TASK).asText())
+                && worker.equals(event.path(WORKER).asText()) && event.path(GENERATION).asInt() == generation)
+                .map(event -> event.path("at").asLong()).orElse(-1L);
+        var channel = first(events, "answer_recorded", event -> decisionId.equals(event.path(DECISION).asText()))
+                .map(event -> event.path("channel").asText()).orElse("");
+        return Optional.of(new HeldContinuation(decisionId, task, worker, generation,
+                closed.get().path("outcome").asText(), closed.get().path("at").asLong(), submittedAt, channel));
+    }
+
+    /**
+     * The event the driver logs, and the field of a run record, when a warm asker stopped after its ask by the exit of
+     * its process instead of a call of {@code pm_wait} ({@link #awaitWarmStop}). Before 2026-10-25 the driver waited
+     * for that call up to the host's silence limit and answered only then (run
+     * {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04}: the asker ended its turn 4 s after the ask, and
+     * the decision was seen 270 s after it, at Claude Code's silence limit of 240 s plus 30 s).
+     */
+    public static final String WARM_ASKER_EXITED = "warm_asker_exited";
+
+    /**
+     * The event the driver logs, and the field of a run record, when the continuation of a warm asker's decision was not
+     * taken over its {@code pm_wait} ({@link #awaitWarmContinuation}): its value is the step, in lower case.
+     */
+    public static final String WARM_CONTINUATION = "warm_continuation";
+
+    /**
+     * The field of a run record whose continuation got no worker: its value names the reason, {@code not_taken} (the
+     * warm asker still ran and did not take the queued continuation within its silence limit) or
+     * {@code not_continued} (the stub did not continue the answered decision in a new task), or
+     * {@value #HELD_BY_ENDED_GENERATION} (after a loss, the stub's continuation is held by a generation that has ended,
+     * in a state no new generation can take over: {@link RecoveryStep#GAP}, which the driver also logs as an event of
+     * this name). Without it, such a run waited out its run limit and was recorded as timed out only.
+     */
+    public static final String CONTINUATION_GAP = "continuation_gap";
+
+    /** How a warm asker stopped after its ask ({@link #awaitWarmStop}). */
+    public enum WarmStop {
+        /** It called {@code pm_wait} at or after the ask. */
+        WAITED,
+        /** Its process exited without a call of {@code pm_wait} after the ask. */
+        EXITED,
+        /** It still ran without a call of {@code pm_wait} at the end of the wait. */
+        NONE
+    }
+
+    /**
+     * Waits until a warm asker stopped after its ask, as the driver waits before it answers: its generation's
+     * {@code wait_started} at or after the ask, or the exit of its process. The exit ends the wait at once and is
+     * logged as {@value #WARM_ASKER_EXITED} with the milliseconds after the ask and the exit code; before 2026-10-25
+     * only the call ended the wait, so an asker that exited was waited for up to the given time. A {@code pm_wait}
+     * ends the wait as before and logs nothing.
+     *
+     * @param asker   the warm asker
+     * @param askedAt when it asked (epoch milliseconds, the {@code asked} event)
+     * @param within  how long to wait
+     * @return how it stopped
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public WarmStop awaitWarmStop(Worker asker, long askedAt, Duration within) throws IOException, InterruptedException {
+        var until = System.currentTimeMillis() + within.toMillis();
+        while (true) {
+            var alive = asker.process().isAlive();
+            var waited = jsonLinesSoFar(stub.events()).stream()
+                    .anyMatch(event -> "wait_started".equals(event.path(EVENT).asText())
+                            && event.path("at").asLong() >= askedAt && matches(event, asker));
+            if (waited) {
+                return WarmStop.WAITED;
+            }
+            if (!alive) {
+                var fields = identity(asker);
+                fields.put("after_ask_ms", System.currentTimeMillis() - askedAt);
+                fields.put("exit", asker.process().exitValue());
+                stub.event(WARM_ASKER_EXITED, fields);
+                return WarmStop.EXITED;
+            }
+            if (System.currentTimeMillis() >= until) {
+                return WarmStop.NONE;
+            }
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls a worker process and the stub log, no event to await
+        }
+    }
+
+    /** What became of the continuation of a warm asker's decision ({@link #awaitWarmContinuation}). */
+    public enum WarmStep {
+        /** Not decided yet: the stub has not continued the decision, or its continuation is queued and the asker runs. */
+        PENDING,
+        /** The continuation is no longer queued: a generation took it (over the asker's {@code pm_wait}, as before). */
+        TAKEN,
+        /** The continuation is queued and the asker's process has exited: nobody will take it unless one is started. */
+        ASKER_EXITED,
+        /** The continuation stayed queued while the asker ran, up to the end of the wait. */
+        NOT_TAKEN,
+        /** The stub did not continue the decision in a new task up to the end of the wait. */
+        NOT_CONTINUED
+    }
+
+    /**
+     * The continuation of a warm asker's decision.
+     *
+     * @param step   what became of it
+     * @param task   the continuing task, empty when the stub did not continue the decision
+     * @param entity the entity of that task, empty when none
+     * @param state  that task's state in the stub, empty when none
+     */
+    public record WarmContinuation(WarmStep step, String task, String entity, String state) {
+    }
+
+    /**
+     * Waits, after a warm asker's decision was answered, until its continuation is taken or nobody can take it: the
+     * warm form expects the asker to take the stub's new task over its {@code pm_wait}. A continuation that is no longer
+     * queued gives {@link WarmStep#TAKEN} and logs nothing, the path of every warm run before 2026-10-25 that kept its
+     * asker; a queued one whose asker's process has exited gives {@link WarmStep#ASKER_EXITED} at once, and the caller
+     * starts a generation leased on it (before 2026-10-25 the driver started none, and the run waited out its run
+     * limit: run {@code Q4-claude-warm-question_apply-answer_he-0-000-2ae81f04}). At the end of the wait a continuation
+     * still queued gives {@link WarmStep#NOT_TAKEN}, a decision not continued {@link WarmStep#NOT_CONTINUED}. Every
+     * step but {@link WarmStep#TAKEN} is logged as {@value #WARM_CONTINUATION}.
+     *
+     * @param asker      the warm asker
+     * @param decisionId the answered decision
+     * @param within     how long to wait
+     * @return the continuation
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public WarmContinuation awaitWarmContinuation(Worker asker, String decisionId, Duration within)
+            throws IOException, InterruptedException {
+        var until = System.currentTimeMillis() + within.toMillis();
+        while (true) {
+            var alive = asker.process().isAlive();
+            var continuation = warmContinuation(jsonLinesSoFar(stub.events()), decisionId, stub::state,
+                    alive);
+            if (continuation.step() == WarmStep.PENDING && System.currentTimeMillis() < until) {
+                Thread.sleep(POLL); // NOSONAR java:S2925 - polls a worker process and the stub log, no event to await
+                continue;
+            }
+            if (continuation.step() == WarmStep.PENDING) {
+                continuation = new WarmContinuation(continuation.task().isEmpty() ? WarmStep.NOT_CONTINUED
+                        : WarmStep.NOT_TAKEN, continuation.task(), continuation.entity(), continuation.state());
+            }
+            if (continuation.step() != WarmStep.TAKEN) {
+                var fields = identity(asker);
+                fields.put(DECISION, decisionId);
+                fields.put("step", continuation.step().name().toLowerCase(Locale.ROOT));
+                fields.put(TASK, continuation.task());
+                fields.put("state", continuation.state());
+                fields.put("asker_alive", alive);
+                stub.event(WARM_CONTINUATION, fields);
+            }
+            return continuation;
+        }
+    }
+
+    /**
+     * The rule of {@link #awaitWarmContinuation} over a stub log and the stub's task states: without a
+     * {@code continued} event of the decision {@link WarmStep#PENDING}; with one, {@link WarmStep#TAKEN} once its task
+     * is not queued, {@link WarmStep#ASKER_EXITED} while it is queued and the asker's process has exited, else
+     * {@link WarmStep#PENDING}.
+     *
+     * @param events     the stub log
+     * @param decisionId the answered decision
+     * @param state      the stub's state of a task
+     * @param askerAlive whether the asker's process still runs
+     * @return the continuation
+     */
+    static WarmContinuation warmContinuation(List<JsonNode> events, String decisionId,
+            Function<String, Optional<String>> state, boolean askerAlive) {
+        var continued = first(events, "continued", event -> decisionId.equals(event.path(DECISION).asText()));
+        if (continued.isEmpty()) {
+            return new WarmContinuation(WarmStep.PENDING, "", "", "");
+        }
+        var task = continued.get().path(TASK).asText();
+        var entity = continued.get().path("entity").asText();
+        var current = state.apply(task).orElse("");
+        if (!"task.queued".equals(current)) {
+            return new WarmContinuation(WarmStep.TAKEN, task, entity, current);
+        }
+        return new WarmContinuation(askerAlive ? WarmStep.PENDING : WarmStep.ASKER_EXITED, task, entity, current);
+    }
+
+    private static Optional<JsonNode> first(List<JsonNode> events, String name, Predicate<JsonNode> match) {
+        return events.stream().filter(event -> name.equals(event.path(EVENT).asText())).filter(match).findFirst();
+    }
+
+    /**
+     * Takes the next decision delivered to the operator, holds it, and answers it; the operator's path of
+     * {@link #awaitAnswer}.
+     *
+     * @param timeout how long to wait for a decision
+     * @param hold    how long the operator takes to answer
+     * @param reply   the answer per part, from the decision's snapshot
+     * @return the decision answered, or empty when none arrived in time or the stub refused the answer
+     *         ({@link #answeredDecision})
+     * @throws InterruptedException if interrupted
+     */
+    Optional<String> answerNext(Duration timeout, Duration hold, Function<ObjectNode, List<PartAnswer>> reply)
+            throws InterruptedException {
+        var id = stub.operatorDecisions().poll(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        if (id == null) {
+            return Optional.empty();
+        }
+        stub.event("decision_seen", Map.of("decision", id, "hold_ms", hold.toMillis()));
+        Thread.sleep(hold); // NOSONAR java:S2925 - the sleep is the simulated operator's hold
+        var decision = stub.decision(id).orElseThrow();
+        var result = stub.answer(id, decision.path("revision").asInt(), reply.apply(decision));
+        stub.event("answer_sent", Map.of("decision", id, "result", result.name()));
+        return answeredDecision(id, result);
+    }
+
+    /**
+     * The rule of {@link #answerNext}: a decision counts as answered only when the stub recorded the answer
+     * ({@link QuestionStub.AnswerResult#ANSWERED}); a refused answer ({@code INVALID_ANSWER}, {@code CONFLICT},
+     * {@code ALREADY_ANSWERED}) leaves it unanswered, so {@link #awaitAnswer} goes on waiting and ends empty at its
+     * deadline unless the decision was answered otherwise.
+     *
+     * @param decisionId the decision the operator answered
+     * @param result     the stub's outcome of that answer
+     * @return the decision when the stub recorded the answer, else empty
+     */
+    static Optional<String> answeredDecision(String decisionId, QuestionStub.AnswerResult result) {
+        return result == QuestionStub.AnswerResult.ANSWERED ? Optional.of(decisionId) : Optional.empty();
+    }
+
+    /**
+     * Supervises the acknowledgement of an answer delivered to a worker, as the supervisor does: a missing
+     * acknowledgement within the host's deadline (by silence where the acknowledgement is informational) ends the
+     * worker as lost, and the stub releases its task. The loss is logged as {@code lost_detected} before the stub
+     * releases the task, so a continuation the release makes follows it in the log (before 2026-10-23 the release came
+     * first, and in run {@code d477db38} of the R3 smoke attempt the {@code continued} event preceded
+     * {@code lost_detected} by a millisecond). The event names who saw the loss first ({@code first_by}): the
+     * {@code driver} at the deadline, or the {@code stub}, which had already released the generation's task on its
+     * own, at the process's exit ({@code stub_reason}, {@code stub_event}, {@code stub_after_ms} after the delivery):
+     * the stub log then shows a reaction earlier than the deadline. On the stub of R3, which does not lose a worker at
+     * its exit ({@link QuestionStub.Settings#loseOnExit()} false), the task stays leased until this detection, which
+     * is then always the driver's. There an answer that never reached the generation, because its process exited
+     * without a held {@code pm_wait}, cannot be acknowledged or missed: once the delivery wait has passed with the
+     * process gone, the driver logs {@value #ANSWER_UNDELIVERED} and ends the generation as lost, so its task continues
+     * as the stub's loss at the exit continued it before, and no {@value #LOST_DETECTED} is logged.
+     *
+     * @param worker         the worker
+     * @param deliveryWithin how long to wait for the delivery of the answer
+     * @return {@code true} if the worker acknowledged in time
+     * @throws IOException          if the event log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public boolean superviseAnswer(Worker worker, Duration deliveryWithin) throws IOException, InterruptedException {
+        var delivered = awaitEvent(event -> "answer_delivered".equals(event.path(EVENT).asText())
+                && matches(event, worker), System.currentTimeMillis() + deliveryWithin.toMillis());
+        if (delivered.isEmpty()) {
+            if (!stub.settings().loseOnExit() && !worker.process().isAlive()) {
+                var fields = identity(worker);
+                fields.put("delivery_wait_ms", deliveryWithin.toMillis());
+                stub.event(ANSWER_UNDELIVERED, fields);
+                stub.lost(worker.id(), worker.generation(), ANSWER_UNDELIVERED);
+            }
+            return false;
+        }
+        var deliveredAt = delivered.get().path("at").asLong();
+        var host = worker.host();
+        var acknowledged = awaitEvent(event -> "acknowledged".equals(event.path(EVENT).asText())
+                        && "answer".equals(event.path("kind").asText()) && matches(event, worker),
+                deliveredAt + host.ackDeadline().toMillis());
+        if (acknowledged.isPresent()) {
+            return true;
+        }
+        var by = "answer_ack_missing";
+        if (host.ackInformational()) {
+            by = "silence";
+            if (!silentFor(worker, host.silenceLimit())) {
+                return true;
+            }
+        }
+        var fields = identity(worker);
+        fields.put("by", by);
+        fields.put("after_ms", System.currentTimeMillis() - deliveredAt);
+        var stubFirst = stubLoss(jsonLinesSoFar(stub.events()), worker.id(), worker.generation(),
+                deliveredAt);
+        fields.put("first_by", stubFirst.isPresent() ? "stub" : "driver");
+        stubFirst.ifPresent(event -> {
+            fields.put("stub_event", event.path(EVENT).asText());
+            fields.put("stub_reason", event.path("reason").asText());
+            fields.put("stub_after_ms", event.path("at").asLong() - deliveredAt);
+        });
+        stub.event(LOST_DETECTED, fields);
+        stub.lost(worker.id(), worker.generation(), by);
+        terminate(worker);
+        return false;
+    }
+
+    /** The event the driver logs when it detects a lost worker ({@link #superviseAnswer}). */
+    public static final String LOST_DETECTED = "lost_detected";
+
+    /**
+     * The event the driver logs, on a stub that does not lose a worker at its exit, when the answer never reached a
+     * generation whose process exited ({@link #superviseAnswer}); also the reason of the loss it then ends the
+     * generation with. It is no detection.
+     */
+    public static final String ANSWER_UNDELIVERED = "answer_undelivered";
+
+    /**
+     * @param events     the stub log
+     * @param worker     a worker
+     * @param generation its generation
+     * @param since      the delivery of its answer (epoch milliseconds)
+     * @return the stub's own release of a task of the generation at or after {@code since} ({@code lost},
+     *         {@code resumable} or {@code released} with a reason, at its process's exit or fence), empty when none
+     */
+    static Optional<JsonNode> stubLoss(List<JsonNode> events, String worker, int generation, long since) {
+        return events.stream().filter(event -> Set.of("lost", "resumable", "released")
+                .contains(event.path(EVENT).asText()) && event.has("reason") && matches(event, worker, generation)
+                && event.path("at").asLong() >= since).findFirst();
+    }
+
+    /**
+     * @param worker a worker
+     * @return the SHA-256 over the paths and contents of its worker directory, without what the harness and the stub
+     *         write there themselves: the {@code data/} directory, every dot-prefixed path (the harnesses keep their
+     *         own state in {@code .claude/}, {@code .agents/} and similar, which the driver cannot list ahead of
+     *         time), {@code *mcp-config.json} and {@code opencode.json}. A change after the ask to any other file is a
+     *         change of the worktree. The exclusion is deliberately wide: a worker's change to a dot-prefixed file of
+     *         the fixture itself (for example a {@code .gitignore}) is not seen, which the loop tasks do not need
+     *         because they change {@code solution.py}.
+     * @throws IOException if a file cannot be read
+     */
+    public String worktreeDigest(Worker worker) throws IOException {
+        try (Stream<Path> walk = Files.walk(worker.directory())) {
+            var digest = MessageDigest.getInstance("SHA-256");
+            for (var path : walk.filter(Files::isRegularFile).sorted().toList()) {
+                var relativePath = worker.directory().relativize(path);
+                var relative = relativePath.toString();
+                if (relativePath.getNameCount() > 1 && "data".equals(relativePath.getName(0).toString())
+                        || relative.startsWith(".") || relative.endsWith("mcp-config.json")
+                        || "opencode.json".equals(relative)) {
+                    continue;
+                }
+                digest.update(relative.getBytes(StandardCharsets.UTF_8));
+                digest.update(Files.readAllBytes(path));
+            }
+            var value = HexFormat.of().formatHex(digest.digest());
+            var fields = identity(worker);
+            fields.put("digest", value);
+            stub.event("worktree_digest", fields);
+            return value;
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is missing", e);
+        }
+    }
+
+    /**
+     * Waits for an event of the stub's log.
+     *
+     * @param match      the event
+     * @param untilMillis the deadline (epoch milliseconds)
+     * @return the first matching event
+     * @throws IOException          if the log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public Optional<JsonNode> awaitEvent(Predicate<JsonNode> match, long untilMillis)
+            throws IOException, InterruptedException {
+        while (true) {
+            for (var event : jsonLinesSoFar(stub.events())) {
+                if (match.test(event)) {
+                    return Optional.of(event);
+                }
+            }
+            if (System.currentTimeMillis() >= untilMillis) {
+                return Optional.empty();
+            }
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
+        }
+    }
+
+    /**
+     * Waits for an event of the stub's log as {@link #awaitEvent(Predicate, long)} does, but ends the wait at once
+     * when a worker of this driver or of a sibling failed to launch ({@link #launchFailure()}), ended early
+     * ({@link #earlyExit()}) or met a quota error of its harness ({@link #quotaError()}), instead of at the deadline.
+     *
+     * @param match       the event
+     * @param untilMillis the deadline (epoch milliseconds)
+     * @return the first matching event, empty at the deadline, on a launch failure, an early exit or a quota error
+     * @throws IOException          if the log cannot be read
+     * @throws InterruptedException if interrupted
+     */
+    public Optional<JsonNode> awaitEventWhileLaunched(Predicate<JsonNode> match, long untilMillis)
+            throws IOException, InterruptedException {
+        while (true) {
+            var found = awaitEvent(match, 0);
+            if (found.isPresent() || quotaError().isPresent() || launchFailure().isPresent()
+                    || earlyExit().isPresent() || System.currentTimeMillis() >= untilMillis) {
+                return found;
+            }
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log and the workers, no event to await
+        }
+    }
+
+    /**
+     * @return the first worker of this driver or of its siblings whose harness met a quota error
+     *         ({@link #quotaError(Worker)}), empty when none did
+     * @throws IOException if a worker's output or {@code stderr} cannot be read
+     */
+    public Optional<QuotaError> quotaError() throws IOException {
+        for (var worker : workers) {
+            var quota = quotaError(worker);
+            if (quota.isPresent()) {
+                return quota;
+            }
+        }
+        for (var sibling : siblings) {
+            var quota = sibling.quotaError();
+            if (quota.isPresent()) {
+                return quota;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a worker generation's harness answered with a quota or limit error, by the rule the evaluation reads
+     * ({@value #HARNESS_ERROR_OUTPUT}, {@link #quotaDetail(String, List)}): a line of its
+     * own {@code stderr} (not one of {@code pm-exec}'s) or the error text of an error line of the harness in its
+     * structured output matches {@link #QUOTA_PATTERN}, whether or not it still runs and whether or not
+     * it called the stub. A tool's input or result, the assistant's text or a file the worker read never ends the run:
+     * before 2026-10-23 every output line was matched, and two R4 large-work runs were ended because the worker read a
+     * repository file that contains the word. Else a refusing {@code rate_limit_event} of its structured output is
+     * one ({@value #RATE_LIMIT_EVENT}, {@link #rateLimitRefusal(List)}): Claude Code's usage limit refuses without the
+     * word. The first detection is logged as the event {@code quota_error} with the rule and, for a refusal, the
+     * event's status, {@code rateLimitType} and {@code resetsAt}.
+     *
+     * @param worker a worker
+     * @return its quota error, empty when none
+     * @throws IOException if its output or {@code stderr} cannot be read
+     */
+    Optional<QuotaError> quotaError(Worker worker) throws IOException {
+        var key = worker.id() + "#" + worker.generation();
+        var known = quotaErrors.get(key);
+        if (known != null) {
+            return Optional.of(known);
+        }
+        var outputs = jsonLinesSoFar(worker.output());
+        var quota = quotaError(worker.id(), worker.generation(), stderr(worker), outputs);
+        if (quota.isEmpty()) {
+            return Optional.empty();
+        }
+        if (quotaErrors.putIfAbsent(key, quota.get()) == null) {
+            var fields = identity(worker);
+            fields.putAll(quotaFields(quota.get()));
+            stub.event(QUOTA_ERROR, fields);
+        }
+        return Optional.of(quotaErrors.get(key));
+    }
+
+    /**
+     * The quota error of one generation by both rules: its own error output first ({@value #HARNESS_ERROR_OUTPUT}),
+     * else a refusing {@code rate_limit_event} ({@value #RATE_LIMIT_EVENT}).
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param stderr     what it wrote to {@code stderr}
+     * @param outputs    its arrival-stamped output lines ({@code at}, {@code line})
+     * @return its quota error, empty when none
+     */
+    public static Optional<QuotaError> quotaError(String worker, int generation, String stderr,
+            List<JsonNode> outputs) {
+        var detail = quotaDetail(stderr, outputs);
+        if (detail.isPresent()) {
+            return Optional.of(new QuotaError(worker, generation, detail.get(), HARNESS_ERROR_OUTPUT, null));
+        }
+        return rateLimitRefusal(outputs).map(refusal -> new QuotaError(worker, generation, refusal.line(),
+                RATE_LIMIT_EVENT, refusal));
+    }
+
+    /**
+     * @param quota a quota error
+     * @return the fields its event and its run record carry: {@code detail}, {@value #QUOTA_RULE} and, for a refusal
+     *         ({@value #RATE_LIMIT_EVENT}), {@value #RATE_LIMIT_STATUS}, {@value #RATE_LIMIT_TYPE} and
+     *         {@value #RESETS_AT}
+     */
+    public static Map<String, String> quotaFields(QuotaError quota) {
+        var fields = new LinkedHashMap<String, String>();
+        fields.put("detail", quota.detail());
+        fields.put(QUOTA_RULE, quota.rule());
+        if (quota.usageLimit()) {
+            fields.put(RATE_LIMIT_STATUS, quota.refusal().status());
+            fields.put(RATE_LIMIT_TYPE, quota.refusal().rateLimitType());
+            fields.put(RESETS_AT, quota.refusal().resetsAt());
+        }
+        return fields;
+    }
+
+    /**
+     * The refusal by the account's usage limit in a worker's structured output, the rule {@value #RATE_LIMIT_EVENT}:
+     * the first {@code rate_limit_event} line whose {@code rate_limit_info.status} is neither {@code allowed} nor
+     * {@code allowed_warning}. Every {@code rate_limit_event} of the parallel-limit runs had {@code allowed_warning};
+     * any other status refuses. An event without a textual {@code rate_limit_info.status} names no status and is no
+     * refusal: a refusal stops the invocation, so it is read only where the event states it.
+     *
+     * @param outputs the arrival-stamped output lines ({@code at}, {@code line})
+     * @return the first refusing event, empty when none
+     */
+    public static Optional<RateLimitRefusal> rateLimitRefusal(List<JsonNode> outputs) {
+        for (var output : outputs) {
+            var text = output.path("line").asText();
+            JsonNode line;
+            try {
+                line = QuestionStub.JSON.readTree(text);
+            } catch (JsonProcessingException _) {
+                continue;
+            }
+            if (line == null || !RATE_LIMIT_EVENT.equals(line.path("type").asText())) {
+                continue;
+            }
+            var info = line.path("rate_limit_info");
+            var status = info.path("status");
+            if (status.isTextual() && !RATE_LIMIT_ALLOWED.contains(status.asText())) {
+                return Optional.of(new RateLimitRefusal(status.asText(), info.path("rateLimitType").asText(""),
+                        resetsAt(info.path("resetsAt")), text));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * @param value a {@code resetsAt}
+     * @return an ISO instant for epoch seconds, the text of any other value, empty when there is none
+     */
+    static String resetsAt(JsonNode value) {
+        if (value.isIntegralNumber()) {
+            return Instant.ofEpochSecond(value.asLong()).toString();
+        }
+        return value.isMissingNode() || value.isNull() ? "" : value.asText();
+    }
+
+    /**
+     * The quota error in a worker's own error output, the rule {@value #HARNESS_ERROR_OUTPUT}: a line of its
+     * {@code stderr} that is not one of {@code pm-exec}'s own, or the error text of an error line of its structured
+     * output ({@link #harnessErrorText(String)}), that matches {@link #QUOTA_PATTERN}. A tool's input or result, the
+     * assistant's text and a file the worker read are never matched: the R4 large-work runs of 2026-10-23 were ended as
+     * quota errors because a repository file the worker read contained the word.
+     *
+     * @param stderr  what a worker wrote to {@code stderr}
+     * @param outputs its arrival-stamped output lines ({@code at}, {@code line})
+     * @return the first matching line of {@code stderr}, else the first matching error line of the output; empty when
+     *         none
+     */
+    public static Optional<String> quotaDetail(String stderr, List<JsonNode> outputs) {
+        return stderr.lines().filter(line -> !pmExecLine(line))
+                .filter(line -> QUOTA_PATTERN.matcher(line).find()).findFirst()
+                .or(() -> outputs.stream().map(line -> line.path("line").asText())
+                        .filter(line -> harnessErrorText(line).filter(text -> QUOTA_PATTERN.matcher(text).find())
+                                .isPresent())
+                        .findFirst());
+    }
+
+    /**
+     * The error text of one line of a harness's structured output, when the line is an error line of the harness
+     * itself; the shapes are those of the stored outputs of the earlier measurement:
+     * <ul>
+     * <li>Claude Code ({@code --output-format stream-json}): a {@code result} line with {@code is_error: true} or a
+     * subtype that starts with {@code error}; its text is {@code errors[]}, {@code result} and {@code error}. Its
+     * {@code api_error} and {@code error} events are not verified and are not matched; its {@code rate_limit_event}
+     * lines are no error.</li>
+     * <li>OpenCode ({@code --format json}): a line {@code {"type":"error",…,"error":{"type":…,"message":…}}}; its
+     * text is its {@code error}.</li>
+     * <li>Antigravity ({@code --output-format json}): its final object ({@code conversation_id}) with a textual
+     * {@code error}; its text is that {@code error}, never its {@code response}.</li>
+     * </ul>
+     *
+     * @param text one output line of a worker
+     * @return the error text of the line, empty when it is no error line of the harness
+     */
+    public static Optional<String> harnessErrorText(String text) {
+        JsonNode line;
+        try {
+            line = QuestionStub.JSON.readTree(text);
+        } catch (JsonProcessingException _) {
+            return Optional.empty();
+        }
+        if (line == null || !line.isObject()) {
+            return Optional.empty();
+        }
+        var type = line.path("type").asText("");
+        if ("result".equals(type) && (line.path("is_error").asBoolean()
+                || line.path("subtype").asText("").startsWith("error"))) {
+            var parts = new ArrayList<String>();
+            line.path("errors").forEach(error -> parts.add(error.isTextual() ? error.asText() : error.toString()));
+            for (var field : List.of("result", "error")) {
+                if (line.path(field).isTextual()) {
+                    parts.add(line.path(field).asText());
+                }
+            }
+            return Optional.of(String.join("\n", parts));
+        }
+        if ("error".equals(type) && line.has("error")) {
+            var error = line.path("error");
+            return Optional.of(error.isTextual() ? error.asText() : error.toString());
+        }
+        if (line.path("conversation_id").isTextual() && line.path("error").isTextual()) {
+            return Optional.of(line.path("error").asText());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * @return the first worker of this driver or of its siblings that ended early ({@link #earlyExit(Worker)}) and is
+     *         no voter, empty when none did; a voter that ended early is detected and logged here too, but does not
+     *         end the run ({@link #voterEarlyExits()})
+     * @throws IOException if the event log or a worker's output cannot be read
+     */
+    public Optional<EarlyExit> earlyExit() throws IOException {
+        return allEarlyExits().stream().filter(early -> !early.voter()).findFirst();
+    }
+
+    /**
+     * The voters of this driver and of its siblings that ended early: connected and exited without a single call to
+     * the stub. Such a voter does not end the run: the stub closes its vote task {@code lost} when its process exits,
+     * and the decision rule escalates the set with {@code role_unavailable} (Model Work § Decision Rule), so the
+     * driver answers it as the operator ({@link #awaitAnswer}); it is recorded as
+     * {@value #VOTER_EARLY_EXIT}.
+     *
+     * @return the voters that ended early, in the order they were started
+     * @throws IOException if the event log or a worker's output cannot be read
+     */
+    public List<EarlyExit> voterEarlyExits() throws IOException {
+        return allEarlyExits().stream().filter(EarlyExit::voter).toList();
+    }
+
+    private List<EarlyExit> allEarlyExits() throws IOException {
+        var found = new ArrayList<EarlyExit>();
+        for (var worker : workers) {
+            earlyExit(worker).ifPresent(found::add);
+        }
+        for (var sibling : siblings) {
+            found.addAll(sibling.allEarlyExits());
+        }
+        return found;
+    }
+
+    /**
+     * @param worker a worker
+     * @return whether it is a voter, the worker of a vote task ({@value QuestionStub#VOTE_PREFIX}...)
+     */
+    public static boolean voter(String worker) {
+        return worker.startsWith(QuestionStub.VOTE_PREFIX);
+    }
+
+    /**
+     * Whether a worker generation ended early: its process exited after its relay connected
+     * ({@value #CONNECTED}) without a single call to the stub ({@value #CALL}) of its own generation, no fault was
+     * injected into it, and no newer generation of the same worker was started. The test is per generation: a
+     * generation that called the stub, an asker among them, did not end early, whatever its worker did before or
+     * after. A continuation generation, one after a generation of the same worker that asked (a continuation reuses
+     * the asker's worker id), ends early so as well and is marked {@link EarlyExit#continuation()}: its run did ask,
+     * and the wait ends at once instead of at the run limit. A voter ends early so too and is marked
+     * {@link EarlyExit#voter()} ({@link #voterEarlyExits()}). A generation whose relay never connected failed to launch
+     * instead ({@link #launchFailure(Worker)}). The first detection is logged as the event {@code early_exit}, for a
+     * continuation generation as {@value #CONTINUATION_EARLY_EXIT}, for a voter as
+     * {@value #VOTER_EARLY_EXIT}.
+     *
+     * @param worker a worker
+     * @return its early exit, empty when it still runs or did not end early
+     * @throws IOException if the event log or the worker's output cannot be read
+     */
+    Optional<EarlyExit> earlyExit(Worker worker) throws IOException {
+        var key = worker.id() + "#" + worker.generation();
+        var known = earlyExits.get(key);
+        if (known != null) {
+            return Optional.of(known);
+        }
+        var superseded = family.stream().anyMatch(other -> other.id().equals(worker.id())
+                && other.generation() > worker.generation());
+        if (worker.process().isAlive() || superseded) {
+            return Optional.empty();
+        }
+        var found = earlyExit(jsonLinesSoFar(stub.events()), worker.id(), worker.generation(),
+                worker.process().exitValue(), earlyExitDetail(stderr(worker), jsonLinesSoFar(worker.output())));
+        if (found.isEmpty()) {
+            return found;
+        }
+        var early = found.get();
+        if (earlyExits.putIfAbsent(key, early) == null) {
+            var fields = identity(worker);
+            fields.put("exit", early.exit());
+            fields.put("detail", early.detail());
+            stub.event(early.outcome(), fields);
+        }
+        return Optional.of(earlyExits.get(key));
+    }
+
+    /**
+     * The rule of {@link #earlyExit(Worker)} over the stub log, for a generation whose process has exited and that no
+     * newer generation of its worker superseded: its relay connected ({@value #CONNECTED}), it made no call
+     * ({@value #CALL}) and no fault was injected into it ({@value #FAULT_INJECTED}). It is a continuation generation
+     * when a generation of the same worker before it asked ({@value #ASKED}), and a voter by its worker id
+     * ({@link #voter(String)}).
+     *
+     * @param events     the stub log
+     * @param worker     the worker
+     * @param generation its generation
+     * @param exit       the exit code of its process
+     * @param detail     its detail ({@link #earlyExitDetail(String, List)})
+     * @return its early exit, empty when it did not end early
+     */
+    static Optional<EarlyExit> earlyExit(List<JsonNode> events, String worker, int generation, int exit,
+            String detail) {
+        var own = new HashSet<String>();
+        var askedEarlier = false;
+        for (var event : events) {
+            if (matches(event, worker, generation)) {
+                own.add(event.path(EVENT).asText());
+            }
+            askedEarlier |= ASKED.equals(event.path(EVENT).asText()) && worker.equals(event.path(WORKER).asText())
+                    && event.path(GENERATION).asInt() < generation;
+        }
+        if (!own.contains(CONNECTED) || own.contains(CALL) || own.contains(FAULT_INJECTED)) {
+            return Optional.empty();
+        }
+        return Optional.of(new EarlyExit(worker, generation, exit, detail, askedEarlier, voter(worker)));
+    }
+
+    /**
+     * @param stderr  what a worker wrote to {@code stderr}
+     * @param outputs its arrival-stamped output lines
+     * @return the first line of {@code stderr} that is not a line of {@code pm-exec}'s own, else the last line of its
+     *         output, empty when it wrote neither
+     */
+    static String earlyExitDetail(String stderr, List<JsonNode> outputs) {
+        return stderr.lines().filter(line -> !line.isBlank() && !pmExecLine(line)).findFirst()
+                .orElseGet(() -> outputs.isEmpty() ? "" : outputs.getLast().path("line").asText());
+    }
+
+    /**
+     * @return the first worker of this driver or of its siblings that failed to launch, empty when none did
+     * @throws IOException          if the event log or a worker's output cannot be read
+     * @throws InterruptedException if interrupted while a worker is ended
+     */
+    public Optional<LaunchFailure> launchFailure() throws IOException, InterruptedException {
+        for (var worker : workers) {
+            var failure = launchFailure(worker);
+            if (failure.isPresent()) {
+                return failure;
+            }
+        }
+        for (var sibling : siblings) {
+            var failure = sibling.launchFailure();
+            if (failure.isPresent()) {
+                return failure;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a worker failed to launch: its process exited, or {@code pm-exec} reported an error line, before the
+     * stub saw its relay connect ({@value #CONNECTED}). A worker into which a fault was injected, or which the launch
+     * of a newer generation of its worker ended ({@value #SUPERSEDED_ENDED}), has not failed to launch. A worker that
+     * still runs after {@code pm-exec} reported an error is ended. The first detection is logged as the event
+     * {@code launch_failed}.
+     *
+     * @param worker a worker
+     * @return its launch failure, empty when it launched or still may
+     * @throws IOException          if the event log or the worker's output cannot be read
+     * @throws InterruptedException if interrupted while the worker is ended
+     */
+    Optional<LaunchFailure> launchFailure(Worker worker) throws IOException, InterruptedException {
+        var key = worker.id() + "#" + worker.generation();
+        var known = launchFailures.get(key);
+        if (known != null) {
+            return Optional.of(known);
+        }
+        var alive = worker.process().isAlive();
+        var reported = pmExecReported(stderr(worker), outputLines(worker.output()));
+        if (endedOnLaunch.contains(key)
+                || !launchFailed(jsonLinesSoFar(stub.events()), worker.id(), worker.generation(), alive, reported)) {
+            return Optional.empty();
+        }
+        if (alive) {
+            terminate(worker);
+        }
+        var failure = launchFailure(worker.id(), worker.generation(), worker.process().waitFor(), stderr(worker));
+        if (launchFailures.putIfAbsent(key, failure) == null) {
+            var fields = identity(worker);
+            fields.put("exit", failure.exit());
+            fields.put("stderr", failure.stderr());
+            fields.put("stderr_tail", failure.tail());
+            stub.event(LAUNCH_FAILED, fields);
+        }
+        return Optional.of(launchFailures.get(key));
+    }
+
+    /**
+     * The rule of {@link #launchFailure(Worker)} over the stub log, for a generation the launch of a newer one did not
+     * end: it has exited, or {@code pm-exec} reported an error, and the stub saw neither its relay connect
+     * ({@value #CONNECTED}) nor a fault injected into it ({@value #FAULT_INJECTED}).
+     *
+     * @param events     the stub log
+     * @param worker     the worker
+     * @param generation its generation
+     * @param alive      whether its process still runs
+     * @param reported   whether {@code pm-exec} reported an error ({@link #pmExecReported(String, List)})
+     * @return whether it failed to launch
+     */
+    static boolean launchFailed(List<JsonNode> events, String worker, int generation, boolean alive,
+            boolean reported) {
+        if (alive && !reported) {
+            return false;
+        }
+        return events.stream().noneMatch(event -> matches(event, worker, generation)
+                && Set.of(CONNECTED, FAULT_INJECTED).contains(event.path(EVENT).asText()));
+    }
+
+    /**
+     * @param stderr  what a worker wrote to {@code stderr}
+     * @param outputs its output lines, parsed ({@link #outputLines(Path)})
+     * @return whether {@code pm-exec} reported an error ({@code {"pm_exec":"error",...}}) on either
+     */
+    static boolean pmExecReported(String stderr, List<JsonNode> outputs) {
+        return stderr.lines().anyMatch(QuestionDriver::pmExecError)
+                || outputs.stream().anyMatch(line -> "error".equals(line.path("pm_exec").asText()));
+    }
+
+    /**
+     * Writes the worker's contract and the decision-envelope example every launch prompt starts with.
+     *
+     * @param role  the role
+     * @param extra what the fixture adds
+     * @return the prompt
+     */
+    public static String contract(String role, String extra) {
+        return """
+                You are a headless worker of the role %s of plan-marshall. Your work reaches the server only through \
+                the tools pm_wait, pm_state and pm_do of the MCP server plan-marshall. Never ask anyone in prose, \
+                never use a question tool of your host, and never end your turn with a question.
+
+                Every tool result is a representation of a task entity in TOON. Follow only the links it offers, with \
+                pm_do(plan_id, entity, link, args), naming args as the link's free parameters say. An offered task \
+                has the single link ack: follow it first. The facts of the task say what to do.
+
+                If the task cannot be decided without the operator's answer, follow the link ask (or ask:<task_id>) \
+                with args {"decision": <envelope>}: two to five options, exactly one recommended with your \
+                confidence (0 to 100) and a rationale naming the evidence, and the decision kind. %s Example:
+                %s
+                If no ask link is offered, decide on your own judgment and state it in your submission, or follow \
+                infeasible with your evidence. When the facts carry answers, the question is settled: apply the \
+                answer and never ask it again. When the representation says to call pm_wait, call it, and call it \
+                again on 'wait: again'. When it has no links and says to end your turn, end your turn.
+                %s""".formatted(role, EVIDENCE_RULE, ENVELOPE_EXAMPLE, extra);
+    }
+
+    /**
+     * An item of the envelope's evidence as the stub accepts it (the stub's envelope check: text that
+     * starts with {@code pm://}, at most 512 characters): the URI of the task entity of the plan.
+     */
+    public static final String EVIDENCE_EXAMPLE = "pm://" + QuestionStub.PLAN_ID + "/T-1";
+
+    /**
+     * The evidence rule of the contract: the stub refuses an ask whose evidence holds anything but {@code pm://} URIs
+     * with {@code invalid_link_args} ({@code every item must be a pm:// URI}).
+     */
+    public static final String EVIDENCE_RULE = "The envelope's evidence is a list of at most 20 pm:// URIs and nothing else "
+            + "(it may be empty): name the entity you work on as pm://<plan_id>/<entity>; a file name, a quote or a "
+            + "line of code is no evidence item and belongs into the description.";
+
+    /** The example of a decision envelope in the contract, with one evidence item ({@link #EVIDENCE_EXAMPLE}). */
+    static final String ENVELOPE_EXAMPLE = """
+            {"title":"Which reading of the contract","header":"The interface contract contradicts itself",\
+            "description":"The description and the examples of the function disagree; the implementation \
+            depends on which is meant.","evidence":["%s"],"blocks":"task","reversibility":"reversible","parts":[\
+            {"question_text":"Which behaviour should the function implement?","decision_kind":"interpretation",\
+            "answer_type":"one","options":[{"branch_key":"description","label":"Follow the description",\
+            "description":"Implement what the text says.","consequences":"The examples are wrong."},\
+            {"branch_key":"examples","label":"Follow the examples","description":"Implement what the examples \
+            show.","consequences":"The text is wrong."}],"recommendation":{"branch_key":"description",\
+            "confidence":60,"rationale":"The text states the intent; the examples look edited."},\
+            "own_words":true,"note":true,"delegation":false}]}""".formatted(EVIDENCE_EXAMPLE);
+
+    @Override
+    public void close() throws IOException {
+        IllegalStateException failure = null;
+        for (var worker : workers) {
+            try {
+                terminate(worker);
+            } catch (InterruptedException _) {
+                Thread.currentThread().interrupt();
+            } catch (IllegalStateException e) {
+                failure = failure == null ? e : failure;
+            }
+        }
+        if (failure != null) {
+            if (ownsStub) {
+                stub.close();
+            }
+            throw failure;
+        }
+        if (ownsStub) {
+            stub.close();
+        }
+    }
+
+    // --- launch ---
+
+    private static Launch withPrompt(Launch launch, String prompt) {
+        return new Launch(launch.worker(), launch.generation(), launch.role(), prompt, launch.resumable(),
+                launch.toolTimeout(), launch.workTools(), launch.sessionId());
+    }
+
+    /**
+     * Ends the older generations of a worker that still run before a newer generation is launched into their shared
+     * worker directory, as the server ends a fenced worker (Model Work § Ending a Worker), and logs each as
+     * {@value #SUPERSEDED_ENDED}. Without it an older OpenCode generation, fenced but still running, restarted its MCP
+     * server when the launch rewrote the directory's {@code opencode.json} and reached the stub with the newer
+     * generation's identity, so the stub attributed its calls to the newer generation (established on the Q4 smoke
+     * pass, 2026-10-22: run {@code Q4-claude-fresh-question_apply-answer_he-0-001-d799cea0}, whose generation 3
+     * connected twice).
+     *
+     * @param launch the newer generation's launch
+     * @throws IOException if interrupted while an older generation is ended
+     */
+    private void endOlderGenerations(Launch launch) throws IOException {
+        for (var older : family) {
+            if (older.id().equals(launch.worker()) && older.generation() < launch.generation()
+                    && older.process().isAlive()) {
+                endedOnLaunch.add(older.id() + "#" + older.generation());
+                var fields = identity(older);
+                fields.put("by", launch.generation());
+                stub.event(SUPERSEDED_ENDED, fields);
+                try {
+                    terminate(older);
+                } catch (InterruptedException _) {
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedIOException("interrupted while ending " + older.id() + " generation "
+                            + older.generation());
+                }
+            }
+        }
+    }
+
+    /** The event the driver logs when the launch of a newer generation ends an older one that still runs. */
+    static final String SUPERSEDED_ENDED = "superseded_ended";
+
+    private Worker launch(Launch launch) throws IOException {
+        endOlderGenerations(launch);
+        var host = settings.host();
+        var directory = Files.createDirectories(settings.workspace().resolve(launch.worker()));
+        var label = launch.worker() + "-g" + launch.generation();
+        var relayLog = settings.runDir().resolve("relay-" + label + ".jsonl");
+        var output = settings.runDir().resolve("output-" + label + ".jsonl");
+        var environment = workerEnvironment(launch, relayLog);
+        var command = new ArrayList<>(settings.exec());
+        if (LINUX) {
+            for (var path : writeSet(directory)) {
+                command.add("--write");
+                command.add(path.toString());
+            }
+        }
+        command.add("--");
+        command.addAll(harnessCommand(host, launch, directory, environment));
+        var builder = new ProcessBuilder(command).directory(directory.toFile())
+                .redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")))
+                .redirectError(stderrFile(settings.runDir(), launch.worker(), launch.generation()).toFile());
+        builder.environment().clear();
+        builder.environment().putAll(environment);
+        var process = builder.start();
+        var worker = new Worker(launch, host, process, directory, output, relayLog);
+        workers.add(worker);
+        family.add(worker);
+        Thread.ofPlatform().daemon().start(() -> stamp(process.getInputStream(), output));
+        process.onExit().thenRun(() -> exited(worker));
+        var fields = identity(worker);
+        fields.put("host", host.executable());
+        fields.put("model", String.valueOf(settings.model()));
+        fields.put("parallel", settings.parallel());
+        fields.put("pid", process.pid());
+        fields.put("resumed", launch.sessionId() != null);
+        fields.put("resumable", launch.resumable());
+        fields.put("tool_timeout_ms", launch.toolTimeout() == null ? -1 : launch.toolTimeout().toMillis());
+        stub.event("worker_started", fields);
+        return worker;
+    }
+
+    private void exited(Worker worker) {
+        var fields = identity(worker);
+        fields.put("exit", worker.process().exitValue());
+        stub.event("worker_exited", fields);
+        stub.workerExited(worker.id(), worker.generation(), worker.launch().resumable());
+    }
+
+    private Map<String, String> workerEnvironment(Launch launch, Path relayLog) throws IOException {
+        var environment = strippedEnvironment(System.getenv(), settings.workspace().resolve(launch.worker()));
+        environment.putAll(StubRelay.environment(stub.settings().socket(), launch.worker(), launch.generation(),
+                launch.role(), settings.host().executable(), relayLog));
+        if (settings.host() == Host.CLAUDE && launch.toolTimeout() != null) {
+            environment.put("MCP_TOOL_TIMEOUT", Long.toString(launch.toolTimeout().toMillis()));
+        }
+        if (settings.host() == Host.OPENCODE) {
+            applyOpenCodeDataHome(environment, settings.openCodeDataHome(),
+                    settings.workspace().resolve(launch.worker()));
+        }
+        return environment;
+    }
+
+    /**
+     * The environment a worker inherits: the driver's own without the markers of its host session
+     * ({@link #HOST_SESSION_PREFIXES}), so the harness does not take itself for a child of that session, and
+     * {@code PWD} set to the worker directory, from which OpenCode takes the project directory.
+     *
+     * @param inherited the driver's environment
+     * @param directory the worker directory
+     * @return the worker's environment, modifiable
+     */
+    static Map<String, String> strippedEnvironment(Map<String, String> inherited, Path directory) {
+        var environment = new LinkedHashMap<String, String>();
+        inherited.forEach((name, value) -> {
+            if (HOST_SESSION_PREFIXES.stream().noneMatch(name::startsWith)) {
+                environment.put(name, value);
+            }
+        });
+        environment.put("PWD", directory.toString());
+        return environment;
+    }
+
+    /**
+     * Sets OpenCode's data home in a worker's environment: on {@link OpenCodeDataHome#GLOBAL} the inherited
+     * {@code XDG_DATA_HOME} (or its absence) stays as it is; on {@link OpenCodeDataHome#WORKER} it is the worker's own
+     * ({@link #opencodeDataHome(Path)}).
+     *
+     * @param environment the worker's environment, changed in place
+     * @param home        the data home
+     * @param directory   the worker directory
+     * @throws IOException if the worker's data home cannot be created
+     */
+    static void applyOpenCodeDataHome(Map<String, String> environment, OpenCodeDataHome home, Path directory)
+            throws IOException {
+        if (home == OpenCodeDataHome.WORKER) {
+            environment.put("XDG_DATA_HOME", opencodeDataHome(directory).toString());
+        }
+    }
+
+    /**
+     * @param environment the environment the worker inherits
+     * @return OpenCode's directory in the operator's global data home: {@code $XDG_DATA_HOME/opencode}, else
+     *         {@code ~/.local/share/opencode}
+     */
+    static Path globalOpencodeData(Map<String, String> environment) {
+        var dataHome = environment.get("XDG_DATA_HOME");
+        return dataHome == null || dataHome.isBlank()
+                ? Path.of(System.getProperty("user.home"), ".local", "share", "opencode")
+                : Path.of(dataHome, "opencode");
+    }
+
+    /**
+     * The per-worker data home of OpenCode ({@code XDG_DATA_HOME}, {@link OpenCodeDataHome#WORKER}) with the operator's
+     * {@code auth.json} copied in; it
+     * is kept while the worker's session may be resumed and removed with the workspace. With {@code --standalone}
+     * OpenCode 2.1.2 keeps the worker's sessions in it ({@code opencode/opencode.db}) and resumes from it, but the copied
+     * login does not carry: {@code opencode models --standalone} lists only the free models of the provider
+     * {@code opencode} there, and a model of the login ({@code opencode/gpt-5.4-nano}, {@code opencode-go/...}) fails
+     * with {@code Model unavailable} (verified 2026-10-21).
+     *
+     * @param directory the worker directory
+     * @return the data home
+     * @throws IOException if it cannot be created
+     */
+    static Path opencodeDataHome(Path directory) throws IOException {
+        var dataHome = Files.createDirectories(directory.resolve("data"));
+        var login = Path.of(System.getProperty("user.home"), ".local/share/opencode/auth.json");
+        var target = Files.createDirectories(dataHome.resolve("opencode")).resolve("auth.json");
+        if (Files.isRegularFile(login) && !Files.exists(target)) {
+            Files.copy(login, target, StandardCopyOption.COPY_ATTRIBUTES);
+        }
+        return dataHome;
+    }
+
+    private List<Path> writeSet(Path directory) {
+        var home = Path.of(System.getProperty("user.home"));
+        var paths = new ArrayList<Path>();
+        paths.add(directory);
+        settings.host().stateDirs().stream().map(home::resolve).filter(Files::exists).forEach(paths::add);
+        if (settings.host() == Host.OPENCODE && settings.openCodeDataHome() == OpenCodeDataHome.GLOBAL) {
+            var global = globalOpencodeData(System.getenv());
+            if (Files.exists(global)) {
+                paths.add(global);
+            }
+        }
+        paths.add(Path.of("/tmp"));
+        paths.add(Path.of("/dev"));
+        return paths;
+    }
+
+    /**
+     * Writes the stub's MCP configuration of a launch where the host reads it ({@link Host#mcpConfig(Path)}) and
+     * composes the harness's command line ({@link Host#argv(Host.Invocation)}). Claude Code gets the stub's tools and
+     * the work tools as its allowed tools; OpenCode its {@code opencode.json} ({@link #opencodeConfig}); Antigravity
+     * the stub's server in the {@code mcpServers} format with the relay's identity in its {@code env}, a configuration
+     * below {@code plugins/<name>/} the {@code plugin.json} that makes it a workspace plugin, and all host tools.
+     */
+    private List<String> harnessCommand(Host host, Launch launch, Path directory, Map<String, String> environment)
+            throws IOException {
+        var relay = StubRelay.command();
+        var config = host.mcpConfig(directory);
+        var allowed = new ArrayList<String>();
+        switch (host) {
+            case CLAUDE -> {
+                Files.writeString(config, mcpServers(relay, Map.of()));
+                QuestionStub.TOOLS.forEach(tool -> allowed.add("mcp__" + QuestionStub.SERVER + "__" + tool));
+                allowed.addAll(launch.workTools());
+            }
+            case OPENCODE -> Files.writeString(config, opencodeConfig(relay, launch, environment));
+            case ANTIGRAVITY -> {
+                Files.createDirectories(config.getParent());
+                var relayEnvironment = new LinkedHashMap<String, String>();
+                environment.forEach((name, value) -> {
+                    if (name.startsWith("PM_Q_")) {
+                        relayEnvironment.put(name, value);
+                    }
+                });
+                Files.writeString(config, mcpServers(relay, relayEnvironment));
+                var pluginDirectory = config.getParent();
+                if (pluginDirectory.getParent() != null && "plugins".equals(pluginDirectory.getParent()
+                        .getFileName().toString())) {
+                    Files.writeString(pluginDirectory.resolve("plugin.json"), "{\"name\":\""
+                            + pluginDirectory.getFileName() + "\"}\n");
+                }
+                environment.put("PM_Q_HOST_TOOLS", "all");
+            }
+        }
+        return host.argv(new Host.Invocation(host.resolveExecutable(environment), launch.prompt(), settings.model(),
+                launch.sessionId(), launch.resumable(), config, allowed));
+    }
+
+    /**
+     * A session id that names no stored session, for the negative resume of R2: a UUID for Claude Code and Antigravity;
+     * for OpenCode an id of its own form ({@code ses_} and 26 characters), because OpenCode refuses any other at once
+     * ({@code Expected a string starting with "ses"}, exit 1), which is the unreadable id and not the missing one.
+     *
+     * @param host the host
+     * @return the id
+     */
+    public static String missingSessionId(Host host) {
+        if (host == Host.OPENCODE) {
+            var bytes = new byte[13];
+            RANDOM.nextBytes(bytes);
+            return "ses_" + HexFormat.of().formatHex(bytes);
+        }
+        return UUID.randomUUID().toString();
+    }
+
+    private static String mcpServers(List<String> relay, Map<String, String> environment)
+            throws JsonProcessingException {
+        var root = QuestionStub.JSON.createObjectNode();
+        var server = root.putObject("mcpServers").putObject(QuestionStub.SERVER);
+        server.put("type", "stdio");
+        server.put("command", relay.getFirst());
+        var args = server.putArray("args");
+        relay.subList(1, relay.size()).forEach(args::add);
+        if (!environment.isEmpty()) {
+            var env = server.putObject("env");
+            environment.forEach(env::put);
+        }
+        return QuestionStub.JSON.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+    }
+
+    /**
+     * The {@code opencode.json} of a worker directory: the stub's MCP server as a local server with the relay's
+     * identity in its {@code environment} (it reached the relay both with {@code --standalone} and through the
+     * background service, which does not start the server in the worker's environment), and the agent
+     * {@value Host#OPENCODE_AGENT} with {@value #OPENCODE_CODE_TOOL}, the stub's tools ({@code plan-marshall*}) and the
+     * work tools only; every other tool, the question tool among them, is denied.
+     *
+     * @param relay       the relay command line
+     * @param launch      the launch
+     * @param environment the worker's environment; its {@code PM_Q_} variables go into the server's environment
+     * @return the configuration
+     * @throws JsonProcessingException if it cannot be written
+     */
+    static String opencodeConfig(List<String> relay, Launch launch, Map<String, String> environment)
+            throws JsonProcessingException {
+        var root = QuestionStub.JSON.createObjectNode();
+        root.put("$schema", "https://opencode.ai/config.json");
+        var server = root.putObject("mcp").putObject(QuestionStub.SERVER);
+        server.put("type", "local");
+        var command = server.putArray("command");
+        relay.forEach(command::add);
+        server.put("enabled", true);
+        var serverEnvironment = server.putObject("environment");
+        environment.forEach((name, value) -> {
+            if (name.startsWith("PM_Q_")) {
+                serverEnvironment.put(name, value);
+            }
+        });
+        if (launch.toolTimeout() != null) {
+            server.put("timeout", launch.toolTimeout().toMillis());
+        }
+        var agent = root.putObject("agent").putObject(Host.OPENCODE_AGENT);
+        agent.put("description", "question-loop worker");
+        agent.put("mode", "primary");
+        var tools = agent.putObject("tools");
+        tools.put("*", false);
+        tools.put(OPENCODE_CODE_TOOL, true);
+        tools.put(QuestionStub.SERVER + "*", true);
+        launch.workTools().forEach(tool -> tools.put(tool, true));
+        return QuestionStub.JSON.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+    }
+
+    /**
+     * @return the {@code pm-exec} command line: {@code -Dpm.experiment.exec}, else the native binary of a checkout of
+     *         {@code pm-mcp-clients} beside this repository, else its JAR staged by {@code -Pintegration-tests}
+     */
+    public static List<String> resolveExec() {
+        var configured = System.getProperty("pm.experiment.exec");
+        if (configured != null) {
+            return List.of(configured);
+        }
+        var root = Path.of("").toAbsolutePath().getParent();
+        var nativeBinary = root.resolveSibling("pm-mcp-clients").resolve("pm-exec/target/pm-exec");
+        if (Files.isExecutable(nativeBinary)) {
+            return List.of(nativeBinary.toString());
+        }
+        var jar = Path.of("target", "e2e-jvm-lib", "pm-exec.jar").toAbsolutePath();
+        if (Files.isRegularFile(jar)) {
+            var java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+            return List.of(java, "--enable-native-access=ALL-UNNAMED", "-cp", jar.toString(),
+                    "de.planmarshall.exec.PmExec");
+        }
+        throw new IllegalStateException("pm-exec not found: set -Dpm.experiment.exec, build ../pm-mcp-clients "
+                + "natively, or stage the JVM layout with -Pintegration-tests");
+    }
+
+    // --- helpers ---
+
+    private void signal(Worker worker, String signal) {
+        try {
+            var process = new ProcessBuilder("kill", "-" + signal, Long.toString(worker.process().pid()))
+                    .redirectErrorStream(true).start();
+            process.getInputStream().readAllBytes();
+            process.waitFor(5, TimeUnit.SECONDS);
+        } catch (IOException e) {
+            throw new IllegalStateException("kill -" + signal + " failed", e);
+        } catch (InterruptedException _) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * @return {@code true} when the worker made no call for the silence limit (or exited), {@code false} when it
+     *         acknowledged the answer late, which on an informational host shows it alive
+     */
+    private boolean silentFor(Worker worker, Duration limit) throws IOException, InterruptedException {
+        var start = System.currentTimeMillis();
+        while (worker.process().isAlive()) {
+            var lastCall = 0L;
+            for (var event : jsonLinesSoFar(stub.events())) {
+                var name = event.path(EVENT).asText();
+                if (matches(event, worker) && "acknowledged".equals(name)
+                        && "answer".equals(event.path("kind").asText())) {
+                    return false;
+                }
+                if (CALL.equals(name) && matches(event, worker)) {
+                    lastCall = event.path("at").asLong();
+                }
+            }
+            var now = System.currentTimeMillis();
+            if (now - lastCall >= limit.toMillis()) {
+                return true;
+            }
+            if (now - start >= limit.toMillis() && lastCall > start) {
+                return false;
+            }
+            Thread.sleep(POLL); // NOSONAR java:S2925 - polls the stub log, no event to await
+        }
+        return true;
+    }
+
+    /** @return whether a line is {@code pm-exec}'s report of an error ({@code {"pm_exec":"error",...}}) */
+    static boolean pmExecError(String line) {
+        return "error".equals(pmExecStage(line));
+    }
+
+    /** @return whether a line is one of {@code pm-exec}'s own ({@code {"pm_exec":...}}), not the harness's */
+    static boolean pmExecLine(String line) {
+        return !pmExecStage(line).isEmpty();
+    }
+
+    private static String pmExecStage(String line) {
+        try {
+            var node = QuestionStub.JSON.readTree(line);
+            return node != null && node.path("pm_exec").isTextual() ? node.path("pm_exec").asText() : "";
+        } catch (JsonProcessingException _) {
+            return "";
+        }
+    }
+
+    /**
+     * The launch failure of a worker from what it wrote to {@code stderr}: the harness's own first line and last
+     * {@value #STDERR_TAIL} lines, without the lines {@code pm-exec} writes itself, so that the cause reaches the run
+     * record and not {@code pm-exec}'s {@code launched} line.
+     *
+     * @param worker     the worker id
+     * @param generation its generation
+     * @param exit       its exit code
+     * @param stderr     what it wrote to {@code stderr}
+     * @return the launch failure
+     */
+    static LaunchFailure launchFailure(String worker, int generation, int exit, String stderr) {
+        var lines = stderr.lines().filter(line -> !line.isBlank()).toList();
+        var harness = lines.stream().filter(line -> !pmExecLine(line)).toList();
+        var first = harness.stream().findFirst()
+                .or(() -> lines.stream().filter(QuestionDriver::pmExecError).findFirst())
+                .or(() -> lines.stream().findFirst()).orElse("");
+        return new LaunchFailure(worker, generation, exit, first,
+                List.copyOf(harness.subList(Math.max(0, harness.size() - STDERR_TAIL), harness.size())));
+    }
+
+    private static boolean matches(JsonNode event, Worker worker) {
+        return matches(event, worker.id(), worker.generation());
+    }
+
+    private static boolean matches(JsonNode event, String worker, int generation) {
+        return worker.equals(event.path(WORKER).asText()) && generation == event.path(GENERATION).asInt();
+    }
+
+    private static Map<String, Object> identity(Worker worker) {
+        var fields = new LinkedHashMap<String, Object>();
+        fields.put(WORKER, worker.id());
+        fields.put(GENERATION, worker.generation());
+        return fields;
+    }
+
+    /**
+     * Copies the worker's output line by line, each with its arrival time. Each stamped line goes to the file with its
+     * line break in a single write of an unbuffered stream, not in the chunks of a writer's buffer; a reader during the
+     * run still skips a line it meets unfinished ({@link #readJsonLinesSoFar}).
+     */
+    private static void stamp(InputStream stream, Path output) {
+        try (var reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
+             var writer = Files.newOutputStream(output, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+            for (var line = reader.readLine(); line != null; line = reader.readLine()) {
+                var node = QuestionStub.JSON.createObjectNode();
+                node.put("at", System.currentTimeMillis());
+                node.put("line", line);
+                writer.write((QuestionStub.JSON.writeValueAsString(node) + "\n").getBytes(StandardCharsets.UTF_8));
+                writer.flush();
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("worker output not recorded: " + output, e);
+        }
+    }
+
+    /**
+     * Read during the run: a stamped line still being written is skipped ({@link #readJsonLinesSoFar}).
+     *
+     * @param output an arrival-stamped output file
+     * @return its lines that are JSON, parsed
+     * @throws IOException if it cannot be read, or a stamped line before the last is no JSON
+     */
+    static List<JsonNode> outputLines(Path output) throws IOException {
+        var lines = new ArrayList<JsonNode>();
+        for (var stamped : jsonLinesSoFar(output)) {
+            try {
+                lines.add(QuestionStub.JSON.readTree(stamped.path("line").asText()));
+            } catch (JsonProcessingException _) {
+                // a line of the harness that is no JSON carries no figure
+            }
+        }
+        return lines;
+    }
+}
