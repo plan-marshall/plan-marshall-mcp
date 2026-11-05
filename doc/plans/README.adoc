@@ -164,6 +164,13 @@ The status of a package is `open`, `blocked`, `done` or `dropped`; a `dropped` r
 |`open`
 |`pm-mcp-clients` / `relay-session-mode-removal`
 |none: follows the naming of the documents
+
+|link:tool-schemas-single-source.adoc[`tool-schemas-single-source`]
+|The six tool input schemas of the specification and the `inputSchema` of the tool files as one statement: the differences between them reconciled, the spec blocks replaced by includes of the tool files
+|`open`
+|`pm-mcp-core` / `schema-files-foundation`
+|none: the way a specification states a schema (ADR 009 of `pm-mcp-core`)
+
 |===
 
 [#how]
