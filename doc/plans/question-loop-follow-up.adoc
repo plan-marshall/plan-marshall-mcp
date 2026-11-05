@@ -67,7 +67,7 @@ layout from `-Pintegration-tests` or a native `pm-exec`, and for R4 large work a
 
     ./mvnw test -pl pm-e2e -am -Dtest=QuestionLoopExperiment -Dsurefire.failIfNoSpecifiedTests=false \
       -Dpm.experiment.question=Q1 -Dpm.experiment.runs=3 -Dpm.experiment.fixtures=2 \
-      -Dpm.experiment.harnesses=opencode -Dpm.experiment.model.opencode=opencode-go/deepseek-v4.1-flash \
+      -Dpm.experiment.hosts=opencode -Dpm.experiment.model.opencode=opencode-go/deepseek-v4.1-flash \
       -Dpm.experiment.run-timeout=PT10M
 
 `runs.jsonl` is read per item; clear an item's records before the first invocation of a new pass. R4 runs as two
@@ -89,7 +89,7 @@ The package stays open until the part of PLAN-04 is done or recorded as moved to
 The measurement is decision-driven, not scale-driven: it runs only as much as the values it settles need (`headless.resumability`, the `questions` values of the shipped roles, the question bound). The revised scale, decided by the operator on 2026-10-28 before the first run (<<decisions>>), replaces the scale the original package specified:
 
 * _Base._ 3 runs per fixture, harness and form (warm and fresh), the scale of the smoke run, with the driver defects fixed, so that the mechanisms are confirmed and every figure has durable evidence.
-* _Criterion._ The rate thresholds of the original package (at least 95 % for Q1, Q2's asks, Q4, R1 and R2; at least 90 % for the second ask of Q5) are testable only at about 20 runs. They become "every run of the group passes". A group whose runs disagree (some pass, some fail) is extended to 10 runs and reported with its rate; a group whose runs all agree is not extended. A value is shipped only for a duration, bound or rule at which every run passed. The clauses that were already "every run" or "no run" (Q2's no-harness-tool and no-guess clauses, Q3, Q5's bound clause, Q6, Q7, R3) and R4's missing criterion are unchanged.
+* _Criterion._ The rate thresholds of the original package (at least 95 % for Q1, Q2's asks, Q4, R1 and R2; at least 90 % for the second ask of Q5) are testable only at about 20 runs. They become "every run of the group passes". A group whose runs disagree (some pass, some fail) is extended to 10 runs and reported with its rate; a group whose runs all agree is not extended. A value is shipped only for a duration, bound or rule at which every run passed. The clauses that were already "every run" or "no run" (Q2's no-harness-tool and no-guess clauses, Q3, Q5's bound clause, Q6, Q7, R3) and R4's missing criterion are unchanged by the scale revision; two of them changed later, by the decisions below: R3 (`CALL_CUT`, 2026-10-28) and Q6 (the criterion clarification of 2026-11-02).
 * _Q5, the question bound._ Sequential: the shipped `3` runs first; if no run reached the bound, `3` stays and the candidates `4` and `5` are not run; only where a run reached it, `4` runs, then `5`.
 * _R1 and R2, hold and resume._ Longest first: the cap (a 3,600 s hold; a resume after 1 h) runs first per harness; where every run passes, that duration is the harness's value and the shorter durations are not run; where one fails, the measurement descends through 30, 15 and 5 min until one passes. R2 stays at 1 h at most.
 * _Statement._ A verdict is stated with the number of runs behind it and the client version, never as "passed at the specified scale"; a rule of the form "no run reached the bound" is stated with the pooled count it rests on. The client version (the version each run's output names, or the version probe where it names none) and the model are recorded for every run and published with every value, so that a settled value carries the version range it was measured on.
@@ -97,7 +97,7 @@ The measurement is decision-driven, not scale-driven: it runs only as much as th
 [#decisions]
 == Decision Record
 
-The operator's decisions that bind the runs, recorded before the first measured run. No measured run starts before this record exists.
+The operator's decisions that bind the runs. The record was written before the first measured run, and no measured run started before it existed; the entries dated after that carry their own dates, and the last one says it came after the runs.
 
 [horizontal]
 2026-10-28:: *R3 `CALL_CUT`*: the criterion changes, so that a cut call the worker survives is not a lost continuation; the profile's `cut` setting stays (task 2). *Q4 reference form*: the item's reference form accepts `f(7) == [...]` as a match for the bare list (task 2). *Scale revision*: the scale and criteria of <<scale>>, for the reason that the harnesses change nearly daily, so a value measured over days is stale on arrival; the reason is not drawn from any run of the follow-up. *R2 at 24 hours*: not run; R2 stays at 1 h at most.
