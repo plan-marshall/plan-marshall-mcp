@@ -124,6 +124,12 @@
             <artifactId>cui-test-juli-logger</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- TestBases of the pm-runtime test-jar draws its data from Generators -->
+        <dependency>
+            <groupId>de.cuioss.test</groupId>
+            <artifactId>cui-test-generator</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
     <build>
         <plugins>
