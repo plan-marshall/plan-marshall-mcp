@@ -1,19 +1,8 @@
 {
-  "description": "List the vocabulary skills active for the project's enabled domains.",
+  "description": "List the vocabulary skills active for the enabled domains of the calling connection's project.",
   "inputSchema": {
     "type": "object",
-    "properties": {
-      "plan_id": {
-        "type": "string",
-        "pattern": "^([a-z0-9][a-z0-9-]{1,62}[a-z0-9]|NO_PLAN)$",
-        "description": "Plan scope used to resolve the project and its domain configuration, or the literal NO_PLAN for the workspace scope. Exactly one of plan_id or epic_id is required (server-enforced)."
-      },
-      "epic_id": {
-        "type": "string",
-        "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
-        "description": "Epic scope used to resolve the project and its domain configuration. Mutually exclusive with plan_id."
-      }
-    },
+    "properties": {},
     "additionalProperties": false
   }
 }

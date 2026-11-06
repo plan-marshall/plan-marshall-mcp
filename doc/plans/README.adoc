@@ -164,6 +164,13 @@ The status of a package is `open`, `blocked`, `done` or `dropped`; a `dropped` r
 |`open`
 |`pm-mcp-clients` / `relay-session-mode-removal`
 |none: follows the naming of the documents
+
+|`tool-schemas-single-source`
+|The six tool input schemas of the specification and the `inputSchema` of the tool files as one statement: the differences between them reconciled, the spec blocks of `pm_state`, `pm_do`, `pm_wait` and `pm_skill` replaced by includes of the tool files (`pm_build` and `pm_lsp` stay inline until their unbuilt properties exist)
+|`done`
+|nothing
+|none: the way a specification states a schema (ADR 009 of `pm-mcp-core`)
+
 |===
 
 [#how]

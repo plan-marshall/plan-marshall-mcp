@@ -1,5 +1,5 @@
 {
-  "description": "Return the current TOON hypermedia representation and valid links for a plan, epic, the project workspace, a task entity, or a bootstrap entry.",
+  "description": "Return the current TOON hypermedia representation and valid links of a task entity offered to you, or the view of its plan or epic.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -15,17 +15,17 @@
       "plan_id": {
         "type": "string",
         "pattern": "^([a-z0-9][a-z0-9-]{1,62}[a-z0-9]|NO_PLAN)$",
-        "description": "Identifier of the target plan scope, or the literal NO_PLAN for the project's workspace scope. Exactly one of plan_id or epic_id is required (server-enforced)."
+        "description": "Identifier of the target plan scope, or the literal NO_PLAN for the project's workspace scope, or for the machine scope where the worker's task is of the machine scope (resolved from the job record). Exactly one of plan_id or epic_id is required (server-enforced)."
       },
       "epic_id": {
         "type": "string",
         "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
-        "description": "Identifier of the target orchestrator epic scope. Mutually exclusive with plan_id."
+        "description": "Identifier of the target epic scope. Mutually exclusive with plan_id."
       },
       "entity": {
         "type": "string",
         "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
-        "description": "Optional entity identifier: a task entity as its offer names it, such as 'envelope-1', 'F-12', 'enrich-core', or a consultation_id (a worker may name only an entity offered to it, server-enforced); with plan_id NO_PLAN also the entry_id printed by 'pm-mcp enter'."
+        "description": "Optional entity identifier: a task entity as its offer names it, such as 'envelope-1', 'F-12', 'enrich-core', or a consultation_id (a worker may name only an entity offered to it, server-enforced); with plan_id NO_PLAN also an entry_id its offer names."
       }
     },
     "additionalProperties": false
