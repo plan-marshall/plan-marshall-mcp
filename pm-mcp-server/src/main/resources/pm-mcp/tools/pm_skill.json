@@ -1,5 +1,5 @@
 {
-  "description": "Retrieve a vocabulary skill document (SKILL.md) rendered for the active project and the calling client.",
+  "description": "Retrieve a vocabulary skill document (SKILL.md) rendered for the project and the client of the calling connection.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -13,16 +13,6 @@
         "type": "string",
         "pattern": "^[a-z0-9][a-z0-9_-]{0,127}$",
         "description": "Optional heading anchor from the document's section index; returns only that section."
-      },
-      "plan_id": {
-        "type": "string",
-        "pattern": "^([a-z0-9][a-z0-9-]{1,62}[a-z0-9]|NO_PLAN)$",
-        "description": "Plan scope used to resolve the project and its domain configuration, or the literal NO_PLAN for the workspace scope. Exactly one of plan_id or epic_id is required (server-enforced)."
-      },
-      "epic_id": {
-        "type": "string",
-        "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
-        "description": "Epic scope used to resolve the project and its domain configuration. Mutually exclusive with plan_id."
       }
     },
     "required": [
