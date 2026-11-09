@@ -129,6 +129,12 @@ The status of a package is `open`, `blocked`, `done` or `dropped`; a `dropped` r
 |nothing
 |Milestone 4
 
+|link:screening-items-detection-shapes.adoc[`screening-items-detection-shapes`]
+|Screener items in the shapes of an incident-response detection pack: an upstream result with a wrapper-tag block, a typosquatted package, a data-carrying URL template, chat-template tokens, each with its clean control
+|`open`
+|nothing
+|Milestone 7
+
 |link:assembly-enrolment-recovery.adoc[`assembly-enrolment-recovery`]
 |The per-project recovery of the daemon with its enrolment steps: the enrolment check and the owed enrolment audit records at every runtime start, and the background pass over unenrolled projects
 |`open`
