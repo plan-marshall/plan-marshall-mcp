@@ -130,7 +130,7 @@ The status of a package is `open`, `blocked`, `done` or `dropped`; a `dropped` r
 |Milestone 4
 
 |link:screening-items-detection-shapes.adoc[`screening-items-detection-shapes`]
-|Screener items in the shapes of an incident-response detection pack: an upstream result with a wrapper-tag block, a typosquatted package, a data-carrying URL template, chat-template tokens, each with its clean control
+|Screener items in the shapes of an incident-response detection pack and an agent evaluation suite: an upstream result with a wrapper-tag block, a typosquatted package, a data-carrying URL template, chat-template tokens, a Base64-encoded instruction, look-alike letters of another script, an instruction in a finding's suggestion, each with its clean control
 |`open`
 |nothing
 |Milestone 7

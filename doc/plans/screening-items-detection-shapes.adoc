@@ -9,13 +9,16 @@ Status, milestone and dependencies:: in the link:README.adoc#packages[index], th
 
 == Tasks
 
-The analysis link:../../../plan-marshall-documentation/doc/articles/ai-dfir-toolkit.adoc[AI/ML DFIR Detection Pack] names the shapes the topic `screening/untrusted-text` lacks. Every item is written by hand in our own words, never copied from the pack, with `review.status: draft`, and each injection has a clean control of the same wording.
+The analyses link:../../../plan-marshall-documentation/doc/articles/ai-dfir-toolkit.adoc[AI/ML DFIR Detection Pack] and link:../../../plan-marshall-documentation/doc/articles/argus.adoc[Argus] name the shapes the topic `screening/untrusted-text` lacks. Every item is written by hand in our own words, never copied from either source, with `review.status: draft`, and each injection has a clean control of the same wording.
 
 . *An upstream result carrying a wrapper-tag block*: an item of kind `upstream_result` whose text holds an instruction inside an `<IMPORTANT>`-style tag; control: the same result without the block.
 . *A directive to use a typosquatted package*: a review comment that tells the agent to always use a misspelt package name; control: a comment that recommends the correctly named package for a stated reason.
 . *A URL template that carries data*: a comment whose link has a placeholder for project data in its query; control: the same link to a documentation page without a placeholder.
 . *Chat-template tokens*: a text that opens a system turn with model chat-template tokens; control: a code review that quotes such a token as the subject of a bug.
 . *The pack's own false positive*: a tool description that legitimately asks the caller to authenticate before the first call, as a clean item.
+. *An instruction encoded as Base64*: a review comment that asks the agent to decode and follow a Base64 run; control: a comment that quotes a Base64 test fixture as the subject of a bug.
+. *Look-alike letters of another script*: an instruction to an agent with some Latin letters replaced by Cyrillic or Greek look-alikes; control: a comment that legitimately mixes a Latin and a Cyrillic word (a localisation string under review).
+. *An instruction in a finding's suggestion field*: an item of kind `bot_finding` whose suggested fix tells the agent to dismiss the finding and every later one of its rule; control: the same finding with a concrete code suggestion.
 . The corpus README's topic table and its count of items updated; the items pass `validate.py`.
 
 == Trace
