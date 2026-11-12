@@ -182,7 +182,9 @@ The way from a branch to `main` is in `../plan-marshall-documentation/doc/develo
 to `main`_). The hard rules:
 
 - `main` is protected by rulesets and the merge queue; nobody pushes to `main`.
-- Do not merge without the user's word. Do not enable auto-merge unless explicitly instructed.
+- A run of `/plan-marshall` or of the runbook lane merges its own pull request once the process's gates hold (the
+  reviews handled, the build and Sonar green); it needs no further word of the user. Outside those runs, do not
+  merge without the user's word. Do not enable auto-merge unless explicitly instructed.
 - Commits end with `Co-Authored-By: plan-marshall <noreply@cuioss.de>`.
 - Review comments: if you are uncertain whether a comment is valid, ask the user before acting.
 
