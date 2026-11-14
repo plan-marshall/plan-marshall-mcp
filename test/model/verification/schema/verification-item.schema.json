@@ -28,11 +28,13 @@
     "id": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)+$",
+      "maxLength": 256,
       "description": "<topic path>/<slug>; equals the file path below the corpus root without .json"
     },
     "topic": {
       "type": "string",
       "pattern": "^[a-z0-9-]+(/[a-z0-9-]+)*$",
+      "maxLength": 256,
       "description": "the directory of the item"
     },
     "role": {
@@ -89,7 +91,8 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^context/"
+            "pattern": "^context/",
+            "maxLength": 1024
           },
           "description": "corpus files the answering role must have besides question and facts (for example a project skill whose rule the answer follows), relative to the corpus root"
         }
@@ -210,6 +213,7 @@
             "repository": {
               "type": "string",
               "pattern": "^https://[^/?#@\\s]+(/[^?#\\s]*)?$",
+              "maxLength": 2048,
               "description": "the repository the case comes from: an absolute https URI without user, query or fragment, on any host"
             },
             "commit": {
@@ -252,6 +256,7 @@
               "repository": {
                 "type": "string",
                 "pattern": "^https://[^/?#@\\s]+(/[^?#\\s]*)?$",
+                "maxLength": 2048,
                 "description": "the repository of the real code: an absolute https URI without user, query or fragment, on any host"
               },
               "commit": {
