@@ -10,7 +10,7 @@ release:
   create-github-release: false
 
 maven-build:
-  java-versions: '["25","26"]'
+  java-versions: '["25","27"]'
   java-version: '25'
   enable-snapshot-deploy: false
   # The parent POM and, later, the library modules are resolved from the GitHub Packages registry of the
