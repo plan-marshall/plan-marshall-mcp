@@ -11,6 +11,7 @@ release:
 
 maven-build:
   java-versions: '["25","27"]'
+  skip-on-docs-only: false  # TEMPORARY: verification commit, removed before merge
   java-version: '25'
   enable-snapshot-deploy: false
   # The parent POM and, later, the library modules are resolved from the GitHub Packages registry of the
