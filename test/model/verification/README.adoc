@@ -181,7 +181,7 @@ A rubric item is graded by a judge model without tools that sees the question, t
 
 === Add items from real plans
 
-`PM-MCP` records every decision of a running plan with the facts the decider saw and the decision finally taken (the user's answer, or a later correction), and the operator verb `pm-operator decisions export --out <dir>` writes the judgment decisions as items of this format with `review.status: draft` (link:../../../../pm-mcp-core/doc/specification/model-work/11-decision-records.adoc#corpus-export[Model Work Specification, Corpus Export]). The export never writes into this directory and never sends anything anywhere. To take an exported item into the corpus:
+`PM-MCP` records every decision of a running plan with the facts the decider saw and the decision finally taken (the user's answer, or a later correction), and the operator verb `pm-operator decision-log export --out <dir>` writes the judgment decisions as items of this format with `review.status: draft` (link:../../../../pm-mcp-core/doc/specification/model-work/11-decision-records.adoc#corpus-export[Model Work Specification, Corpus Export]). The export never writes into this directory and never sends anything anywhere. To take an exported item into the corpus:
 
 . Read it in full: its `input.facts` carry the project's real code and records; remove what must not be kept, and keep untrusted text quoted.
 . Check the reference against `review.notes`: a user's answer or a correction is the operator's own decision; a decision a role or a quorum took alone is unconfirmed and needs the same review as a written item.

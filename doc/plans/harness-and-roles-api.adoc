@@ -16,7 +16,7 @@ Status, milestone and dependencies:: in the link:README.adoc#packages[index], th
 The starting set of the trace matrix of the project skill `traced-implementation` (link:../../../plan-marshall-documentation/doc/developer/project-setup.adoc#_planning_the_work[Planning the Work]); requirements, specification sections and watch documents are only referenced here.
 
 * Requirements: link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-1[PM-WORK-1], link:../../../plan-marshall-documentation/doc/requirements/16-model-work.adoc#PM-WORK-6[PM-WORK-6], link:../../../plan-marshall-documentation/doc/requirements/08-security.adoc#PM-SEC-3[PM-SEC-3]
-* Specification: link:../../../plan-marshall-documentation/doc/specification/cli-and-security/02-operator-channel.adoc[CLI & Security § Credentials & Operator]; link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc[Model Work § Roles & Configuration]
+* Specification: link:https://github.com/plan-marshall/pm-mcp-clients/blob/main/doc/specification/cli-and-security/02-operator-channel.adoc[CLI & Security § Credentials & Operator]; link:../../../pm-mcp-core/doc/specification/model-work/01-roles-and-configuration.adoc[Model Work § Roles & Configuration]
 * Watch: link:../../../plan-marshall-documentation/doc/implementation-watch/cli-and-security.adoc[CLI & Security]; link:../../../pm-mcp-core/doc/implementation-watch/model-work.adoc[Model Work]
 
 == Done When
