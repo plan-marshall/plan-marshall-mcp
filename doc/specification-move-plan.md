@@ -99,7 +99,12 @@ Sections of `plan-marshall-documentation` the move cuts, with the repository eac
      `doc-review` and `ingest-ideas` for the new home.
    - Extend `.claude/skills/doc-review/scripts/trace.py` so that links, anchors, watch backlinks, traceability and
      index counts resolve against the `plan-marshall-mcp` checkout beside it, as they do for `pm-mcp-core`.
-7. Update `CLAUDE.md` of this repository: the specifications of the daemon now live here.
+7. Update `CLAUDE.md` of this repository: the specifications of the daemon now live here. Retarget the links of this
+   repository's own documents (`doc/plans/`, `test/model/verification/`) that point at a moved section, for example
+   `doc/plans/protocol-filter-and-sessionless-tests.adoc` to Harness Protocol Forms at the Runtime.
+   In `pm-mcp-clients`, in a pull request beside this one, update the table of ADR 001 (the homes of the moved
+   sections and the sections recorded as shared, such as the runtime singleton and discovery) and retarget its links to
+   a moved anchor; the same for the ADR 007 of `pm-mcp-core` where it names the documentation repository as a home.
 8. Content check: every line of every moved document is found again in its new home. Link lines are compared after
    the link is rewritten.
 9. Run `trace.py`, plain and with `--with-plans`. It must report `BROKEN LINKS 0`, no undefined requirement or watch
