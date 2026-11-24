@@ -9,9 +9,11 @@ Status, milestone and dependencies:: in the link:README.adoc#packages[index], th
 
 == Tasks
 
-* The default workflow units as resources of the assembly.
-* `DefaultUnitInvariantTest` over them, the validation of every unit against the assembled primitive catalogue, and `StateCatalogueDriftTest` against the State Catalogue of the `pm-mcp-core` checkout (`doc/specification/state-catalogue/`) at a pinned revision.
-* A build check, added before the first unit: the JAR of `pm-mcp-server` is never deployed to the registry (the product delivers the binary `pm-mcpd` only), and the check fails when deployment is switched on for a module that carries `roles/`, `bundles/` or the skill corpus.
+Each task names the milestone it serves; a package that depends on this one names the task it needs.
+
+* The default workflow units as resources of the assembly (Milestone 3 for the first units, Milestones 7 to 10 for the units of each phase as its milestone delivers it, the unit `phase-sanity-check.pmwf` with Milestone 10).
+* `DefaultUnitInvariantTest` over them (Milestone 3, extended with every unit), the validation of every unit against the assembled primitive catalogue, and `StateCatalogueDriftTest` against the State Catalogue of the `pm-mcp-core` checkout (`doc/specification/state-catalogue/`) at a pinned revision.
+* A build check, added before the first unit (Milestone 3): the JAR of `pm-mcp-server` is never deployed to the registry (the product delivers the binary `pm-mcpd` only), and the check fails when deployment is switched on for a module that carries `roles/`, `bundles/` or the skill corpus.
 
 The content rules for the default units are in link:../../../plan-marshall-documentation/doc/specification/module-structure.adoc#model-facing-content[Module Structure § Model-Facing Content].
 
