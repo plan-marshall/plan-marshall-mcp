@@ -53,7 +53,7 @@ The `question/**` items are not stored here. The import of `core.role.corpus` (`
 |`triage/build` |triage-build (5), triage-ci (3) |8 |build and CI failures of real plans: fix, retry, accept, reject, suppress, or ask the operator
 |`triage/pr-comment` |triage-review |10 |real review comments on pull requests: fix, reply and resolve, or escalate
 |`triage/sonar` |triage-analysis |8 |real static-analysis findings: fix, suppress, accept, or ask the operator
-|`planning/replan` |replan |4 |a running plan whose situation changed (base moved, a reviewer's file limit, a broken dependency, a red baseline): the revised plan
+|`planning/replan` |replan |4 |a running plan whose situation changed (a merge conflict with the moved base, a reviewer's refusal for size, a broken dependency, a red baseline): the revised plan
 |`review/security` |review-security |4 |diffs with seeded security defects, one control without
 |`review/simplify` |review-simplify |4 |diffs with seeded needless complexity, one control without
 |`review/self-review` |review-requirement (4), review-code (4), self-review (4) |12 |four diffs with a requirement, each asked split (requirement: `review-requirement`; code: `review-code`) and combined (`self-review`, comparison items that grade no role)
@@ -188,7 +188,7 @@ A rubric item is graded by a judge model without tools that sees the question, t
 . Drop items tagged `evidence-incomplete` unless the facts still carry what the reference rests on.
 . Move the item to its topic directory under a slug of this corpus (its id must equal its path), run `validate.py`, and continue with the steps above.
 
-Exported items of questions are generic (`role: worker`) and land in `decision/question`; the other judgments land in the topic of their role (`decision/remediation`, `triage/pr-comment`, `planning/replan`, `decision/change-type`, `decision/gate`). Server-rule decisions are never items: `--calibration` writes them as calibration rows for the thresholds, outside the corpus.
+Exported items of questions are generic (`role: worker`) and land in `decision/question`; the other judgments land in the topic of their role (`decision/remediation`, `triage/pr-comment`, `planning/replan`, `decision/gate`). Server-rule decisions are never items: `--calibration` writes them as calibration rows for the thresholds, outside the corpus.
 
 === Add questions from plan-marshall runs
 

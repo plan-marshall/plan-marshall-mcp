@@ -11,7 +11,7 @@ Status, milestone and dependencies:: in the link:README.adoc#packages[index], th
 
 * A fixture harness through `pm-exec` and the worker relay: the worker faults, recycling, the start-failure guard, consultation, fencing, and a runtime crash with a leased task.
 * The continuation after a question with the fixture harness: hold, suspend and resume, the answer acknowledgement and its missing case, and every fallback reason (`question-loop-follow-up` measures the real harnesses).
-* The adversarial tests of a worker's confinement and binding.
+* The adversarial tests of a worker's confinement and binding, the write set per role class among them: a `writer` worker's write to the main checkout or to another plan's worktree refused, a `read_only` worker and a chat worker writing no path of the project.
 
 == Trace
 
